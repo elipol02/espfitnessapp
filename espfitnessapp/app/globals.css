@@ -1,0 +1,219 @@
+@import "tailwindcss";
+
+/* Tell Tailwind v4 where to scan for classes */
+@source "./**/*.{js,ts,jsx,tsx}";
+
+/* Dark Mode Only - ESP Fitness App Design System */
+:root {
+  /* Background Colors */
+  --background: #0a0a0a;
+  --surface: #1a1a1a;
+  --surface-elevated: #242424;
+  
+  /* Primary Colors */
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  
+  /* Semantic Colors */
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  
+  /* Text Colors */
+  --foreground: #f5f5f5;
+  --muted: #737373;
+  --muted-foreground: #a3a3a3;
+  
+  /* Workout Color Palette (type-agnostic) */
+  --workout-color-1: #06b6d4;  /* cyan */
+  --workout-color-2: #ef4444;  /* red */
+  --workout-color-3: #10b981;  /* emerald */
+  --workout-color-4: #a855f7;  /* purple */
+  --workout-color-5: #eab308;  /* yellow */
+  --workout-color-6: #ec4899;  /* pink */
+  --workout-color-7: #14b8a6;  /* teal */
+  --workout-color-8: #f97316;  /* orange */
+  --workout-color-9: #8b5cf6;  /* violet */
+  --workout-rest: #404040;     /* gray - for rest days */
+  
+  /* Border */
+  --border: #2a2a2a;
+  --border-focus: #3b82f6;
+  
+  /* Radius */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-border-focus: var(--border-focus);
+  
+  /* Workout Colors */
+  --color-workout-1: var(--workout-color-1);
+  --color-workout-2: var(--workout-color-2);
+  --color-workout-3: var(--workout-color-3);
+  --color-workout-4: var(--workout-color-4);
+  --color-workout-5: var(--workout-color-5);
+  --color-workout-6: var(--workout-color-6);
+  --color-workout-7: var(--workout-color-7);
+  --color-workout-8: var(--workout-color-8);
+  --color-workout-9: var(--workout-color-9);
+  --color-workout-rest: var(--workout-rest);
+  
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Prevent zoom on iOS when focusing inputs */
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.6;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+html, body {
+  height: 100%;
+}
+
+/* Base spacing utilities */
+.container {
+  width: 100%;
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+/* Card styles with better padding */
+.card {
+  background: var(--surface);
+  border-radius: var(--radius-xl);
+  padding: 1.5rem;
+}
+
+/* Input styles */
+input, textarea, select {
+  font-size: 16px; /* Prevent iOS zoom */
+}
+
+/* Custom scrollbar for dark mode */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+/* Focus styles for accessibility */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Button reset */
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+}
+
+/* Touch target minimum size helper */
+.touch-target {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { 
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to { 
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Safe area for mobile */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0);
+}
+
+/* Hide scrollbar but keep functionality */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}

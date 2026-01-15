@@ -27,50 +27,6 @@ export async function GET() {
       });
     }
 
-    // Calculate current streak
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const recentLogs = await prisma.workoutLog.findMany({
-      where: {
-        userId: session.user.id,
-        status: 'completed',
-      },
-      orderBy: { workoutDate: 'desc' },
-      take: 30,
-    });
-
-    let streak = 0;
-    const checkDate = new Date(today);
-
-    for (const log of recentLogs) {
-      const logDate = new Date(log.workoutDate);
-      logDate.setHours(0, 0, 0, 0);
-
-      const diffDays = Math.floor(
-        (checkDate.getTime() - logDate.getTime()) / (1000 * 60 * 60 * 24)
-      );
-
-      if (diffDays <= 1) {
-        streak++;
-        checkDate.setDate(checkDate.getDate() - 1);
-      } else {
-        break;
-      }
-    }
-
-    // Update streak if changed
-    if (streak !== stats.currentStreak) {
-      stats = await prisma.userStats.update({
-        where: { userId: session.user.id },
-        data: {
-          currentStreak: streak,
-          longestStreak: Math.max(streak, stats.longestStreak),
-          lastWorkout: recentLogs[0]?.workoutDate || stats.lastWorkout,
-        },
-      });
-    }
-
     return NextResponse.json({ success: true, data: stats });
   } catch (error) {
     console.error('Get stats error:', error);

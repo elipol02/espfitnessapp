@@ -3,6 +3,8 @@ import { prisma } from '@/app/lib/db';
 import { HomeContent } from './HomeContent';
 import { redirect } from 'next/navigation';
 
+export const dynamic = 'force-dynamic';
+
 async function getHomeData(userId: string) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -14,33 +16,14 @@ async function getHomeData(userId: string) {
       userId,
       status: 'active',
     },
-    select: {
-      id: true,
-      goal: true,
-      status: true,
-      startDate: true,
+    include: {
       workoutDays: {
-        select: {
-          id: true,
-          dayNumber: true,
-          dayName: true,
-          scheduledDate: true,
-          workoutType: true,
-          workoutColor: true,
-          isGenerated: true,
+        include: {
           exercises: {
             orderBy: { order: 'asc' },
-            select: {
-              id: true,
-              name: true,
-              sets: true,
-              reps: true,
-              restTime: true,
-              exerciseType: true,
-            },
           },
         },
-        orderBy: { scheduledDate: 'asc' },
+        orderBy: { dayNumber: 'asc' },
       },
     },
   });
@@ -54,7 +37,7 @@ async function getHomeData(userId: string) {
   }
 
   // Get today's workout day by matching scheduledDate - only if plan has started
-  const todayWorkout = planHasStarted && activePlan?.workoutDays.find((day) => {
+  const todayWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
     if (!day.scheduledDate) return false;
     const scheduledDate = new Date(day.scheduledDate);
     return (
@@ -91,11 +74,32 @@ async function getHomeData(userId: string) {
     },
   }) : null;
 
-  // Generate full 7-day week preview for current week based on scheduledDate
+  // Get workout logs for the current week
   const startOfWeek = new Date(today);
   startOfWeek.setDate(today.getDate() - today.getDay());
   startOfWeek.setHours(0, 0, 0, 0);
   
+  const endOfWeek = new Date(startOfWeek);
+  endOfWeek.setDate(startOfWeek.getDate() + 7);
+  
+  const weekLogs = activePlan ? await prisma.workoutLog.findMany({
+    where: {
+      userId,
+      planId: activePlan.id,
+      workoutDate: {
+        gte: startOfWeek,
+        lt: endOfWeek,
+      },
+    },
+    select: {
+      id: true,
+      dayId: true,
+      workoutDate: true,
+      status: true,
+    },
+  }) : [];
+
+  // Generate full 7-day week preview for current week based on scheduledDate
   const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const weekPreview = daysOfWeek.map((dayName, index) => {
     // Calculate the date for this day of the week
@@ -103,7 +107,7 @@ async function getHomeData(userId: string) {
     dayDate.setDate(startOfWeek.getDate() + index);
     
     // Find the workout scheduled for this specific date
-    const workoutDay = activePlan?.workoutDays.find((d) => {
+    const workoutDay = activePlan?.workoutDays.find((d: any) => {
       if (!d.scheduledDate) return false;
       const scheduledDate = new Date(d.scheduledDate);
       return (
@@ -113,6 +117,16 @@ async function getHomeData(userId: string) {
       );
     });
     
+    // Find if there's a log for this workout day on this date
+    const log = workoutDay ? weekLogs.find((l) => {
+      const logDate = new Date(l.workoutDate);
+      const dateMatches = 
+        logDate.getFullYear() === dayDate.getFullYear() &&
+        logDate.getMonth() === dayDate.getMonth() &&
+        logDate.getDate() === dayDate.getDate();
+      return dateMatches && l.dayId === workoutDay.id;
+    }) : null;
+    
     if (workoutDay) {
       return {
         id: workoutDay.id,
@@ -121,7 +135,11 @@ async function getHomeData(userId: string) {
         workoutType: workoutDay.workoutType,
         workoutColor: workoutDay.workoutColor,
         exerciseCount: workoutDay.exercises.length,
-        isGenerated: workoutDay.isGenerated,
+        isGenerated: (workoutDay as any).isGenerated,
+        logId: log?.id || null,
+        logStatus: log?.status || null,
+        scheduledDate: (workoutDay as any).scheduledDate?.toISOString() || null,
+        calculatedDate: dayDate.toISOString(),
       };
     } else {
       return {
@@ -132,9 +150,80 @@ async function getHomeData(userId: string) {
         workoutColor: '#404040',
         exerciseCount: 0,
         isGenerated: false,
+        logId: null,
+        logStatus: null,
+        scheduledDate: null,
+        calculatedDate: dayDate.toISOString(),
       };
     }
   });
+
+  // Calculate missed workout days and completed workouts
+  let daysMissed = 0;
+  let completedWorkouts = 0;
+  if (activePlan && planHasStarted) {
+    const startDate = new Date(activePlan.startDate!);
+    startDate.setHours(0, 0, 0, 0);
+
+    // Get all completed workout logs for this plan
+    const allCompletedLogs = await prisma.workoutLog.findMany({
+      where: {
+        userId,
+        planId: activePlan.id,
+        status: 'completed',
+      },
+      select: {
+        dayId: true,
+        workoutDate: true,
+      },
+    });
+
+    // Count total completed workouts
+    completedWorkouts = allCompletedLogs.length;
+
+    // Check each scheduled workout day
+    for (const workoutDay of activePlan.workoutDays) {
+      // Skip if no scheduled date or if it's a rest day
+      const dayScheduledDate = (workoutDay as any).scheduledDate;
+      if (!dayScheduledDate || workoutDay.workoutType.toLowerCase() === 'rest') {
+        continue;
+      }
+
+      const scheduledDate = new Date(dayScheduledDate);
+      scheduledDate.setHours(0, 0, 0, 0);
+
+      // Only count if the day is in the past (before today) and after plan start
+      if (scheduledDate < today && scheduledDate >= startDate) {
+        // Check if there's a completed log for this workout day on this date
+        const hasCompletedLog = allCompletedLogs.some((log) => {
+          const logDate = new Date(log.workoutDate);
+          logDate.setHours(0, 0, 0, 0);
+          return (
+            log.dayId === workoutDay.id &&
+            logDate.getFullYear() === scheduledDate.getFullYear() &&
+            logDate.getMonth() === scheduledDate.getMonth() &&
+            logDate.getDate() === scheduledDate.getDate()
+          );
+        });
+
+        if (!hasCompletedLog) {
+          daysMissed++;
+        }
+      }
+    }
+  }
+
+  // Calculate weeks remaining
+  let weeksRemaining = 0;
+  if (activePlan && planHasStarted && activePlan.startDate) {
+    const startDate = new Date(activePlan.startDate);
+    startDate.setHours(0, 0, 0, 0);
+    
+    const daysPassed = Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+    const weeksPassed = Math.floor(daysPassed / 7);
+    
+    weeksRemaining = Math.max(0, activePlan.weeksDuration - weeksPassed);
+  }
 
   return {
     user,
@@ -150,7 +239,7 @@ async function getHomeData(userId: string) {
       dayName: todayWorkout.dayName,
       workoutType: todayWorkout.workoutType,
       workoutColor: todayWorkout.workoutColor,
-      exercises: todayWorkout.exercises.map((e) => ({
+      exercises: todayWorkout.exercises.map((e: any) => ({
         id: e.id,
         name: e.name,
         sets: e.sets,
@@ -164,6 +253,9 @@ async function getHomeData(userId: string) {
       status: todayLog.status,
     } : null,
     weekPreview,
+    daysMissed,
+    completedWorkouts,
+    weeksRemaining,
   };
 }
 

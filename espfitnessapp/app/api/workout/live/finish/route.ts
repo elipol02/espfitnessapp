@@ -57,6 +57,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Workout not found' }, { status: 404 });
     }
 
+    // CRITICAL: Workout must have a valid date before it can be completed
+    if (!workoutLog.workoutDate) {
+      console.error('Cannot complete workout - workout log has no date:', workoutLogId);
+      return NextResponse.json({ success: false, error: 'Workout has no date' }, { status: 400 });
+    }
+
     // Check if the plan has started
     if (workoutLog.plan.startDate) {
       const startDate = new Date(workoutLog.plan.startDate);
@@ -79,84 +85,43 @@ export async function POST(request: NextRequest) {
       data: {
         status: 'completed',
         completedAt: completedDate,
-        workoutDate: workoutLog.workoutDate || completedDate,
+        // workoutDate is already validated above - no fallback allowed
         feedback: feedback || undefined,
       },
     });
 
-    // Update user stats
-    const userStats = await prisma.userStats.findUnique({
-      where: { userId: session.user.id },
-    });
-
-    if (userStats) {
-      // Calculate new streak
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      const lastWorkout = userStats.lastWorkout
-        ? new Date(userStats.lastWorkout)
-        : null;
-      
-      let newStreak = userStats.currentStreak;
-
-      if (lastWorkout) {
-        lastWorkout.setHours(0, 0, 0, 0);
-        const daysDiff = Math.floor(
-          (today.getTime() - lastWorkout.getTime()) / (1000 * 60 * 60 * 24)
-        );
-
-        if (daysDiff <= 1) {
-          newStreak += 1;
-        } else {
-          newStreak = 1; // Reset streak if more than 1 day gap
-        }
-      } else {
-        newStreak = 1;
-      }
-
-      await prisma.userStats.update({
-        where: { userId: session.user.id },
-        data: {
-          currentStreak: newStreak,
-          longestStreak: Math.max(newStreak, userStats.longestStreak),
-          lastWorkout: new Date(),
-        },
-      });
-    }
-
-    // Check if this workout type has exercise logs and a future occurrence
-    // Only create pending adjustment if there's actual exercise data to analyze
+    // Check if this workout type has exercise logs
+    // Create pending adjustment if there's actual exercise data to analyze (regardless of future workouts)
     const hasExerciseLogs = workoutLog.exerciseLogs && workoutLog.exerciseLogs.length > 0;
     const isNotRestDay = workoutLog.day.workoutType !== 'Rest';
     
     if (hasExerciseLogs && isNotRestDay) {
       // Check if there's a future occurrence of this workout type
+      // This is used by the AI to determine which workout to adjust
       const nextWorkout = await findNextWorkout(
         workoutLog.planId,
         workoutLog.day.workoutType,
-        new Date()
+        workoutLog.workoutDate // Already validated above
       );
 
-      if (nextWorkout) {
-        // Create pending adjustment for AI to process
-        const pendingAdjustment = await prisma.pendingAdjustment.create({
-          data: {
-            userId: session.user.id,
-            planId: workoutLog.planId,
-            workoutLogId: workoutLogId,
-            suggestions: [],
-            status: 'pending',
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-          },
-        });
+      // Create pending adjustment for AI to process
+      // We create this even if there's no next workout, as the user should still be able to analyze
+      const pendingAdjustment = await prisma.pendingAdjustment.create({
+        data: {
+          userId: session.user.id,
+          planId: workoutLog.planId,
+          workoutLogId: workoutLogId,
+          suggestions: [],
+          status: 'pending',
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
 
-        return NextResponse.json({
-          success: true,
-          redirectToChat: true,
-          pendingAdjustmentId: pendingAdjustment.id,
-        });
-      }
+      return NextResponse.json({
+        success: true,
+        redirectToChat: true,
+        pendingAdjustmentId: pendingAdjustment.id,
+      });
     }
 
     return NextResponse.json({ success: true });

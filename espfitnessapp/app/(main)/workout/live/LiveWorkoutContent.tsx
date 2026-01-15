@@ -27,6 +27,8 @@ interface Exercise {
   weightValue: number;
   restTime: number;
   exerciseType: string;
+  // Time-based fields
+  duration?: number; // Duration in minutes (for cardio_time, mobility_time)
   // Complex exercise type fields
   distance?: number;
   distanceUnit?: 'feet' | 'yards' | 'meters';
@@ -40,7 +42,7 @@ interface ExerciseLog {
   exerciseId: string;
   setsCompleted: number;
   repsPerSet: number[] | unknown;
-  weightUsed: number;
+  weightUsed: number[] | unknown;
 }
 
 interface WorkoutDay {
@@ -63,12 +65,22 @@ export function LiveWorkoutContent({
   exercises,
   existingLogs,
   userBodyweight,
+  workoutStatus,
+  pendingAdjustmentId,
+  hasAnalysis,
+  chatSessionId,
+  isPreview = false,
 }: {
   workoutLogId: string;
   workoutDay: WorkoutDay;
   exercises: Exercise[];
   existingLogs: ExerciseLog[];
   userBodyweight: number | null;
+  workoutStatus: string;
+  pendingAdjustmentId?: string | null;
+  hasAnalysis?: boolean;
+  chatSessionId?: string | null;
+  isPreview?: boolean;
 }) {
   const router = useRouter();
   
@@ -133,12 +145,18 @@ export function LiveWorkoutContent({
         return bodyweight ? Math.round(value * bodyweight) : 0;
       case '1RM':
         // For 1RM, we'd need the user's 1RM for this exercise
-        // For now, use value as a multiplier
+        // For now, use value as a multiplier (value should be a percentage like 0.8 for 80%)
         return Math.round(value * 100);
+      case 'ABSOLUTE':
+        return value;
       default:
+        // Default to absolute value
         return value;
     }
   }, []);
+
+  const [workoutCompleted, setWorkoutCompleted] = useState(workoutStatus === 'completed');
+  const [adjustmentIdForChat, setAdjustmentIdForChat] = useState<string | null>(pendingAdjustmentId || null);
 
   const finishWorkout = useCallback(async () => {
     if (saving) return;
@@ -157,11 +175,14 @@ export function LiveWorkoutContent({
       const result = await response.json();
 
       if (result.redirectToChat && result.pendingAdjustmentId) {
-        router.push(`/chat?postWorkout=true&adjustmentId=${result.pendingAdjustmentId}`);
+        // Don't navigate immediately - just set state to show button
+        setWorkoutCompleted(true);
+        setAdjustmentIdForChat(result.pendingAdjustmentId);
+        setSaving(false);
       } else {
+        // No analysis available, just go home
         router.push('/home');
       }
-      router.refresh();
     } catch (error) {
       console.error('Failed to finish workout:', error);
       setSaving(false);
@@ -173,9 +194,10 @@ export function LiveWorkoutContent({
     const setsMap = new Map<string, CompletedSet[]>();
     for (const log of existingLogs) {
       const repsArray = Array.isArray(log.repsPerSet) ? log.repsPerSet : [];
-      const sets: CompletedSet[] = repsArray.map((reps) => ({
+      const weightsArray = Array.isArray(log.weightUsed) ? log.weightUsed : [];
+      const sets: CompletedSet[] = repsArray.map((reps, index) => ({
         reps: Number(reps),
-        weight: log.weightUsed,
+        weight: Number(weightsArray[index] || 0),
       }));
       setsMap.set(log.exerciseId, sets);
     }
@@ -190,6 +212,13 @@ export function LiveWorkoutContent({
         currentExercise.weightValue,
         userBodyweight
       );
+      console.log('Setting weight for exercise:', {
+        name: currentExercise.name,
+        weightType: currentExercise.weightType,
+        weightValue: currentExercise.weightValue,
+        userBodyweight,
+        calculatedWeight: targetWeight
+      });
       setWeight(targetWeight);
       setReps(currentExercise.reps);
       setDistance(currentExercise.distance || 0);
@@ -311,7 +340,8 @@ export function LiveWorkoutContent({
     if (emomTimer <= 0) {
       haptic('medium');
       const nextRound = emomRound + 1;
-      if (nextRound >= currentExercise.sets) {
+      const totalRounds = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets;
+      if (nextRound >= totalRounds) {
         // All rounds complete
         setEmomRunning(false);
         setEmomTimer(null);
@@ -366,21 +396,25 @@ export function LiveWorkoutContent({
     return () => clearInterval(interval);
   }, [tabataTimer, tabataRunning, tabataPhase, tabataRound, currentExercise]);
 
-  // Auto-finish workout when all exercises are complete
+  // Auto-finish workout when all exercises are complete (only for in_progress workouts)
   useEffect(() => {
+    // Skip auto-finish if workout is already completed
+    if (workoutCompleted) return;
+
     const allComplete = exercises.every((exercise) => {
       const sets = completedSets.get(exercise.id) || [];
-      const isComplex = ['distance', 'interval', 'amrap', 'emom', 'tabata'].includes(exercise.exerciseType);
-      // For complex types, just check if there's any logged data
-      // For standard types, check if all sets are complete
-      return isComplex ? sets.length > 0 : sets.length >= exercise.sets;
+      // Single-completion exercises: interval, amrap, emom, tabata
+      const isSingleCompletion = ['interval', 'amrap', 'emom', 'tabata'].includes(exercise.exerciseType);
+      // For single-completion types, just check if there's any logged data
+      // For all other types (including distance), check if all sets are complete
+      return isSingleCompletion ? sets.length > 0 : sets.length >= exercise.sets;
     });
 
     if (allComplete && exercises.length > 0 && !saving) {
       // Automatically finish workout without modal
       finishWorkout();
     }
-  }, [completedSets, exercises, saving, finishWorkout]);
+  }, [completedSets, exercises, saving, finishWorkout, workoutCompleted]);
 
   const currentSets = completedSets.get(currentExercise?.id) || [];
   const setsRemaining = currentExercise ? currentExercise.sets - currentSets.length : 0;
@@ -392,10 +426,12 @@ export function LiveWorkoutContent({
   const isEmom = exerciseType === 'emom';
   const isTabata = exerciseType === 'tabata';
   const isTempo = exerciseType === 'tempo';
-  const isComplexType = isDistanceBased || isIntervalBased || isAmrap || isEmom || isTabata;
+  // Only interval, amrap, emom, and tabata are single-completion exercises
+  const isSingleCompletionType = isIntervalBased || isAmrap || isEmom || isTabata;
 
-  // For complex types, we track completion differently
-  const isExerciseComplete = isComplexType 
+  // For single-completion types, just check if there's any data
+  // For all other types (including distance and time-based), check if all sets are complete
+  const isExerciseComplete = isSingleCompletionType 
     ? currentSets.length > 0 
     : currentSets.length >= (currentExercise?.sets || 0);
 
@@ -406,9 +442,9 @@ export function LiveWorkoutContent({
     switch (exerciseType) {
       case 'cardio_time':
       case 'mobility_time':
-        return `Target: ${currentExercise.reps} min`;
+        return `Target: ${currentExercise.duration || currentExercise.reps} min`;
       case 'distance':
-        return `Target: ${currentExercise.sets} × ${currentExercise.distance} ${currentExercise.distanceUnit || 'feet'}`;
+        return `Target: ${currentExercise.sets} × ${currentExercise.distance || 0} ${currentExercise.distanceUnit || 'feet'}`;
       case 'interval':
         if (currentExercise.intervals) {
           const { rounds, phases } = currentExercise.intervals;
@@ -418,11 +454,12 @@ export function LiveWorkoutContent({
         return 'Interval training';
       case 'amrap':
         const timeCap = currentExercise.timeCap || 600;
-        return `AMRAP ${Math.floor(timeCap / 60)} minutes`;
+        return `AMRAP ${Math.floor(timeCap / 60)} min • ${currentExercise.reps} reps/round`;
       case 'emom':
-        return `EMOM: ${currentExercise.reps} reps every minute × ${currentExercise.sets} minutes`;
+        const emomMinutes = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : 10;
+        return `EMOM ${emomMinutes} min: ${currentExercise.reps} reps/min`;
       case 'tabata':
-        return `Tabata: ${currentExercise.sets} rounds (20s work / 10s rest)`;
+        return `Tabata: ${currentExercise.sets} rounds (20s work / 10s rest) • ${currentExercise.reps} reps/round`;
       case 'tempo':
         return `Target: ${currentExercise.sets} × ${currentExercise.reps} @ tempo ${currentExercise.tempo}`;
       default:
@@ -432,21 +469,23 @@ export function LiveWorkoutContent({
 
   const startCardioTimer = () => {
     if (!currentExercise) return;
-    const durationSeconds = currentExercise.reps * 60; // reps is in minutes
+    const durationMinutes = currentExercise.duration || currentExercise.reps; // Use duration field, fall back to reps
+    const durationSeconds = durationMinutes * 60;
     setCardioTimer(durationSeconds);
     setCardioStartTime(new Date());
   };
 
   const completeTimeBasedExercise = async () => {
-    if (!currentExercise) return;
+    if (!currentExercise || isPreview) return;
 
     haptic('light');
 
     // Log as a single "set" with the time completed
     const actualMinutes = cardioStartTime 
       ? Math.round((Date.now() - cardioStartTime.getTime()) / 60000)
-      : currentExercise.reps;
+      : (currentExercise.duration || currentExercise.reps);
     
+    const actualSeconds = actualMinutes * 60;
     const newSets = [{ reps: actualMinutes, weight: 0 }];
     const newMap = new Map(completedSets);
     newMap.set(currentExercise.id, newSets);
@@ -461,6 +500,7 @@ export function LiveWorkoutContent({
           workoutLogId,
           exerciseId: currentExercise.id,
           sets: newSets,
+          duration: actualSeconds, // Store duration in seconds
         }),
       });
     } catch (error) {
@@ -474,7 +514,7 @@ export function LiveWorkoutContent({
 
   // Distance-based exercise completion
   const logDistanceSet = async () => {
-    if (!currentExercise) return;
+    if (!currentExercise || isPreview) return;
 
     haptic('light');
 
@@ -491,7 +531,8 @@ export function LiveWorkoutContent({
         body: JSON.stringify({
           workoutLogId,
           exerciseId: currentExercise.id,
-          sets: newSets,
+          sets: newSets.map(s => ({ reps: s.reps, weight: s.weight })), // Strip distance from sets
+          distance: distance, // Send distance as separate field
         }),
       });
     } catch (error) {
@@ -507,7 +548,7 @@ export function LiveWorkoutContent({
 
   // Interval exercise completion
   const completeIntervalExercise = async () => {
-    if (!currentExercise) return;
+    if (!currentExercise || isPreview) return;
 
     haptic('light');
 
@@ -515,7 +556,7 @@ export function LiveWorkoutContent({
       ? currentExercise.intervals.rounds * currentExercise.intervals.phases.reduce((sum, p) => sum + p.duration, 0)
       : 0;
     
-    const newSets = [{ reps: 1, weight: 0, time: totalDuration }];
+    const newSets = [{ reps: 1, weight, time: totalDuration }];
     const newMap = new Map(completedSets);
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
@@ -546,11 +587,11 @@ export function LiveWorkoutContent({
 
   // AMRAP exercise completion
   const completeAmrapExercise = async () => {
-    if (!currentExercise) return;
+    if (!currentExercise || isPreview) return;
 
     haptic('light');
 
-    const newSets = [{ reps: amrapReps, weight: 0 }];
+    const newSets = [{ reps: amrapReps, weight }];
     const newMap = new Map(completedSets);
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
@@ -580,11 +621,12 @@ export function LiveWorkoutContent({
 
   // EMOM exercise completion
   const completeEmomExercise = async () => {
-    if (!currentExercise) return;
+    if (!currentExercise || isPreview) return;
 
     haptic('light');
 
-    const newSets = [{ reps: currentExercise.sets, weight: 0 }];
+    const totalRounds = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets;
+    const newSets = [{ reps: totalRounds, weight }];
     const newMap = new Map(completedSets);
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
@@ -613,11 +655,11 @@ export function LiveWorkoutContent({
 
   // Tabata exercise completion
   const completeTabataExercise = async () => {
-    if (!currentExercise) return;
+    if (!currentExercise || isPreview) return;
 
     haptic('light');
 
-    const newSets = [{ reps: currentExercise.sets, weight: 0 }];
+    const newSets = [{ reps: currentExercise.sets, weight }];
     const newMap = new Map(completedSets);
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
@@ -646,7 +688,7 @@ export function LiveWorkoutContent({
   };
 
   const logSet = async () => {
-    if (!currentExercise) return;
+    if (!currentExercise || isPreview) return;
 
     haptic('light');
 
@@ -721,8 +763,9 @@ export function LiveWorkoutContent({
         <div className="mt-3 flex gap-2 overflow-x-auto scrollbar-hide">
           {exercises.map((exercise, index) => {
             const sets = completedSets.get(exercise.id) || [];
-            const isComplex = ['distance', 'interval', 'amrap', 'emom', 'tabata'].includes(exercise.exerciseType);
-            const isComplete = isComplex ? sets.length > 0 : sets.length >= exercise.sets;
+            // Only interval, amrap, emom, tabata are single-completion exercises
+            const isSingleCompletion = ['interval', 'amrap', 'emom', 'tabata'].includes(exercise.exerciseType);
+            const isComplete = isSingleCompletion ? sets.length > 0 : sets.length >= exercise.sets;
             const isCurrent = index === currentExerciseIndex;
             
             return (
@@ -752,6 +795,15 @@ export function LiveWorkoutContent({
         </div>
       </div>
 
+      {/* Preview Mode Banner */}
+      {isPreview && (
+        <div className="flex-shrink-0 bg-primary/10 border-b border-primary/20 px-4 py-3">
+          <p className="text-center text-sm text-primary font-medium">
+            Preview Mode - This workout cannot be logged yet
+          </p>
+        </div>
+      )}
+
       {/* Main Content */}
       <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6">
         {/* Exercise Name */}
@@ -763,6 +815,23 @@ export function LiveWorkoutContent({
               Tempo: {currentExercise.tempo.split('-').join('s - ')}s
             </p>
           )}
+          {/* Show weight type info for BW and 1RM exercises */}
+          {currentExercise.weightType === 'BW' && currentExercise.weightValue > 0 && (
+            <p className="text-xs text-muted-foreground mt-1">
+              {Math.round(currentExercise.weightValue * 100)}% of bodyweight
+              {userBodyweight ? ` (${userBodyweight} lbs)` : ' (bodyweight not set)'}
+            </p>
+          )}
+          {currentExercise.weightType === '1RM' && (
+            <p className="text-xs text-muted-foreground mt-1">
+              {Math.round(currentExercise.weightValue * 100)}% of 1RM
+            </p>
+          )}
+          {currentExercise.weightType === 'BW' && !userBodyweight && (
+            <p className="text-xs text-yellow-500 mt-1">
+              ⚠️ Set your bodyweight in profile for accurate weight calculation
+            </p>
+          )}
         </div>
 
         {/* Completed Sets */}
@@ -772,10 +841,10 @@ export function LiveWorkoutContent({
               const getSetDisplay = () => {
                 if (isTimeBased) return `${set.reps} min`;
                 if (isDistanceBased) return `${set.distance} ${currentExercise.distanceUnit || 'feet'} @ ${set.weight} lbs`;
-                if (isIntervalBased) return `${Math.floor((set.time || 0) / 60)} min completed`;
-                if (isAmrap) return `${set.reps} reps/rounds`;
-                if (isEmom) return `${set.reps} rounds completed`;
-                if (isTabata) return `${set.reps} rounds completed`;
+                if (isIntervalBased) return set.weight > 0 ? `${Math.floor((set.time || 0) / 60)} min @ ${set.weight} lbs` : `${Math.floor((set.time || 0) / 60)} min completed`;
+                if (isAmrap) return set.weight > 0 ? `${set.reps} rounds @ ${set.weight} lbs` : `${set.reps} rounds completed`;
+                if (isEmom) return set.weight > 0 ? `${set.reps} rounds @ ${set.weight} lbs` : `${set.reps} rounds completed`;
+                if (isTabata) return set.weight > 0 ? `${set.reps} rounds @ ${set.weight} lbs` : `${set.reps} rounds completed`;
                 return `${set.weight} lbs × ${set.reps}`;
               };
 
@@ -785,18 +854,18 @@ export function LiveWorkoutContent({
               };
 
               return (
-                <div
-                  key={i}
-                  className="flex items-center justify-between p-3 bg-surface rounded-lg"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
-                      <Check size={16} className="text-success" />
-                    </div>
-                    <span className="font-medium text-foreground">{getSetLabel()}</span>
+              <div
+                key={i}
+                className="flex items-center justify-between p-3 bg-surface rounded-lg"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+                    <Check size={16} className="text-success" />
                   </div>
-                  <span className="text-muted-foreground">{getSetDisplay()}</span>
+                    <span className="font-medium text-foreground">{getSetLabel()}</span>
                 </div>
+                  <span className="text-muted-foreground">{getSetDisplay()}</span>
+              </div>
               );
             })}
           </div>
@@ -831,8 +900,8 @@ export function LiveWorkoutContent({
                     <div className="text-center">
                       <p className="text-sm text-muted-foreground">Ready to start</p>
                     </div>
-                    <Button onClick={startCardioTimer} fullWidth size="lg">
-                      Start Timer
+                    <Button onClick={startCardioTimer} fullWidth size="lg" disabled={isPreview}>
+                      {isPreview ? 'Preview Only' : 'Start Timer'}
                     </Button>
                   </>
                 ) : (
@@ -844,8 +913,8 @@ export function LiveWorkoutContent({
                       </div>
                       <p className="text-5xl font-bold text-foreground">{formatTime(cardioTimer)}</p>
                     </div>
-                    <Button onClick={completeTimeBasedExercise} fullWidth size="lg">
-                      Complete
+                    <Button onClick={completeTimeBasedExercise} fullWidth size="lg" disabled={isPreview}>
+                      {isPreview ? 'Preview Only' : 'Complete'}
                     </Button>
                   </>
                 )}
@@ -913,8 +982,8 @@ export function LiveWorkoutContent({
                   </div>
                 )}
 
-                <Button onClick={logDistanceSet} fullWidth size="lg">
-                  Log Set
+                <Button onClick={logDistanceSet} fullWidth size="lg" disabled={isPreview}>
+                  {isPreview ? 'Preview Only' : 'Log Set'}
                 </Button>
               </>
             ) : isIntervalBased ? (
@@ -939,12 +1008,42 @@ export function LiveWorkoutContent({
                         </div>
                       )}
                     </div>
-                    <Button onClick={startInterval} fullWidth size="lg">
+
+                    {/* Weight Input (if exercise has weight) */}
+                    {currentExercise.weightValue > 0 && (
+                      <div className="space-y-2">
+                        <label className="text-sm text-muted-foreground text-center block">
+                          Weight (lbs)
+                        </label>
+                        <div className="flex items-center justify-center gap-4">
+                          <button
+                            onClick={() => setWeight(Math.max(0, weight - 5))}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Minus size={20} />
+                          </button>
+                          <input
+                            type="number"
+                            value={weight}
+                            onChange={(e) => setWeight(Number(e.target.value))}
+                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
+                          />
+                          <button
+                            onClick={() => setWeight(weight + 5)}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Plus size={20} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <Button onClick={startInterval} fullWidth size="lg" disabled={isPreview}>
                       <Play size={20} className="mr-2" />
-                      Start Intervals
+                      {isPreview ? 'Preview Only' : 'Start Intervals'}
                     </Button>
-                  </>
-                ) : (
+              </>
+            ) : (
                   <>
                     <div className="text-center space-y-3">
                       <p className="text-sm text-muted-foreground">
@@ -985,12 +1084,42 @@ export function LiveWorkoutContent({
                 {!amrapRunning && amrapTimer === null ? (
                   <>
                     <div className="text-center">
-                      <p className="text-sm text-muted-foreground">As Many Reps/Rounds As Possible</p>
-                      <p className="text-lg text-foreground mt-1">{formatTime(currentExercise.timeCap || 600)}</p>
+                      <p className="text-sm text-muted-foreground">AMRAP: As Many Rounds As Possible</p>
+                      <p className="text-sm text-muted-foreground">{currentExercise.reps} reps/round × {formatTime(currentExercise.timeCap || 600)}</p>
                     </div>
-                    <Button onClick={startAmrap} fullWidth size="lg">
+
+                    {/* Weight Input (if exercise has weight) */}
+                    {currentExercise.weightValue > 0 && (
+                      <div className="space-y-2">
+                        <label className="text-sm text-muted-foreground text-center block">
+                          Weight (lbs)
+                        </label>
+                        <div className="flex items-center justify-center gap-4">
+                          <button
+                            onClick={() => setWeight(Math.max(0, weight - 5))}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Minus size={20} />
+                          </button>
+                          <input
+                            type="number"
+                            value={weight}
+                            onChange={(e) => setWeight(Number(e.target.value))}
+                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
+                          />
+                          <button
+                            onClick={() => setWeight(weight + 5)}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Plus size={20} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <Button onClick={startAmrap} fullWidth size="lg" disabled={isPreview}>
                       <Play size={20} className="mr-2" />
-                      Start AMRAP
+                      {isPreview ? 'Preview Only' : 'Start Timer'}
                     </Button>
                   </>
                 ) : (
@@ -1003,10 +1132,10 @@ export function LiveWorkoutContent({
                       <p className="text-5xl font-bold text-foreground">{formatTime(amrapTimer || 0)}</p>
                     </div>
 
-                    {/* Rep Counter */}
+                    {/* Round Counter */}
                     <div className="space-y-2">
                       <label className="text-sm text-muted-foreground text-center block">
-                        Reps/Rounds Completed
+                        Rounds Completed
                       </label>
                       <div className="flex items-center justify-center gap-4">
                         <button
@@ -1040,27 +1169,55 @@ export function LiveWorkoutContent({
                 {!emomRunning && emomTimer === null ? (
                   <>
                     <div className="text-center space-y-2">
-                      <p className="text-sm text-muted-foreground">Every Minute On the Minute</p>
-                      <p className="text-lg text-foreground">{currentExercise.reps} reps at the start of each minute</p>
-                      <p className="text-sm text-muted-foreground">{currentExercise.sets} minutes total</p>
+                      <p className="text-sm text-muted-foreground">EMOM: Every Minute On the Minute</p>
+                      <p className="text-sm text-muted-foreground">{currentExercise.reps} reps/min × {currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets} minutes</p>
                     </div>
-                    <Button onClick={startEmom} fullWidth size="lg">
+
+                    {/* Weight Input (if exercise has weight) */}
+                    {currentExercise.weightValue > 0 && (
+                      <div className="space-y-2">
+                        <label className="text-sm text-muted-foreground text-center block">
+                          Weight (lbs)
+                        </label>
+                        <div className="flex items-center justify-center gap-4">
+                          <button
+                            onClick={() => setWeight(Math.max(0, weight - 5))}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Minus size={20} />
+                          </button>
+                          <input
+                            type="number"
+                            value={weight}
+                            onChange={(e) => setWeight(Number(e.target.value))}
+                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
+                          />
+                          <button
+                            onClick={() => setWeight(weight + 5)}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Plus size={20} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <Button onClick={startEmom} fullWidth size="lg" disabled={isPreview}>
                       <Play size={20} className="mr-2" />
-                      Start EMOM
+                      {isPreview ? 'Preview Only' : 'Start Timer'}
                     </Button>
                   </>
                 ) : (
                   <>
                     <div className="text-center space-y-3">
                       <p className="text-sm text-muted-foreground">
-                        Round {emomRound + 1} of {currentExercise.sets}
+                        Minute {emomRound + 1} of {currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets} • {currentExercise.reps} reps
                       </p>
                       <div className="flex items-center justify-center gap-2 text-primary">
                         <Timer size={20} />
-                        <span className="text-sm font-medium">Time Until Next Round</span>
+                        <span className="text-sm font-medium">Time Remaining</span>
                       </div>
                       <p className="text-5xl font-bold text-foreground">{formatTime(emomTimer || 0)}</p>
-                      <p className="text-lg text-foreground">Do {currentExercise.reps} reps NOW!</p>
                     </div>
                     <Button onClick={completeEmomExercise} fullWidth size="lg">
                       Complete EMOM
@@ -1074,13 +1231,43 @@ export function LiveWorkoutContent({
                 {!tabataRunning && tabataTimer === null ? (
                   <>
                     <div className="text-center space-y-2">
-                      <p className="text-sm text-muted-foreground">Tabata Protocol</p>
+                      <p className="text-sm text-muted-foreground">Tabata: High Intensity Interval Training</p>
                       <p className="text-lg text-foreground">20 seconds work / 10 seconds rest</p>
                       <p className="text-sm text-muted-foreground">{currentExercise.sets} rounds</p>
                     </div>
-                    <Button onClick={startTabata} fullWidth size="lg">
+
+                    {/* Weight Input (if exercise has weight) */}
+                    {currentExercise.weightValue > 0 && (
+                      <div className="space-y-2">
+                        <label className="text-sm text-muted-foreground text-center block">
+                          Weight (lbs)
+                        </label>
+                        <div className="flex items-center justify-center gap-4">
+                          <button
+                            onClick={() => setWeight(Math.max(0, weight - 5))}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Minus size={20} />
+                          </button>
+                          <input
+                            type="number"
+                            value={weight}
+                            onChange={(e) => setWeight(Number(e.target.value))}
+                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
+                          />
+                          <button
+                            onClick={() => setWeight(weight + 5)}
+                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
+                          >
+                            <Plus size={20} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <Button onClick={startTabata} fullWidth size="lg" disabled={isPreview}>
                       <Play size={20} className="mr-2" />
-                      Start Tabata
+                      {isPreview ? 'Preview Only' : 'Start Timer'}
                     </Button>
                   </>
                 ) : (
@@ -1173,8 +1360,8 @@ export function LiveWorkoutContent({
                 </div>
 
                 {/* Log Set Button */}
-                <Button onClick={logSet} fullWidth size="lg">
-                  Log Set
+                <Button onClick={logSet} fullWidth size="lg" disabled={isPreview}>
+                  {isPreview ? 'Preview Only' : 'Log Set'}
                 </Button>
               </>
             )}
@@ -1194,7 +1381,7 @@ export function LiveWorkoutContent({
                  {currentExerciseIndex === exercises.length - 1 ? 'Workout Complete!' : 'Exercise Complete!'}
                </p>
              </div>
-             {currentExerciseIndex < exercises.length - 1 && (
+             {currentExerciseIndex < exercises.length - 1 ? (
                <Button
                  onClick={() => {
                    setCurrentExerciseIndex(currentExerciseIndex + 1);
@@ -1208,7 +1395,51 @@ export function LiveWorkoutContent({
                    <ChevronRight size={20} />
                  </span>
                </Button>
+             ) : (
+               // Show button to view/generate analysis on last exercise if workout is completed and has adjustment
+               // Use adjustmentIdForChat for just-completed workouts, pendingAdjustmentId for viewing completed workouts
+               (workoutCompleted && adjustmentIdForChat || workoutStatus === 'completed' && pendingAdjustmentId) && (
+                 <Button
+                   onClick={() => {
+                     const adjId = adjustmentIdForChat || pendingAdjustmentId;
+                     // If analysis exists and we have a chat session, go to that session
+                     // Otherwise, create new analysis
+                     if (hasAnalysis && chatSessionId) {
+                       router.push(`/chat/post_workout?session=${chatSessionId}`);
+                     } else {
+                       router.push(`/chat/post_workout?adjustmentId=${adjId}`);
+                     }
+                   }}
+                   fullWidth
+                   size="lg"
+                 >
+                   {hasAnalysis ? 'View Workout Analysis' : 'Generate Analysis'}
+                 </Button>
+               )
              )}
+           </div>
+         )}
+
+         {/* Show analysis button for already completed workouts (viewing mode) */}
+         {/* Only show if NOT on the last exercise with it complete (to avoid duplicate with completion section) */}
+         {workoutStatus === 'completed' && pendingAdjustmentId && !(currentExerciseIndex === exercises.length - 1 && isExerciseComplete) && (
+           <div className="rounded-xl p-4 space-y-3 bg-surface">
+             <Button
+               onClick={() => {
+                 // If analysis exists and we have a chat session, go to that session
+                 // Otherwise, create new analysis
+                 if (hasAnalysis && chatSessionId) {
+                   router.push(`/chat/post_workout?session=${chatSessionId}`);
+                 } else {
+                   router.push(`/chat/post_workout?adjustmentId=${pendingAdjustmentId}`);
+                 }
+               }}
+               fullWidth
+               size="lg"
+               variant="secondary"
+             >
+               {hasAnalysis ? 'View Workout Analysis' : 'Generate Analysis'}
+             </Button>
            </div>
          )}
        </div>

@@ -5,7 +5,7 @@ import type { NextRequest } from 'next/server';
 const publicRoutes = ['/login', '/register', '/'];
 const authRoutes = ['/login', '/register'];
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   
   // Check if this is a protected route (not public)

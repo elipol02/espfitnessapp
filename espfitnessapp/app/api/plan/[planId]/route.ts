@@ -79,6 +79,58 @@ export async function PATCH(
       });
     }
 
+    // If start date is changing, reschedule all workout days
+    if (startDate !== undefined && startDate) {
+      // Parse date string as local date to avoid timezone issues
+      const dateStr = startDate.split('T')[0]; // Get YYYY-MM-DD part
+      const [year, month, day] = dateStr.split('-').map(Number);
+      const newStartDate = new Date(year, month - 1, day); // month is 0-indexed
+      
+      // Get all workout days for this plan, sorted by current schedule
+      const workoutDays = await prisma.workoutDay.findMany({
+        where: { planId },
+        select: { id: true, dayNumber: true, scheduledDate: true },
+        orderBy: { scheduledDate: 'asc' },
+      });
+
+      // Calculate start of the week (Sunday) for the new start date
+      const dayOfWeek = newStartDate.getDay();
+      const startOfWeek = new Date(year, month - 1, day - dayOfWeek);
+
+      // Group workout days by dayNumber to handle multiple weeks
+      const daysByDayNumber = new Map<number, typeof workoutDays>();
+      for (const day of workoutDays) {
+        if (!daysByDayNumber.has(day.dayNumber)) {
+          daysByDayNumber.set(day.dayNumber, []);
+        }
+        daysByDayNumber.get(day.dayNumber)!.push(day);
+      }
+
+      // Reschedule each workout day across all weeks
+      for (const [dayNumber, days] of daysByDayNumber.entries()) {
+        // Calculate the first occurrence of this day
+        const firstDate = new Date(startOfWeek);
+        firstDate.setDate(startOfWeek.getDate() + dayNumber);
+        
+        // If first occurrence is before start date, move to next week
+        // Compare using getTime() to compare actual dates
+        if (firstDate.getTime() < newStartDate.getTime()) {
+          firstDate.setDate(firstDate.getDate() + 7);
+        }
+        
+        // Schedule each instance at weekly intervals
+        for (let i = 0; i < days.length; i++) {
+          const scheduledDate = new Date(firstDate);
+          scheduledDate.setDate(firstDate.getDate() + (i * 7));
+          
+          await prisma.workoutDay.update({
+            where: { id: days[i].id },
+            data: { scheduledDate },
+          });
+        }
+      }
+    }
+
     const updatedPlan = await prisma.workoutPlan.update({
       where: { id: planId },
       data: {

@@ -34,6 +34,24 @@ interface WorkoutDayData {
     weightValue: number;
     restTime?: number;
     exerciseType?: string;
+    // Time-based fields
+    duration?: number;     // Duration in minutes (cardio_time, mobility_time)
+    // Distance fields
+    distance?: number;
+    distanceUnit?: string;
+    // Interval fields
+    intervals?: object;
+    // Tempo fields
+    tempo?: string;
+    // AMRAP/EMOM/Tabata fields
+    timeCap?: number;
+    movements?: Array<{
+      name: string;
+      reps?: number;
+      duration?: number;
+      weight?: number;
+      weightType?: string;
+    }>;
     progression?: {
       type: string;
       increment: number;
@@ -44,11 +62,6 @@ interface WorkoutDayData {
       cues: string[];
       muscles: string[];
     };
-    distance?: number;
-    distanceUnit?: string;
-    intervals?: object;
-    tempo?: string;
-    timeCap?: number;
   }>;
 }
 
@@ -113,6 +126,7 @@ interface ChatData {
     bodyweight: number | null;
   } | null;
   approvedPlanIds: string[];
+  approvedAdjustmentIds: string[];
   detectedMode: string | null;
   pendingAdjustment?: PendingAdjustmentData | null;
 }
@@ -136,29 +150,86 @@ export function ChatContent({
   const mode = urlMode || data.detectedMode || null;
   const autoSend = searchParams.get('autoSend');
 
-  const [messages, setMessages] = useState<Message[]>(data.messages);
+  // Initialize messages - check for saved streaming state first
+  const [messages, setMessages] = useState<Message[]>(() => {
+    // Check if we have saved streaming state to restore
+    if (typeof window !== 'undefined') {
+      const savedState = sessionStorage.getItem(`chat-streaming-${data.sessionId}`);
+      if (savedState) {
+        try {
+          const state = JSON.parse(savedState);
+          // Only restore if state is recent (within last 5 minutes)
+          if (Date.now() - state.timestamp <= 5 * 60 * 1000) {
+            // Create the streaming message
+            const streamingMessage: Message = {
+              id: state.messageId,
+              role: 'assistant',
+              content: state.content || '',
+              metadata: state.metadata,
+              createdAt: new Date().toISOString(),
+            };
+            // Return data.messages + the streaming message
+            const hasMessage = data.messages.some(m => m.id === state.messageId);
+            if (!hasMessage) {
+              return [...data.messages, streamingMessage];
+            }
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    }
+    return data.messages;
+  });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [approvedPlans, setApprovedPlans] = useState<Set<string>>(new Set(data.approvedPlanIds));
-  const [approvedAdjustments, setApprovedAdjustments] = useState<Set<string>>(new Set());
+  const [approvedAdjustments, setApprovedAdjustments] = useState<Set<string>>(new Set(data.approvedAdjustmentIds));
   const [selectedAction, setSelectedAction] = useState<'create' | 'addCurrent' | 'edit' | 'ask' | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const postWorkoutProcessedRef = useRef<string | null>(null);
   const [sessions, setSessions] = useState<Array<{ id: string; title: string | null; createdAt: string; messageCount: number }>>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastMessageCountRef = useRef(data.messages.length);
   const autoSendProcessedRef = useRef<string | null>(null);
+  const autoScrollDisabledRef = useRef(false); // Disabled when user scrolls up during streaming
   
   // Streaming state
-  const [streamingText, setStreamingText] = useState('');
-  const [streamingDays, setStreamingDays] = useState<WorkoutDayData[]>([]);
-  const [streamingAdjustments, setStreamingAdjustments] = useState<ExerciseAdjustment[]>([]);
-  const [streamProgress, setStreamProgress] = useState<{ current: number; total: number; label: string } | null>(null);
-  const [streamingPlanId, setStreamingPlanId] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isGeneratingDays, setIsGeneratingDays] = useState(false); // Show "Generating workout..." loader
+  const [streamProgress, setStreamProgress] = useState<{ current: number; total: number; label: string } | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const streamingMessageIdRef = useRef<string | null>(null);
+  const streamingContentRef = useRef(''); // Track content as it streams for saving on stop
+  const skipNextSyncRef = useRef(false); // Skip server sync after stopping streaming
+  const streamStateRestoredRef = useRef(false); // Track if we've restored streaming state
+
+  // Helper to save streaming state to sessionStorage
+  const saveStreamingState = useCallback((
+    messageId: string,
+    content: string,
+    metadata: MessageMetadata | null,
+    generating: boolean,
+    progress: { current: number; total: number; label: string } | null
+  ) => {
+    const state = {
+      messageId,
+      content,
+      metadata,
+      isGeneratingDays: generating,
+      streamProgress: progress,
+      timestamp: Date.now(),
+    };
+    sessionStorage.setItem(`chat-streaming-${data.sessionId}`, JSON.stringify(state));
+  }, [data.sessionId]);
+
+  // Helper to clear streaming state from sessionStorage
+  const clearStreamingState = useCallback(() => {
+    sessionStorage.removeItem(`chat-streaming-${data.sessionId}`);
+  }, [data.sessionId]);
 
   // Don't destructure sessionId - use data.sessionId directly to avoid stale closure issues
   const { activePlan, user } = data;
@@ -166,37 +237,103 @@ export function ChatContent({
   // Track current session ID to detect changes
   const prevSessionIdRef = useRef(data.sessionId);
 
+  // Restore streaming state flags on mount (messages are already restored in useState initializer)
+  useEffect(() => {
+    if (streamStateRestoredRef.current) return;
+    streamStateRestoredRef.current = true;
+
+    const savedState = sessionStorage.getItem(`chat-streaming-${data.sessionId}`);
+    if (!savedState) return;
+
+    try {
+      const state = JSON.parse(savedState);
+      // Only restore if state is recent (within last 5 minutes)
+      if (Date.now() - state.timestamp > 5 * 60 * 1000) {
+        clearStreamingState();
+        return;
+      }
+
+      // Check if stream already completed on server
+      const lastServerMessage = data.messages[data.messages.length - 1];
+      if (lastServerMessage?.role === 'assistant' && lastServerMessage.content) {
+        // Stream completed while away, clear saved state
+        clearStreamingState();
+        return;
+      }
+
+      // Restore streaming state flags (messages already restored in useState initializer)
+      setIsLoading(true);
+      setIsStreaming(true);
+      setIsGeneratingDays(state.isGeneratingDays || false);
+      setStreamProgress(state.streamProgress || null);
+      streamingMessageIdRef.current = state.messageId;
+      streamingContentRef.current = state.content || '';
+      skipNextSyncRef.current = true;
+
+      // Set up polling to check when stream completes on server
+      const pollInterval = setInterval(() => {
+        router.refresh();
+      }, 2000);
+
+      // Stop polling after 3 minutes
+      const timeout = setTimeout(() => {
+        clearInterval(pollInterval);
+        setIsLoading(false);
+        setIsStreaming(false);
+        setIsGeneratingDays(false);
+        clearStreamingState();
+      }, 3 * 60 * 1000);
+
+      // Cleanup
+      return () => {
+        clearInterval(pollInterval);
+        clearTimeout(timeout);
+      };
+    } catch {
+      clearStreamingState();
+    }
+  }, [data.sessionId, data.messages, clearStreamingState, router]);
+
   // Stop streaming
-  const handleStopStreaming = useCallback(() => {
+  const handleStopStreaming = useCallback(async () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    
+    // Prevent the sync effect from overwriting our local messages
+    skipNextSyncRef.current = true;
+    
     setIsStreaming(false);
     setIsLoading(false);
+    setIsGeneratingDays(false);
+    setStreamProgress(null);
     sessionStorage.removeItem(`chat-loading-${data.sessionId}`);
     
-    // If we have streaming text, create a message from it
-    if (streamingText) {
-      const partialMessage: Message = {
-        id: `partial-${Date.now()}`,
-        role: 'assistant',
-        content: streamingText + '\n\n*[Response stopped]*',
-        metadata: streamingPlanId ? {
-          type: 'plan_preview',
-          planId: streamingPlanId,
-          planData: { schedule: streamingDays },
-        } : null,
-        createdAt: new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, partialMessage]);
-      setStreamingText('');
-      setStreamingDays([]);
-      setStreamingAdjustments([]);
-      setStreamProgress(null);
-      setStreamingPlanId(null);
+    // Clear persisted streaming state
+    clearStreamingState();
+    
+    // Save partial response to database
+    const partialContent = streamingContentRef.current;
+    if (streamingMessageIdRef.current && partialContent) {
+      // Save to database
+      try {
+        await fetch('/api/chat/save-partial', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: data.sessionId,
+            content: partialContent,
+          }),
+        });
+      } catch (e) {
+        console.error('Failed to save partial response:', e);
+      }
+      
+      streamingMessageIdRef.current = null;
+      streamingContentRef.current = '';
     }
-  }, [data.sessionId, streamingText, streamingPlanId, streamingDays]);
+  }, [data.sessionId, clearStreamingState]);
 
   // Send message with streaming
   const handleStreamingSend = useCallback(async (messageContent: string, modeToUse: string) => {
@@ -208,22 +345,33 @@ export function ChatContent({
     }
 
     const userMessage: Message = {
-      id: `temp-${Date.now()}`,
+      id: `user-${Date.now()}`,
       role: 'user',
       content: messageContent.trim(),
       metadata: null,
       createdAt: new Date().toISOString(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    // Create the assistant message placeholder immediately
+    const assistantMessageId = `stream-${Date.now()}`;
+    streamingMessageIdRef.current = assistantMessageId;
+    
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      role: 'assistant',
+      content: '',
+      metadata: null,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Add both messages at once
+    setMessages(prev => [...prev, userMessage, assistantMessage]);
     setInput('');
     setIsLoading(true);
     setIsStreaming(true);
-    setStreamingText('');
-    setStreamingDays([]);
-    setStreamingAdjustments([]);
     setStreamProgress(null);
-    setStreamingPlanId(null);
+    streamingContentRef.current = ''; // Reset content ref
+    autoScrollDisabledRef.current = false; // Re-enable auto-scroll for new message
     
     sessionStorage.setItem(`chat-loading-${data.sessionId}`, 'true');
 
@@ -282,18 +430,37 @@ export function ChatContent({
               case 'text-chunk':
                 if (event.content) {
                   fullText += event.content;
-                  setStreamingText(fullText);
+                  streamingContentRef.current = fullText; // Track for save on stop
+                  // Update message content in place
+                  setMessages(prev => prev.map(msg => 
+                    msg.id === assistantMessageId ? { ...msg, content: fullText } : msg
+                  ));
+                  // Save state for navigation persistence
+                  saveStreamingState(assistantMessageId, fullText, null, false, null);
                 }
                 break;
                 
               case 'text-done':
-                // Text streaming complete
+                // Text streaming complete - if this is a plan creation, show generating indicator
+                if (modeToUse === 'create' || modeToUse === 'edit') {
+                  setIsGeneratingDays(true);
+                  saveStreamingState(assistantMessageId, fullText, null, true, null);
+                }
                 break;
                 
               case 'day-generated':
                 if (event.day) {
                   collectedDays.push(event.day);
-                  setStreamingDays([...collectedDays]);
+                  const metadata: MessageMetadata = {
+                    type: 'plan_preview' as const,
+                    planData: { schedule: [...collectedDays], goal: '', weeksDuration: 12, sessionsPerWeek: 4 },
+                  };
+                  // Update message with days in metadata
+                  setMessages(prev => prev.map(msg => 
+                    msg.id === assistantMessageId ? { ...msg, metadata } : msg
+                  ));
+                  // Save state with updated progress
+                  saveStreamingState(assistantMessageId, fullText, metadata, true, event.progress || null);
                 }
                 if (event.progress) {
                   setStreamProgress(event.progress);
@@ -303,7 +470,20 @@ export function ChatContent({
               case 'adjustment-generated':
                 if (event.adjustment) {
                   collectedAdjustments.push(event.adjustment);
-                  setStreamingAdjustments([...collectedAdjustments]);
+                  const adjMetadata: MessageMetadata = {
+                    type: 'adjustment_preview' as const,
+                    adjustmentId: adjustmentId,
+                    adjustmentData: {
+                      summary: '',
+                      exercises: [...collectedAdjustments],
+                    },
+                  };
+                  // Update message with adjustments in metadata
+                  setMessages(prev => prev.map(msg => 
+                    msg.id === assistantMessageId ? { ...msg, metadata: adjMetadata } : msg
+                  ));
+                  // Save state for navigation persistence
+                  saveStreamingState(assistantMessageId, fullText, adjMetadata, false, event.progress || null);
                 }
                 if (event.progress) {
                   setStreamProgress(event.progress);
@@ -312,7 +492,22 @@ export function ChatContent({
                 
               case 'done':
                 finalPlanId = event.planId || null;
-                setStreamingPlanId(finalPlanId);
+                setIsGeneratingDays(false);
+                // Update with final planId
+                if (finalPlanId) {
+                  const completePlanId = finalPlanId; // Capture for closure
+                  setMessages(prev => prev.map(msg => 
+                    msg.id === assistantMessageId ? { 
+                      ...msg, 
+                      metadata: {
+                        ...msg.metadata,
+                        type: 'plan_preview' as const,
+                        planId: completePlanId,
+                        planData: { schedule: collectedDays, goal: '', weeksDuration: 12, sessionsPerWeek: 4 },
+                      }
+                    } : msg
+                  ));
+                }
                 break;
                 
               case 'error':
@@ -329,32 +524,19 @@ export function ChatContent({
         }
       }
 
-      // Create the final assistant message
-      const assistantMessage: Message = {
-        id: `stream-${Date.now()}`,
-        role: 'assistant',
-        content: fullText,
-        metadata: finalPlanId ? {
-          type: 'plan_preview',
-          planId: finalPlanId,
-          planData: { schedule: collectedDays, goal: '', weeksDuration: 12, sessionsPerWeek: 4 },
-        } : collectedAdjustments.length > 0 ? {
-          type: 'adjustment_preview',
-          adjustmentId: adjustmentId,
-          adjustmentData: {
-            summary: '',
-            exercises: collectedAdjustments,
-          },
-        } : null,
-        createdAt: new Date().toISOString(),
-      };
-
-      setMessages(prev => [...prev, assistantMessage]);
+      // Mark streaming as done (no need to update message - it's already complete)
+      setIsStreaming(false);
+      setIsLoading(false);
+      setIsGeneratingDays(false);
+      setStreamProgress(null);
+      sessionStorage.removeItem(`chat-loading-${data.sessionId}`);
+      clearStreamingState(); // Clear persisted streaming state
+      abortControllerRef.current = null;
+      streamingMessageIdRef.current = null;
+      streamingContentRef.current = '';
       
-      // Mark plan as needing approval if we got one
-      if (finalPlanId) {
-        // Plan was created, don't auto-approve
-      }
+      // Refresh to get server-side data
+      router.refresh();
 
     } catch (error) {
       if ((error as Error).name === 'AbortError') {
@@ -362,20 +544,21 @@ export function ChatContent({
         return;
       }
       console.error('Streaming error:', error);
-    } finally {
+      // Update message to show error
+      setMessages(prev => prev.map(msg => 
+        msg.id === assistantMessageId ? { ...msg, content: msg.content + '\n\n*[Error occurred]*' } : msg
+      ));
       setIsStreaming(false);
       setIsLoading(false);
-      setStreamingText('');
-      setStreamingDays([]);
-      setStreamingAdjustments([]);
+      setIsGeneratingDays(false);
       setStreamProgress(null);
       sessionStorage.removeItem(`chat-loading-${data.sessionId}`);
+      clearStreamingState(); // Clear persisted streaming state on error
       abortControllerRef.current = null;
-      
-      // Refresh to get server-side data
-      router.refresh();
+      streamingMessageIdRef.current = null;
+      streamingContentRef.current = '';
     }
-  }, [data.sessionId, activePlan?.id, user?.bodyweight, user?.name, adjustmentId, isLoading, isStreaming, showHistory, router]);
+  }, [data.sessionId, activePlan?.id, user?.bodyweight, user?.name, adjustmentId, isLoading, isStreaming, showHistory, router, saveStreamingState, clearStreamingState]);
 
   // Reset state when session changes (switching conversations)
   useEffect(() => {
@@ -384,9 +567,14 @@ export function ChatContent({
       setMessages(data.messages);
       setInput('');
       setIsLoading(false);
+      setIsStreaming(false);
+      setIsGeneratingDays(false);
+      setStreamProgress(null);
       setSelectedAction(null);
       setShowHistory(false);
       sessionStorage.removeItem(`chat-loading-${prevSessionIdRef.current}`);
+      sessionStorage.removeItem(`chat-streaming-${prevSessionIdRef.current}`);
+      streamStateRestoredRef.current = false; // Allow restore for new session
       prevSessionIdRef.current = data.sessionId;
       lastMessageCountRef.current = data.messages.length;
       return;
@@ -410,11 +598,28 @@ export function ChatContent({
         // AI responded! Update with server messages
         setMessages(data.messages);
         setIsLoading(false);
+        setIsStreaming(false);
+        setIsGeneratingDays(false);
+        setStreamProgress(null);
         sessionStorage.removeItem(`chat-loading-${data.sessionId}`);
+        sessionStorage.removeItem(`chat-streaming-${data.sessionId}`);
       }
       // Otherwise, keep current messages (includes optimistic user message and loader)
       // Don't sync until we get the assistant response
+    } else if (skipNextSyncRef.current) {
+      // Skip this sync - we just stopped streaming and have local-only messages
+      // Only clear the flag once server catches up (has same or more messages)
+      if (newCount >= messages.length) {
+        skipNextSyncRef.current = false;
+        setMessages(data.messages);
+      }
     } else {
+      // Check if we have saved streaming state - don't overwrite if restoring
+      const savedState = sessionStorage.getItem(`chat-streaming-${data.sessionId}`);
+      if (savedState && !streamStateRestoredRef.current) {
+        // We have saved state to restore, don't sync yet
+        return;
+      }
       // Not loading - normal case: sync from server
       setMessages(data.messages);
     }
@@ -426,10 +631,11 @@ export function ChatContent({
     lastMessageCountRef.current = newCount;
   }, [data.sessionId, data.messages.length, data.messages, isLoading, messages.length]);
 
-  // Sync approved plans from server
+  // Sync approved plans and adjustments from server
   useEffect(() => {
     setApprovedPlans(new Set(data.approvedPlanIds));
-  }, [data.approvedPlanIds]);
+    setApprovedAdjustments(new Set(data.approvedAdjustmentIds));
+  }, [data.approvedPlanIds, data.approvedAdjustmentIds]);
 
   // Focus input when action is selected
   useEffect(() => {
@@ -441,16 +647,50 @@ export function ChatContent({
   // Update URL with session ID after creation
   useEffect(() => {
     if (isNewSession && data.sessionId && mode) {
-      // Update URL with session parameter while preserving the mode path
+      // Update URL with session parameter while preserving the mode path and adjustmentId
       const currentPath = mode ? `/chat/${mode}` : '/chat';
-      router.replace(`${currentPath}?session=${data.sessionId}`);
+      const params = new URLSearchParams();
+      params.set('session', data.sessionId);
+      if (adjustmentId) {
+        params.set('adjustmentId', adjustmentId);
+      }
+      router.replace(`${currentPath}?${params.toString()}`);
     }
-  }, [isNewSession, data.sessionId, mode, router]);
+  }, [isNewSession, data.sessionId, mode, adjustmentId, router]);
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll to bottom when messages change or generating state changes (unless user scrolled up)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (!autoScrollDisabledRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isGeneratingDays, streamProgress]);
+
+  // Detect when user scrolls up during streaming to disable auto-scroll
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      if (!isStreaming) return;
+      
+      // Check if user is near the bottom (within 100px)
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+      
+      // If user scrolled away from bottom during streaming, disable auto-scroll
+      if (!isNearBottom) {
+        autoScrollDisabledRef.current = true;
+      }
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [isStreaming]);
+  
+  // Get the current streaming message (if any) to determine if we should show typing indicator
+  const streamingMessage = streamingMessageIdRef.current 
+    ? messages.find(m => m.id === streamingMessageIdRef.current)
+    : null;
+  const showTypingIndicator = isStreaming && (!streamingMessage || !streamingMessage.content);
 
   // Handle initial mode - only set once on mount, not on every mode change
   const initialModeSet = useRef(false);
@@ -475,7 +715,7 @@ export function ChatContent({
     }
   }, [mode, messages.length]);
 
-  // Handle post-workout mode - automatically analyze the completed workout (now uses streaming)
+  // Handle post-workout mode - automatically analyze the completed workout (now uses streaming with AI message)
   useEffect(() => {
     if (mode === 'post_workout' && adjustmentId && messages.length === 0 && !isLoading && !isStreaming) {
       const postWorkoutKey = `${data.sessionId}-${adjustmentId}`;
@@ -487,10 +727,136 @@ export function ChatContent({
       
       postWorkoutProcessedRef.current = postWorkoutKey;
       
-      // Use streaming to analyze the workout
-      handleStreamingSend('Analyze my completed workout and suggest weights for next time.', 'post_workout');
+      // Start streaming immediately without user message
+      (async () => {
+        try {
+          // Create initial message showing "Analyzing workout..."
+          const assistantMessageId = `stream-${Date.now()}`;
+          streamingMessageIdRef.current = assistantMessageId;
+          
+          const assistantMessage: Message = {
+            id: assistantMessageId,
+            role: 'assistant',
+            content: 'Analyzing your workout...',
+            metadata: null,
+            createdAt: new Date().toISOString(),
+          };
+
+          setMessages([assistantMessage]);
+          setIsLoading(true);
+          setIsStreaming(true);
+          autoScrollDisabledRef.current = false;
+
+          // Create abort controller
+          abortControllerRef.current = new AbortController();
+
+          const response = await fetch('/api/chat/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: data.sessionId,
+              message: '', // Empty message - backend will generate the analysis
+              mode: 'post_workout',
+              planId: activePlan?.id,
+              context: {
+                bodyweight: user?.bodyweight,
+                userName: user?.name,
+                adjustmentId: adjustmentId,
+              },
+            }),
+            signal: abortControllerRef.current?.signal,
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const reader = response.body?.getReader();
+          if (!reader) {
+            throw new Error('No response body');
+          }
+
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let fullText = '';
+          const collectedAdjustments: ExerciseAdjustment[] = [];
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              
+              try {
+                const event: SSEEvent = JSON.parse(line.slice(6));
+                
+                switch (event.type) {
+                  case 'text-chunk':
+                    if (event.content) {
+                      fullText += event.content;
+                      streamingContentRef.current = fullText;
+                      setMessages([{ ...assistantMessage, content: fullText }]);
+                      saveStreamingState(assistantMessageId, fullText, null, false, null);
+                    }
+                    break;
+                    
+                  case 'adjustment-generated':
+                    if (event.adjustment) {
+                      collectedAdjustments.push(event.adjustment);
+                      const adjMetadata: MessageMetadata = {
+                        type: 'adjustment_preview' as const,
+                        adjustmentId: adjustmentId,
+                        adjustmentData: {
+                          summary: '',
+                          exercises: [...collectedAdjustments],
+                        },
+                      };
+                      setMessages([{ ...assistantMessage, content: fullText, metadata: adjMetadata }]);
+                      saveStreamingState(assistantMessageId, fullText, adjMetadata, false, event.progress || null);
+                    }
+                    if (event.progress) {
+                      setStreamProgress(event.progress);
+                    }
+                    break;
+                    
+                  case 'done':
+                    break;
+                    
+                  case 'error':
+                    console.error('Stream error:', event.error);
+                    throw new Error(event.error || 'Stream error');
+                }
+              } catch {
+                // Skip malformed JSON
+              }
+            }
+          }
+
+          setIsStreaming(false);
+          setIsLoading(false);
+          setStreamProgress(null);
+          clearStreamingState();
+          abortControllerRef.current = null;
+          streamingMessageIdRef.current = null;
+          streamingContentRef.current = '';
+          
+          router.refresh();
+
+        } catch (error) {
+          console.error('Streaming error:', error);
+          setIsStreaming(false);
+          setIsLoading(false);
+          setStreamProgress(null);
+          clearStreamingState();
+        }
+      })();
     }
-  }, [mode, adjustmentId, messages.length, isLoading, isStreaming, data.sessionId, handleStreamingSend]);
+  }, [mode, adjustmentId, messages.length, isLoading, isStreaming, data.sessionId, activePlan?.id, user?.bodyweight, user?.name, router, saveStreamingState, clearStreamingState]);
 
   // Handle auto-send from URL parameter (now uses streaming)
   useEffect(() => {
@@ -514,7 +880,9 @@ export function ChatContent({
   // Send message (now uses streaming)
   const handleSend = async () => {
     if (!input.trim() || isLoading || isStreaming) return;
-    await handleStreamingSend(input.trim(), mode || 'general');
+    // If we have an adjustmentId, we're in post_workout mode
+    const effectiveMode = adjustmentId ? 'post_workout' : (mode || 'general');
+    await handleStreamingSend(input.trim(), effectiveMode);
   };
 
   // Check if we should show loading on mount (persisted from previous navigation)
@@ -597,8 +965,28 @@ export function ChatContent({
   };
 
   // Handle adjustment approval
-  const handleApproveAdjustments = async (adjId: string) => {
+  const [approvingAdjustment, setApprovingAdjustment] = useState<string | null>(null);
+
+  const handleApproveAdjustments = async (adjId: string, messageId: string) => {
+    // Prevent double-clicks
+    if (approvingAdjustment === adjId) return;
+    
+    setApprovingAdjustment(adjId);
+    
     try {
+      // First, mark this message as approved (and unmark others)
+      const approveResponse = await fetch('/api/chat/approve-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId, adjustmentId: adjId }),
+      });
+
+      const approveResult = await approveResponse.json();
+      if (!approveResult.success) {
+        throw new Error(approveResult.error || 'Failed to mark message as approved');
+      }
+
+      // Then apply the adjustments to the workout
       const response = await fetch('/api/workout/apply-adjustments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -608,13 +996,16 @@ export function ChatContent({
       const result = await response.json();
 
       if (result.success) {
-        setApprovedAdjustments((prev) => new Set(prev).add(adjId));
         router.refresh();
       } else {
         console.error('Adjustment approval error:', result.error);
+        alert(result.error || 'Failed to apply adjustments');
       }
     } catch (error) {
       console.error('Adjustment approval error:', error);
+      alert('Failed to apply adjustments. Please try again.');
+    } finally {
+      setApprovingAdjustment(null);
     }
   };
 
@@ -654,15 +1045,15 @@ export function ChatContent({
           <div>
             <h1 className="text-lg font-bold text-foreground">ESP Fitness Planner</h1>
             <p className="text-sm text-muted-foreground">
-              {mode === 'create' || selectedAction === 'create' || selectedAction === 'addCurrent'
+              {mode === 'create'
                 ? 'Creating a new plan'
-                : mode === 'edit' || selectedAction === 'edit'
+                : mode === 'edit'
                 ? 'Editing your plan'
                 : mode === 'submit'
                 ? 'Logging workout'
                 : mode === 'post_workout'
                 ? 'Workout Analysis'
-                : selectedAction === 'ask'
+                : mode === 'ask'
                 ? 'Ask me anything'
                 : 'Ask me anything'}
             </p>
@@ -680,12 +1071,12 @@ export function ChatContent({
                 <History size={18} className="text-muted-foreground" />
               </button>
             )}
-            {(messages.length > 0 || showHistory || selectedAction) && (
+            {(messages.length > 0 || showHistory || selectedAction || mode) && (
               <button
                 onClick={() => {
                   if (showHistory) {
                     setShowHistory(false);
-                  } else if (selectedAction && messages.length === 0) {
+                  } else if ((selectedAction || mode) && messages.length === 0) {
                     setSelectedAction(null);
                     // Update URL in background without causing navigation
                     const sessionParam = data.sessionId ? `?session=${data.sessionId}` : '';
@@ -695,7 +1086,7 @@ export function ChatContent({
                   }
                 }}
                 className="p-2 rounded-lg hover:bg-surface transition-colors"
-                title={showHistory ? "Back to menu" : (selectedAction && messages.length === 0) ? "Back to menu" : "New chat"}
+                title={showHistory ? "Back to menu" : ((selectedAction || mode) && messages.length === 0) ? "Back to menu" : "New chat"}
               >
                 <Plus size={18} className="text-muted-foreground" />
               </button>
@@ -745,8 +1136,8 @@ export function ChatContent({
         </div>
       )}
 
-      {/* Quick Actions or Action Card */}
-      {!showHistory && messages.length === 0 && !isLoading && !selectedAction && (
+      {/* Quick Actions - only shown when NO mode from URL */}
+      {!showHistory && messages.length === 0 && !isLoading && !selectedAction && !mode && (
         <div className="flex-1 flex flex-col items-center justify-center px-4 pb-20">
           <p className="text-center text-muted-foreground mb-6">
             What would you like to do?
@@ -837,11 +1228,11 @@ export function ChatContent({
         </div>
       )}
 
-      {/* Action Card - shown when an action is selected */}
-      {!showHistory && messages.length === 0 && !isLoading && selectedAction && (
+      {/* Action Card - shown when an action is selected OR mode is set from URL */}
+      {!showHistory && messages.length === 0 && !isLoading && (selectedAction || mode) && (
         <div className="flex-1 flex flex-col items-center justify-center px-4 pb-32">
           <div className="w-full max-w-md bg-surface rounded-xl p-6 space-y-3">
-            {selectedAction === 'create' && (
+            {(selectedAction === 'create' || mode === 'create') && (
               <>
                 <h2 className="text-lg font-semibold text-foreground">Create a New Plan</h2>
                 <p className="text-sm text-muted-foreground">Tell me about your fitness goals and I'll create a personalized workout plan.</p>
@@ -857,7 +1248,7 @@ export function ChatContent({
               </>
             )}
 
-            {selectedAction === 'edit' && (
+            {(selectedAction === 'edit' || mode === 'edit') && (
               <>
                 <h2 className="text-lg font-semibold text-foreground">Edit Existing Plan</h2>
                 <p className="text-sm text-muted-foreground">What would you like to change about your current workout plan?</p>
@@ -865,7 +1256,7 @@ export function ChatContent({
               </>
             )}
 
-            {selectedAction === 'ask' && (
+            {(selectedAction === 'ask' || mode === 'ask') && (
               <>
                 <h2 className="text-lg font-semibold text-foreground">Ask a Question</h2>
                 <p className="text-sm text-muted-foreground">What would you like to know?</p>
@@ -878,9 +1269,15 @@ export function ChatContent({
 
       {/* Messages */}
       {!showHistory && (messages.length > 0 || isLoading) && (
-        <div className="flex-1 overflow-y-auto pb-32">
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto pb-32">
           <div className="px-4 py-4 space-y-3">
-          {messages.map((message) => (
+          {messages.map((message) => {
+            // Skip empty assistant messages (streaming placeholders before content arrives)
+            if (message.role === 'assistant' && !message.content && !message.metadata) {
+              return null;
+            }
+            
+            return (
             <div
               key={message.id}
               className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -897,10 +1294,10 @@ export function ChatContent({
                 ) : (
                   <>
                     {(() => {
-                      // Strip JSON blocks if we have metadata (they're shown in preview cards)
-                      const displayContent = (message.metadata?.type === 'plan_preview' || message.metadata?.type === 'adjustment_preview')
-                        ? message.content.replace(/```(?:json)?\s*[\s\S]*?```/g, '').trim()
-                        : message.content;
+                      // Always strip JSON blocks from assistant messages - they're never shown as raw text
+                      const displayContent = message.content
+                        .replace(/```(?:json)?\s*[\s\S]*?```/g, '')
+                        .trim();
                       
                       // Only render if there's content to show
                       return displayContent ? (
@@ -939,21 +1336,29 @@ export function ChatContent({
                         </div>
                       ) : null;
                     })()}
+                    
                   </>
                 )}
 
-                {/* Plan Preview */}
-                {message.metadata?.type === 'plan_preview' && message.metadata?.planData && (
+                {/* Plan Preview - show days as they're generated */}
+                {(message.metadata?.type === 'plan_preview' && message.metadata?.planData) || 
+                 (message.id === streamingMessageIdRef.current && isGeneratingDays) ? (
                   <div className="mt-4 pt-4 border-t border-border space-y-3">
                     {(() => {
-                      const plan = message.metadata.planData as any;
+                      const plan = message.metadata?.planData as any;
+                      const hasDays = plan?.schedule?.length > 0;
+                      // Calculate actual sessions per week from schedule
+                      const sessionsPerWeek = plan?.schedule?.filter((day: any) => day.workoutType !== 'rest')?.length || 3;
+                      
                       return (
                         <>
-                          <div className="text-xs text-muted-foreground">
-                            {plan.weeksDuration} weeks • {plan.sessionsPerWeek} sessions/week
-                          </div>
-                          {plan.schedule?.map((day: any, idx: number) => (
-                            <div key={idx} className="bg-background/30 rounded-lg p-3">
+                          {hasDays && (
+                            <div className="text-xs text-muted-foreground">
+                              {plan.weeksDuration || 12} weeks • {sessionsPerWeek} sessions/week
+                            </div>
+                          )}
+                          {plan?.schedule?.map((day: any, idx: number) => (
+                            <div key={idx} className="bg-background/30 rounded-lg p-3 animate-fade-in">
                               <div className="flex items-center gap-2 mb-2">
                                 <div
                                   className="w-3 h-3 rounded-full"
@@ -970,36 +1375,48 @@ export function ChatContent({
                                     const formatWeight = () => {
                                       if (ex.weightType === '1RM') return `${Math.round(ex.weightValue * 100)}% 1RM`;
                                       if (ex.weightType === 'BW') return `${Math.round(ex.weightValue * 100)}% BW`;
+                                      if (ex.weightType === 'RPE') return `RPE ${ex.weightValue}`;
                                       if (ex.weightValue === 0) return '';
                                       return `${ex.weightValue} lbs`;
                                     };
                                     
+                                    // Format sets with range support
+                                    const formatSets = () => ex.setsMin ? `${ex.setsMin}-${ex.sets}` : `${ex.sets}`;
+                                    // Format reps with range support
+                                    const formatReps = () => ex.repsMin ? `${ex.repsMin}-${ex.reps}` : `${ex.reps}`;
+                                    
                                     switch (type) {
                                       case 'cardio_time':
                                       case 'mobility_time':
-                                        return `${ex.reps} min`;
+                                        // Use duration field if available, fall back to reps for backwards compatibility
+                                        const mins = ex.duration || ex.reps;
+                                        return `${mins} min`;
                                       case 'distance':
                                         const weight = ex.weightValue > 0 ? ` @ ${formatWeight()}` : '';
-                                        return `${ex.sets} × ${ex.distance} ${ex.distanceUnit || 'feet'}${weight}`;
+                                        return `${formatSets()} × ${ex.distance} ${ex.distanceUnit || 'feet'}${weight}`;
                                       case 'interval':
                                         if (ex.intervals) {
                                           const { rounds, phases } = ex.intervals;
+                                          const intervalWeight = ex.weightValue > 0 ? ` @ ${formatWeight()}` : '';
                                           if (phases?.length === 2) {
-                                            return `${rounds} rounds: ${Math.floor(phases[0].duration / 60)}min ${phases[0].name} / ${Math.floor(phases[1].duration / 60)}min ${phases[1].name}`;
+                                            return `${rounds} rounds: ${Math.floor(phases[0].duration / 60)}min ${phases[0].name} / ${Math.floor(phases[1].duration / 60)}min ${phases[1].name}${intervalWeight}`;
                                           }
-                                          return `${rounds} rounds interval`;
+                                          return `${rounds} rounds interval${intervalWeight}`;
                                         }
                                         return 'Interval';
                                       case 'amrap':
-                                        return `AMRAP ${Math.floor((ex.timeCap || 600) / 60)} min`;
+                                        const amrapWeight = ex.weightValue > 0 ? ` @ ${formatWeight()}` : '';
+                                        return `AMRAP ${Math.floor((ex.timeCap || 600) / 60)} min • ${formatReps()} reps/round${amrapWeight}`;
                                       case 'emom':
-                                        return `EMOM ${ex.sets} min × ${ex.reps} reps`;
+                                        const emomWeight = ex.weightValue > 0 ? ` @ ${formatWeight()}` : '';
+                                        return `EMOM ${Math.floor((ex.timeCap || 600) / 60)} min • ${formatReps()} reps/min${emomWeight}`;
                                       case 'tabata':
-                                        return `Tabata ${ex.sets} rounds`;
+                                        const tabataWeight = ex.weightValue > 0 ? ` @ ${formatWeight()}` : '';
+                                        return `Tabata ${formatSets()} rounds • ${formatReps()} reps/round${tabataWeight}`;
                                       case 'tempo':
-                                        return `${ex.sets}×${ex.reps} @ tempo ${ex.tempo || '3-1-3-1'}`;
+                                        return `${formatSets()}×${formatReps()} @ tempo ${ex.tempo || '3-1-3-1'}`;
                                       default:
-                                        return `${ex.sets}×${ex.reps} @ ${formatWeight()}`;
+                                        return `${formatSets()}×${formatReps()} @ ${formatWeight()}`;
                                     }
                                   };
                                   
@@ -1015,56 +1432,68 @@ export function ChatContent({
                               </div>
                             </div>
                           ))}
+                          
+                          {/* Generating indicator - shows at the bottom while creating days */}
+                          {message.id === streamingMessageIdRef.current && isGeneratingDays && (
+                            <div className="flex items-center gap-3 py-2">
+                              <div className="flex gap-1">
+                                <span className="w-2 h-2 bg-primary rounded-full animate-typing" />
+                                <span className="w-2 h-2 bg-primary rounded-full animate-typing" style={{ animationDelay: '0.2s' }} />
+                                <span className="w-2 h-2 bg-primary rounded-full animate-typing" style={{ animationDelay: '0.4s' }} />
+                              </div>
+                              <span className="text-sm text-muted-foreground">
+                                {streamProgress ? `Generating ${streamProgress.label}...` : 'Generating workout plan...'}
+                              </span>
+                            </div>
+                          )}
                         </>
                       );
                     })()}
                   </div>
-                )}
+                ) : null}
 
                 {/* Approval buttons or approved status if this is a plan preview */}
                 {message.metadata?.type === 'plan_preview' && message.metadata?.planId && (
-                  <div className="mt-3 pt-3 border-t border-border">
+                  <div className="mt-4 pt-4 border-t border-border">
                     {approvedPlans.has(message.metadata.planId as string) ? (
-                      <div className="text-center text-success font-medium">
-                        ✓ Saved
+                      <div className="text-center text-success font-medium py-2">
+                        ✓ Plan Saved
                       </div>
                     ) : (
-                      <div className="space-y-2">
+                      <div className="flex gap-2">
                         {activePlan ? (
-                          <div className="flex gap-2">
-                            <Button
-                              size="sm"
+                          <>
+                            <button
                               onClick={() => handleApprove(message.metadata!.planId as string, 'replace')}
-                              className="flex-1"
+                              className="flex-1 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-lg
+                                       hover:bg-primary/90 active:bg-primary/80 transition-colors"
                             >
                               Replace Current
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
+                            </button>
+                            <button
                               onClick={() => handleApprove(message.metadata!.planId as string, 'activate')}
-                              className="flex-1"
+                              className="flex-1 px-4 py-2.5 bg-surface-elevated text-foreground text-sm font-medium rounded-lg
+                                       hover:bg-white/10 active:bg-white/5 transition-colors border border-border"
                             >
                               Save as New
-                            </Button>
-                          </div>
+                            </button>
+                          </>
                         ) : (
-                          <Button
-                            size="sm"
+                          <button
                             onClick={() => handleApprove(message.metadata!.planId as string, 'activate')}
-                            fullWidth
+                            className="flex-1 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-lg
+                                     hover:bg-primary/90 active:bg-primary/80 transition-colors"
                           >
                             Activate Plan
-                          </Button>
+                          </button>
                         )}
-                        <Button
-                          size="sm"
-                          variant="secondary"
+                        <button
                           onClick={() => setInput("I'd like to make some changes...")}
-                          fullWidth
+                          className="flex-1 px-4 py-2.5 bg-transparent text-muted-foreground text-sm font-medium rounded-lg
+                                   hover:bg-white/5 hover:text-foreground active:bg-white/10 transition-colors border border-border/50"
                         >
                           Request Changes
-                        </Button>
+                        </button>
                       </div>
                     )}
                   </div>
@@ -1080,21 +1509,119 @@ export function ChatContent({
                           <div className="text-sm text-muted-foreground mb-2">
                             {adjustment.summary}
                           </div>
-                          {adjustment.exercises?.map((ex, idx) => (
-                            <div key={idx} className="bg-background/30 rounded-lg p-3">
-                              <p className="font-semibold text-sm mb-2">{ex.name}</p>
-                              <div className="flex items-center gap-2 text-sm">
-                                <span className="text-muted-foreground">
-                                  {ex.currentSets}×{ex.currentReps} @ {ex.currentWeight} lbs
-                                </span>
-                                <span className="text-primary">→</span>
-                                <span className="font-medium text-success">
-                                  {ex.nextSets}×{ex.nextReps} @ {ex.nextWeight} lbs
-                                </span>
+                          {adjustment.exercises?.map((ex: any, idx: number) => {
+                            // Format weight display based on type
+                            const formatWeight = (weight: number, weightType: string) => {
+                              if (weightType === 'BW') {
+                                return `${Math.round(weight * 100)}% BW`;
+                              } else if (weightType === '1RM') {
+                                return `${Math.round(weight * 100)}% 1RM`;
+                              } else {
+                                return `${weight} lbs`;
+                              }
+                            };
+                            
+                            const currentWeightDisplay = formatWeight(
+                              ex.currentWeight, 
+                              ex.currentWeightType || 'ABSOLUTE'
+                            );
+                            const nextWeightDisplay = formatWeight(
+                              ex.nextWeight, 
+                              ex.nextWeightType || 'ABSOLUTE'
+                            );
+                            
+                            // Check if performed data exists
+                            const hasPerformed = ex.performedSets !== undefined;
+                            
+                            // Format display based on exercise type
+                            const formatPrescribed = () => {
+                              if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
+                                return `${ex.currentDuration || ex.currentReps} minutes`;
+                              } else if (ex.exerciseType === 'distance') {
+                                const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
+                                return `${ex.currentSets} sets × ${ex.currentDistance || 0} ${ex.currentDistanceUnit || 'feet'}${weightDisplay}`;
+                              } else {
+                                return `${ex.currentSets}×${ex.currentReps} @ ${currentWeightDisplay}`;
+                              }
+                            };
+                            
+                            const formatPerformed = () => {
+                              if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
+                                const mins = ex.performedDuration ? Math.round(ex.performedDuration / 60) : (ex.performedRepsDetail?.[0] || ex.currentDuration || ex.currentReps);
+                                return `${mins} minutes`;
+                              } else if (ex.exerciseType === 'distance') {
+                                if (ex.performedWeightsDetail && ex.performedWeightsDetail.length > 0) {
+                                  return (
+                                    <span className="text-xs">
+                                      {ex.performedWeightsDetail.map((weight: number, idx: number) => (
+                                        <span key={idx} className="mr-2">
+                                          Set {idx + 1}: {ex.performedDistance || ex.currentDistance || 0} {ex.currentDistanceUnit || 'feet'} @ {weight}lbs
+                                        </span>
+                                      ))}
+                                    </span>
+                                  );
+                                }
+                                return `${ex.performedSets} sets`;
+                              } else {
+                                // Strength exercise
+                                if (ex.performedWeightsDetail && ex.performedWeightsDetail.length > 0) {
+                                  return (
+                                    <span className="text-xs">
+                                      {ex.performedWeightsDetail.map((weight: number, idx: number) => (
+                                        <span key={idx} className="mr-2">
+                                          Set {idx + 1}: {ex.performedRepsDetail?.[idx] || 0}×{weight}lbs
+                                        </span>
+                                      ))}
+                                    </span>
+                                  );
+                                }
+                                return `${ex.performedSets} sets @ ${ex.performedWeight} lbs`;
+                              }
+                            };
+                            
+                            const formatNext = () => {
+                              if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
+                                return `${ex.nextDuration || ex.nextReps} minutes`;
+                              } else if (ex.exerciseType === 'distance') {
+                                const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
+                                return `${ex.nextSets} sets × ${ex.nextDistance || 0} ${ex.currentDistanceUnit || 'feet'}${weightDisplay}`;
+                              } else {
+                                return `${ex.nextSets}×${ex.nextReps} @ ${nextWeightDisplay}`;
+                              }
+                            };
+                            
+                            return (
+                              <div key={idx} className="bg-background/30 rounded-lg p-3">
+                                <p className="font-semibold text-sm mb-2">{ex.name}</p>
+                                
+                                {/* Show all three: prescribed, performed, next */}
+                                <div className="space-y-1 text-xs mb-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-muted-foreground w-20">Prescribed:</span>
+                                    <span className="text-foreground">
+                                      {formatPrescribed()}
+                                    </span>
+                                  </div>
+                                  {hasPerformed && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-muted-foreground w-20">Performed:</span>
+                                      <span className="text-foreground">
+                                        {formatPerformed()}
+                                      </span>
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-success w-20">Next:</span>
+                                    <span className="font-medium text-success">
+                                      {formatNext()}
+                                    </span>
+                                  </div>
+                                </div>
+                                
+                                <p className="text-xs text-muted-foreground">{ex.reasoning}</p>
                               </div>
-                              <p className="text-xs text-muted-foreground mt-1">{ex.reasoning}</p>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </>
                       );
                     })()}
@@ -1104,152 +1631,67 @@ export function ChatContent({
                 {/* Adjustment approval buttons */}
                 {message.metadata?.type === 'adjustment_preview' && message.metadata?.adjustmentId && (
                   <div className="mt-3 pt-3 border-t border-border">
-                    {approvedAdjustments.has(message.metadata.adjustmentId as string) ? (
-                      <div className="text-center text-success font-medium">
-                        ✓ Applied to next workout
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <Button
-                          size="sm"
-                          onClick={() => handleApproveAdjustments(message.metadata!.adjustmentId as string)}
-                          fullWidth
-                        >
-                          Approve All
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => setInput("I'd like to adjust...")}
-                          fullWidth
-                        >
-                          Modify Suggestions
-                        </Button>
-                      </div>
-                    )}
+                    {(() => {
+                      const adjId = message.metadata.adjustmentId as string;
+                      const messageMetadata = message.metadata as { approved?: boolean };
+                      // Check this message's approval status
+                      const isApproved = messageMetadata.approved === true;
+                      const isApproving = approvingAdjustment === adjId;
+                      
+                      return isApproved ? (
+                        <div className="text-center text-success font-medium">
+                          ✓ Applied to next workout
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <Button
+                            size="sm"
+                            onClick={() => handleApproveAdjustments(adjId, message.id)}
+                            fullWidth
+                            disabled={isApproving}
+                          >
+                            {isApproving ? 'Applying...' : 'Approve All'}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => setInput("I'd like to adjust...")}
+                            fullWidth
+                            disabled={isApproving}
+                          >
+                            Modify Suggestions
+                          </Button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
             </div>
-          ))}
+          );
+          })}
 
-          {/* Streaming message */}
-          {isStreaming && streamingText && (
+          {/* Typing indicator - only show when loading but no streaming text yet */}
+          {showTypingIndicator && (
             <div className="flex justify-start">
-              <div className="max-w-[80%] bg-surface rounded-2xl px-4 py-2.5 text-foreground">
-                <div className="prose prose-invert prose-sm max-w-none">
-                  <ReactMarkdown
-                    components={{
-                      p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-                      ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-                      ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
-                      li: ({ children }) => <li className="text-foreground">{children}</li>,
-                      strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
-                      em: ({ children }) => <em className="italic">{children}</em>,
-                      code: ({ children }) => (
-                        <code className="bg-background/50 px-1.5 py-0.5 rounded text-sm font-mono">{children}</code>
-                      ),
-                      pre: ({ children }) => (
-                        <pre className="bg-background/50 p-3 rounded-lg overflow-x-auto mb-2">{children}</pre>
-                      ),
-                    }}
-                  >
-                    {streamingText.replace(/```(?:json)?\s*[\s\S]*?```/g, '').trim() || streamingText}
-                  </ReactMarkdown>
+              <div className="bg-surface rounded-2xl px-4 py-2.5">
+                <div className="flex items-center gap-1">
+                  <span className="w-2 h-2 bg-muted-foreground rounded-full animate-typing" />
+                  <span className="w-2 h-2 bg-muted-foreground rounded-full animate-typing" style={{ animationDelay: '0.2s' }} />
+                  <span className="w-2 h-2 bg-muted-foreground rounded-full animate-typing" style={{ animationDelay: '0.4s' }} />
                 </div>
-
-                {/* Streaming days preview */}
-                {streamingDays.length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-border space-y-3">
-                    <div className="text-xs text-muted-foreground">
-                      Generating plan...
-                    </div>
-                    {streamingDays.map((day, idx) => (
-                      <div key={idx} className="bg-background/30 rounded-lg p-3 animate-fade-in">
-                        <div className="flex items-center gap-2 mb-2">
-                          <div
-                            className="w-3 h-3 rounded-full"
-                            style={{ backgroundColor: day.workoutColor }}
-                          />
-                          <p className="font-semibold text-sm">
-                            {day.dayName} - {day.workoutType}
-                          </p>
-                        </div>
-                        <div className="space-y-1">
-                          {day.exercises?.slice(0, 3).map((ex, exIdx) => (
-                            <div key={exIdx} className="text-xs">
-                              <span className="font-medium">{ex.name}</span>
-                              <span className="text-muted-foreground ml-2">
-                                {ex.sets}×{ex.reps}
-                              </span>
-                            </div>
-                          ))}
-                          {day.exercises && day.exercises.length > 3 && (
-                            <div className="text-xs text-muted-foreground">
-                              +{day.exercises.length - 3} more exercises
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Streaming adjustments preview */}
-                {streamingAdjustments.length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-border space-y-3">
-                    {streamingAdjustments.map((adj, idx) => (
-                      <div key={idx} className="bg-background/30 rounded-lg p-3 animate-fade-in">
-                        <p className="font-semibold text-sm mb-2">{adj.name}</p>
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="text-muted-foreground">
-                            {adj.currentSets}×{adj.currentReps} @ {adj.currentWeight} lbs
-                          </span>
-                          <span className="text-primary">→</span>
-                          <span className="font-medium text-success">
-                            {adj.nextSets}×{adj.nextReps} @ {adj.nextWeight} lbs
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
             </div>
           )}
 
-          {/* Loading indicator with stop button */}
-          {(isLoading || isStreaming) && (
-            <div className="flex justify-start items-center gap-2">
-              <div className="bg-surface rounded-2xl px-4 py-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex gap-1">
-                    <span className="w-2 h-2 bg-muted rounded-full animate-pulse" />
-                    <span className="w-2 h-2 bg-muted rounded-full animate-pulse" style={{ animationDelay: '150ms' }} />
-                    <span className="w-2 h-2 bg-muted rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
-                  </div>
-                  {streamProgress && (
-                    <span className="text-xs text-muted-foreground">
-                      {streamProgress.label} ({streamProgress.current}/{streamProgress.total})
-                    </span>
-                  )}
-                  {!streamProgress && isStreaming && (
-                    <span className="text-xs text-muted-foreground">
-                      {mode === 'create' || mode === 'edit' ? 'Generating plan...' :
-                       mode === 'post_workout' ? 'Analyzing workout...' : 'Thinking...'}
-                    </span>
-                  )}
-                </div>
+          {/* Progress indicator - show when generating days */}
+          {streamProgress && (
+            <div className="flex justify-start">
+              <div className="bg-surface/50 rounded-xl px-3 py-1.5">
+                <span className="text-xs text-muted-foreground">
+                  {streamProgress.label} ({streamProgress.current}/{streamProgress.total})
+                </span>
               </div>
-              {isStreaming && (
-                <button
-                  onClick={handleStopStreaming}
-                  className="p-2 rounded-lg bg-error/20 hover:bg-error/30 transition-colors"
-                  title="Stop generating"
-                >
-                  <Square size={16} className="text-error fill-error" />
-                </button>
-              )}
             </div>
           )}
 
@@ -1259,7 +1701,7 @@ export function ChatContent({
       )}
 
       {/* Input - Fixed at bottom above nav */}
-      {!showHistory && (messages.length > 0 || isLoading || selectedAction) && (
+      {!showHistory && (messages.length > 0 || isLoading || selectedAction || mode) && (
         <div className="fixed bottom-16 left-0 right-0 bg-background border-t border-border z-20">
           <div className="px-4 py-3">
           <div className="flex gap-3 items-end max-w-2xl mx-auto">
@@ -1278,9 +1720,9 @@ export function ChatContent({
                 }
               }}
               placeholder={
-                selectedAction === 'create' ? "Describe your fitness goals..." :
-                selectedAction === 'edit' ? "What would you like to change..." :
-                selectedAction === 'ask' ? "Ask a question..." :
+                (selectedAction === 'create' || mode === 'create') ? "Describe your fitness goals..." :
+                (selectedAction === 'edit' || mode === 'edit') ? "What would you like to change..." :
+                (selectedAction === 'ask' || mode === 'ask') ? "Ask a question..." :
                 "Type a message..."
               }
               disabled={isLoading}
@@ -1292,15 +1734,25 @@ export function ChatContent({
                        max-h-32 overflow-y-auto"
               style={{ minHeight: '48px' }}
             />
-            <button
-              onClick={selectedAction ? handleActionSend : handleSend}
-              disabled={!input.trim() || isLoading}
-              className="p-3 rounded-full bg-primary text-white disabled:opacity-30 
-                       disabled:cursor-not-allowed disabled:pointer-events-none hover:bg-primary-hover transition-colors
-                       touch-target"
-            >
-              <SendHorizontal size={20} />
-            </button>
+            {isStreaming ? (
+              <button
+                onClick={handleStopStreaming}
+                className="p-3 rounded-full bg-white text-background hover:bg-white/90 transition-colors touch-target"
+                title="Stop generating"
+              >
+                <Square size={20} className="fill-current" />
+              </button>
+            ) : (
+              <button
+                onClick={selectedAction ? handleActionSend : handleSend}
+                disabled={!input.trim() || isLoading}
+                className="p-3 rounded-full bg-primary text-white disabled:opacity-30 
+                         disabled:cursor-not-allowed disabled:pointer-events-none hover:bg-primary-hover transition-colors
+                         touch-target"
+              >
+                <SendHorizontal size={20} />
+              </button>
+            )}
           </div>
         </div>
         </div>

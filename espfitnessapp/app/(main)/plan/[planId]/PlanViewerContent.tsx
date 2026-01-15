@@ -238,8 +238,12 @@ export function PlanViewerContent({ plan }: { plan: Plan }) {
         return `${Math.round(value * 100)}% BW`;
       case '1RM':
         return `${Math.round(value * 100)}% 1RM`;
+      case 'RPE':
+        return `RPE ${value}`;
+      case 'ABSOLUTE':
+        return value > 0 ? `${value} lbs` : '';
       default:
-        return `${value} lbs`;
+        return value > 0 ? `${value} lbs` : '';
     }
   };
 
@@ -273,7 +277,9 @@ export function PlanViewerContent({ plan }: { plan: Plan }) {
     switch (exerciseType) {
       case 'cardio_time':
       case 'mobility_time':
-        return `${exercise.reps} min`;
+        // Use duration field if available, fall back to reps for backwards compatibility
+        const mins = exercise.duration || exercise.reps;
+        return `${mins} min`;
       
       case 'distance':
         const unit = exercise.distanceUnit || 'feet';
@@ -285,26 +291,31 @@ export function PlanViewerContent({ plan }: { plan: Plan }) {
       case 'interval':
         if (exercise.intervals) {
           const { rounds, phases } = exercise.intervals;
+          const intervalWeight = exercise.weightValue > 0 ? ` • ${formatWeight(exercise.weightType, exercise.weightValue)}` : '';
           if (phases.length === 2) {
             // Simple work/rest format
-            return `${rounds} rounds: ${formatDuration(phases[0].duration)} ${phases[0].name.toLowerCase()} / ${formatDuration(phases[1].duration)} ${phases[1].name.toLowerCase()}`;
+            return `${rounds} rounds: ${formatDuration(phases[0].duration)} ${phases[0].name.toLowerCase()} / ${formatDuration(phases[1].duration)} ${phases[1].name.toLowerCase()}${intervalWeight}`;
           } else {
             // Complex multi-phase
             const totalTime = phases.reduce((sum, p) => sum + p.duration, 0) * rounds;
-            return `${rounds} rounds • ${formatDuration(totalTime)} total`;
+            return `${rounds} rounds • ${formatDuration(totalTime)} total${intervalWeight}`;
           }
         }
         return 'Interval training';
       
       case 'amrap':
         const timeCap = exercise.timeCap || 600;
-        return `AMRAP ${formatDuration(timeCap)}`;
+        const amrapWeight = exercise.weightValue > 0 ? ` • ${formatWeight(exercise.weightType, exercise.weightValue)}` : '';
+        return `AMRAP ${formatDuration(timeCap)} • ${exercise.reps} reps/round${amrapWeight}`;
       
       case 'emom':
-        return `EMOM ${exercise.sets} min × ${exercise.reps} reps`;
+        const emomTime = exercise.timeCap || 600;
+        const emomWeight = exercise.weightValue > 0 ? ` • ${formatWeight(exercise.weightType, exercise.weightValue)}` : '';
+        return `EMOM ${formatDuration(emomTime)} • ${exercise.reps} reps/min${emomWeight}`;
       
       case 'tabata':
-        return `Tabata ${exercise.sets} rounds (20s/10s)`;
+        const tabataWeight = exercise.weightValue > 0 ? ` • ${formatWeight(exercise.weightType, exercise.weightValue)}` : '';
+        return `Tabata ${exercise.sets} rounds (20s/10s) • ${exercise.reps} reps/round${tabataWeight}`;
       
       case 'tempo':
         const tempoPattern = exercise.tempo || '3-1-3-1';

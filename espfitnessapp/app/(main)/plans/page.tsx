@@ -5,7 +5,12 @@ import { redirect } from 'next/navigation';
 
 async function getPlans(userId: string) {
   const plans = await prisma.workoutPlan.findMany({
-    where: { userId },
+    where: { 
+      userId,
+      status: {
+        not: 'draft'
+      }
+    },
     orderBy: { createdAt: 'desc' },
     select: {
       id: true,

@@ -152,6 +152,20 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
     .filter((p) => p.status === 'active')
     .map((p) => p.id);
 
+  // Get all adjustment IDs mentioned in messages and check their status
+  const adjustmentIds = messages
+    .map((m: any) => m.metadata?.adjustmentId)
+    .filter((id): id is string => typeof id === 'string');
+  
+  const adjustments = await prisma.pendingAdjustment.findMany({
+    where: { id: { in: adjustmentIds } },
+    select: { id: true, status: true },
+  });
+  
+  const approvedAdjustmentIds = adjustments
+    .filter((a) => a.status === 'approved')
+    .map((a) => a.id);
+
   // Detect mode from message history if present
   let detectedMode: string | null = null;
   if (messages.length > 0) {
@@ -174,6 +188,7 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
     activePlan,
     user,
     approvedPlanIds,
+    approvedAdjustmentIds,
     detectedMode,
     pendingAdjustment,
   };
@@ -205,14 +220,15 @@ export default async function ChatPage({
   
   // Determine the mode
   let mode: string | undefined;
-  if (isPostWorkout) {
+  if (isPostWorkout || pathMode === 'post_workout') {
     mode = 'post_workout';
   } else if (pathMode && ['create', 'edit', 'ask'].includes(pathMode)) {
     mode = pathMode;
   }
   
-  // Force new session only for post-workout (other modes can continue existing sessions)
-  const forceNewSession = isPostWorkout;
+  // Force new session for post-workout mode when there's no existing session specified
+  // This ensures "Generate Analysis" creates a fresh chat
+  const forceNewSession = (isPostWorkout || pathMode === 'post_workout') && !sessionId;
   
   // If new=true and no sessionId, return empty data to show menu
   let data;
@@ -251,6 +267,7 @@ export default async function ChatPage({
       activePlan,
       user,
       approvedPlanIds: [],
+      approvedAdjustmentIds: [],
       detectedMode: null,
       pendingAdjustment: null,
     };

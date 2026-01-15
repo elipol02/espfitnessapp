@@ -46,6 +46,15 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     return checkDate < start;
   };
 
+  // Check if a date is in the future (for greying out and preventing submission)
+  const isFutureDate = (date: Date) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const checkDate = new Date(date);
+    checkDate.setHours(0, 0, 0, 0);
+    return checkDate > today;
+  };
+
   // Get workout for a specific date by matching scheduledDate
   const getWorkoutForDate = (date: Date) => {
     // First try to find by scheduledDate
@@ -262,7 +271,9 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                 const isTodayDate = isToday(date);
                 const isCompleted = log?.status === 'completed';
                 const beforeStart = isBeforeStartDate(date);
+                const isFuture = isFutureDate(date);
                 const isGenerated = workout?.isGenerated ?? false;
+                // Allow clicking workouts that are generated, even if they're in the future
                 const isClickable = workout && planId && !beforeStart && isGenerated;
 
                 return (
@@ -272,7 +283,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                       isClickable
                         ? log
                           ? `/workout/live?logId=${log.id}`
-                          : `/workout/live?dayId=${workout.id}&planId=${planId}&date=${date.toISOString()}`
+                          : `/workout/live?dayId=${workout.id}&planId=${planId}&date=${date.toISOString()}${isFuture ? '&preview=true' : ''}`
                         : '#'
                     }
                     className={`
@@ -325,6 +336,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
               const isTodayDate = isToday(date);
               const isCompleted = log?.status === 'completed';
               const beforeStart = isBeforeStartDate(date);
+              const isFuture = isFutureDate(date);
               const isGenerated = workout?.isGenerated ?? false;
 
               return (
@@ -363,11 +375,22 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                     </div>
 
                     {workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && !beforeStart && (
-                      isCompleted ? (
-                        <div className="flex items-center gap-1 text-success">
-                          <Check size={18} />
-                          <span className="text-sm font-medium">Done</span>
-                        </div>
+                      isFuture ? (
+                        isGenerated ? (
+                          <Link href={`/workout/live?dayId=${workout.id}&planId=${planId}&date=${date.toISOString()}&preview=true`}>
+                            <Button size="sm" variant="secondary">
+                              Preview
+                            </Button>
+                          </Link>
+                        ) : (
+                          <span className="text-xs text-muted-foreground opacity-60">Coming soon</span>
+                        )
+                      ) : isCompleted && log ? (
+                        <Link href={`/workout/live?logId=${log.id}`}>
+                          <Button size="sm" variant="secondary">
+                            View
+                          </Button>
+                        </Link>
                       ) : !isGenerated ? (
                         <span className="text-xs text-muted-foreground opacity-60">Coming soon</span>
                       ) : log ? (
@@ -377,7 +400,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                           </Button>
                         </Link>
                       ) : (
-                        <Link href={`/workout/live?dayId=${workout.id}&planId=${planId}`}>
+                        <Link href={`/workout/live?dayId=${workout.id}&planId=${planId}&date=${date.toISOString()}`}>
                           <Button size="sm" variant={isTodayDate ? 'primary' : 'secondary'}>
                             Start
                           </Button>

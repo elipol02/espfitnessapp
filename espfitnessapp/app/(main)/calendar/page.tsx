@@ -3,6 +3,8 @@ import { prisma } from '@/app/lib/db';
 import { CalendarContent } from './CalendarContent';
 import { redirect } from 'next/navigation';
 
+export const dynamic = 'force-dynamic';
+
 async function getCalendarData(userId: string) {
   // Get user's active plan with all workout days (full 12-week skeleton)
   const activePlan = await prisma.workoutPlan.findFirst({

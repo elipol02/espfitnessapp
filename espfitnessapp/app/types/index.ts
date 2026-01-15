@@ -105,22 +105,45 @@ export interface Exercise {
   id: string;
   dayId: string;
   name: string;
+  exerciseType: ExerciseType;
+  order: number;
+  
+  // Strength exercise fields (sets x reps with weight)
   sets: number;
   reps: number;
   weightType: WeightType;
   weightValue: number;
   restTime: number;
-  exerciseType: ExerciseType;
+  
+  // Time-based exercise fields (cardio_time, mobility_time)
+  duration?: number;           // Duration in minutes
+  
+  // Distance-based exercise fields
+  distance?: number;           // Target distance (e.g., 40)
+  distanceUnit?: DistanceUnit; // feet, yards, meters
+  
+  // Interval exercise fields
+  intervals?: IntervalStructure; // { type, rounds, phases[] }
+  
+  // Tempo exercise fields  
+  tempo?: string;              // Tempo pattern (e.g., "3-1-3-1")
+  
+  // AMRAP/EMOM/Tabata fields
+  timeCap?: number;            // Time cap in seconds
+  movements?: Movement[];      // List of movements for complex workouts
+  
+  // Common fields
   progression: ProgressionStrategy | null;
   movementDetails: MovementDetails | null;
-  order: number;
-  
-  // Complex exercise type fields
-  distance?: number;           // Target distance (e.g., 40 for 40 feet)
-  distanceUnit?: DistanceUnit; // feet, yards
-  intervals?: IntervalStructure; // Interval structure with phases
-  tempo?: string;              // Tempo pattern (e.g., "3-1-3-1")
-  timeCap?: number;            // Time cap in seconds for AMRAP/timed exercises
+}
+
+// Movement within AMRAP/EMOM/Tabata
+export interface Movement {
+  name: string;
+  reps?: number;               // Reps per round/minute
+  duration?: number;           // Duration in seconds (alternative to reps)
+  weight?: number;             // Weight if applicable
+  weightType?: WeightType;
 }
 
 export interface ProgressionStrategy {
@@ -165,7 +188,7 @@ export interface ExerciseLog {
   exerciseId: string;
   setsCompleted: number;
   repsPerSet: number[];
-  weightUsed: number;
+  weightUsed: number[]; // Array of weights, one per set
   isPR: boolean;
   notes: string | null;
 }

@@ -12,6 +12,12 @@ const addSetSchema = z.object({
       weight: z.number(),
     })
   ),
+  // Optional fields for different exercise types
+  duration: z.number().optional(), // Duration in seconds for cardio_time, mobility_time
+  distance: z.number().optional(), // Distance for distance exercises
+  roundsCompleted: z.number().optional(), // For AMRAP, intervals
+  timeElapsed: z.number().optional(), // Time taken for AMRAP, EMOM
+  performanceData: z.any().optional(), // Flexible field for complex data
 });
 
 export async function POST(request: NextRequest) {
@@ -31,15 +37,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { workoutLogId, exerciseId, sets } = result.data;
+    const { workoutLogId, exerciseId, sets, duration, distance, roundsCompleted, timeElapsed, performanceData } = result.data;
 
-    // Verify ownership
+    // Verify ownership and validate workout has a date
     const workoutLog = await prisma.workoutLog.findUnique({
       where: { id: workoutLogId },
     });
 
     if (!workoutLog || workoutLog.userId !== session.user.id) {
       return NextResponse.json({ success: false, error: 'Workout not found' }, { status: 404 });
+    }
+
+    // CRITICAL: Workout must have a valid date before any data can be saved
+    if (!workoutLog.workoutDate) {
+      console.error('Cannot save set - workout log has no date:', workoutLogId);
+      return NextResponse.json({ success: false, error: 'Workout has no date' }, { status: 400 });
     }
 
     // Check if exercise log already exists
@@ -51,18 +63,26 @@ export async function POST(request: NextRequest) {
     });
 
     const repsPerSet = sets.map((s) => s.reps);
-    const avgWeight = sets.length > 0 ? sets.reduce((sum, s) => sum + s.weight, 0) / sets.length : 0;
+    const weightsPerSet = sets.map((s) => s.weight);
+    const maxWeight = sets.length > 0 ? Math.max(...weightsPerSet) : 0;
 
-    // Check if this is a PR (simplified - would need more logic for real PR detection)
+    // Check if this is a PR (simplified - check if max weight is higher than previous best)
     const previousBest = await prisma.exerciseLog.findFirst({
       where: {
         exerciseId,
         log: { userId: session.user.id },
       },
-      orderBy: { weightUsed: 'desc' },
+      orderBy: { id: 'desc' },
     });
 
-    const isPR = !previousBest || avgWeight > previousBest.weightUsed;
+    let isPR = false;
+    if (previousBest) {
+      const prevWeights = previousBest.weightUsed as number[];
+      const prevMax = Array.isArray(prevWeights) ? Math.max(...prevWeights) : (prevWeights as unknown as number);
+      isPR = maxWeight > prevMax;
+    } else {
+      isPR = true; // First time doing this exercise
+    }
 
     if (existingLog) {
       // Update existing log
@@ -71,8 +91,13 @@ export async function POST(request: NextRequest) {
         data: {
           setsCompleted: sets.length,
           repsPerSet,
-          weightUsed: avgWeight,
+          weightUsed: weightsPerSet,
           isPR,
+          duration,
+          distance,
+          roundsCompleted,
+          timeElapsed,
+          performanceData,
         },
       });
     } else {
@@ -83,8 +108,13 @@ export async function POST(request: NextRequest) {
           exerciseId,
           setsCompleted: sets.length,
           repsPerSet,
-          weightUsed: avgWeight,
+          weightUsed: weightsPerSet,
           isPR,
+          duration,
+          distance,
+          roundsCompleted,
+          timeElapsed,
+          performanceData,
         },
       });
     }

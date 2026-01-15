@@ -187,6 +187,15 @@ button {
   50% { opacity: 0.5; }
 }
 
+@keyframes typingPulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+.animate-typing {
+  animation: typingPulse 1.2s ease-in-out infinite;
+}
+
 .animate-fade-in {
   animation: fadeIn 0.2s ease-out;
 }

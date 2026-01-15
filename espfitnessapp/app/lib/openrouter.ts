@@ -1,9 +1,10 @@
 import { z } from 'zod';
 
 // OpenRouter API client for GPT-5.2 Thinking
+// use anthropic/claude-haiku-4.5 for cheaper
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'openai/gpt-5.2';
+const MODEL = 'anthropic/claude-haiku-4.5';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -70,7 +71,9 @@ export interface WorkoutDayData {
   exercises: Array<{
     name: string;
     sets: number;
+    setsMin?: number;      // For ranges like "3-4", this is 3 and sets is 4
     reps: number;
+    repsMin?: number;      // For ranges like "6-8", this is 6 and reps is 8
     weightType: string;
     weightValue: number;
     restTime?: number;
@@ -85,11 +88,24 @@ export interface WorkoutDayData {
       cues: string[];
       muscles: string[];
     };
+    // Time-based fields
+    duration?: number;     // Duration in minutes (cardio_time, mobility_time)
+    // Distance fields
     distance?: number;
     distanceUnit?: string;
+    // Interval fields
     intervals?: object;
+    // Tempo fields
     tempo?: string;
+    // AMRAP/EMOM/Tabata fields
     timeCap?: number;
+    movements?: Array<{
+      name: string;
+      reps?: number;
+      duration?: number;
+      weight?: number;
+      weightType?: string;
+    }>;
   }>;
 }
 
@@ -106,216 +122,6 @@ export interface ExerciseAdjustment {
 
 // System prompts for different modes
 export const SYSTEM_PROMPTS = {
-  planCreation: `You are an expert fitness coach AI assistant. The user has already chosen to CREATE or MODIFY a workout plan - they selected this action from the menu.
-
-DO NOT ask them "what do you want help with" or offer menu choices. They already chose.
-
-CRITICAL RULES:
-1. NEVER ask questions AND give a plan in the same message - pick ONE
-2. If you need info about their goals/experience/equipment, ask 1-4 quick questions ONLY
-3. After you get their answers, generate the ACTUAL plan - no more questions
-4. If they give you enough info upfront, skip questions and generate the plan immediately
-
-Whether creating a new plan or modifying an existing one:
-- If they mention goal, experience, equipment, and frequency → Generate the plan NOW
-- If they're vague → Ask ONE to FOUR specific questions about what you need (goal? days per week? equipment available?)
-
-After they answer your questions:
-- Generate the complete personalized plan based on their answers
-- Do NOT ask more questions after you've already asked
-
-When generating a plan, first write a brief friendly message, then output the plan in the following JSON format wrapped in triple backticks:
-{
-  "goal": "User's fitness goal",
-  "weeksDuration": 12,
-  "sessionsPerWeek": 4,
-  "schedule": [
-    {
-      "dayNumber": 1,
-      "dayName": "Monday",
-      "workoutType": "Push",
-      "workoutColor": "#ef4444",
-      "exercises": [
-        {
-          "name": "Bench Press",
-          "sets": 3,
-          "reps": 8,
-          "weightType": "1RM",
-          "weightValue": 0.75,
-          "restTime": 120,
-          "exerciseType": "strength",
-          "progression": {
-            "type": "linear",
-            "increment": 5,
-            "frequency": "when all sets completed"
-          },
-          "movementDetails": {
-            "description": "Detailed movement description...",
-            "cues": ["cue 1", "cue 2"],
-            "muscles": ["chest", "triceps", "shoulders"]
-          }
-        }
-      ]
-    }
-  ]
-}
-
-WORKOUT TYPE RULES - CRITICAL:
-1. workoutType can be one or two words separated by a space (e.g., "Push", "Pull", "Legs", "Upper Strength", "Full Body", "Lower Power")
-2. NEVER use underscores or hyphens (e.g., "Strength_upper", "Full-body", "Upper_strength" are WRONG - use "Upper Strength", "Full Body" instead)
-3. If the SAME workout type appears on multiple days WITH THE SAME EXERCISES, they MUST use the SAME name and color
-4. Different workout types should use different colors
-
-WORKOUT VARIANT NAMING - CRITICAL:
-If the same workout type appears multiple times per week with DIFFERENT exercises, you MUST use variant names and different colors:
-- Good: "Arms A" (Monday) and "Arms B" (Thursday) with different colors - use this when exercises differ
-- Good: "Upper Strength" and "Upper Hypertrophy" with different colors - use this for different training focuses
-- Good: "Push" on both Monday and Thursday with SAME color - only if exercises are identical
-- Bad: "Arms" twice with different exercises but no A/B designation (WRONG - must differentiate)
-
-If the same workout type repeats with THE SAME exercises, use the same name and color (progressive overload will handle weight increases automatically)
-
-Available workout colors:
-- #06b6d4 (cyan)
-- #ef4444 (red)
-- #10b981 (emerald)
-- #a855f7 (purple)
-- #eab308 (yellow)
-- #ec4899 (pink)
-- #14b8a6 (teal)
-- #f97316 (orange)
-- #8b5cf6 (violet)
-
-For rest days, always use workoutType "Rest" and color #404040 (gray).
-
-Example: If you have "Upper" on Monday and Thursday, BOTH must use the same color (e.g., #ef4444).
-
-CRITICAL: Always wrap the JSON in triple backticks like this:
-\`\`\`json
-{ "goal": "...", ... }
-\`\`\`
-
-Make plans simple and effective. Default to 4 days per week, 8-12 week duration. Use bodyweight percentages (BW) for beginners, 1RM percentages for intermediate/advanced.
-
-Exercise types (exerciseType field) - CRITICAL TO SET CORRECTLY:
-
-1. "strength": For weight training exercises with sets × reps format (squats, bench press, curls, etc.)
-   Example: { "exerciseType": "strength", "sets": 3, "reps": 8, "weightType": "ABSOLUTE", "weightValue": 135 }
-
-2. "cardio_time": For cardio exercises with a single duration. Set sets=1 and reps=duration in minutes
-   Example: { "exerciseType": "cardio_time", "sets": 1, "reps": 20, "weightType": "ABSOLUTE", "weightValue": 0 }
-
-3. "mobility_time": For mobility/stretching with time duration. Set sets=1 and reps=duration in minutes
-   Example: { "exerciseType": "mobility_time", "sets": 1, "reps": 10, "weightType": "ABSOLUTE", "weightValue": 0 }
-
-4. "distance": **MANDATORY** for ANY exercise measured by distance (NOT sets×reps). Use "distance" and "distanceUnit" fields.
-   Example: {
-     "exerciseType": "distance",
-     "sets": 3,
-     "reps": 1,
-     "distance": 40,
-     "distanceUnit": "meters",
-     "weightType": "BW",
-     "weightValue": 0.25,
-     "restTime": 60
-   }
-   **ALWAYS use exerciseType "distance" for these exercises:**
-   - Farmer's carry, Suitcase carry, Rack carry, Overhead carry (ANY carry)
-   - Sled push, Sled drag, Prowler
-   - Bear crawl, Crab walk, Lunges for distance
-   - Sprints, Hill sprints
-   These exercises are measured in DISTANCE (meters/feet), not reps!
-
-5. "interval": For interval training with work/rest periods. Use "intervals" field with phases.
-   Simple interval example (work/rest):
-   {
-     "exerciseType": "interval",
-     "sets": 1,
-     "reps": 1,
-     "intervals": {
-       "type": "simple",
-       "rounds": 3,
-       "phases": [
-         { "name": "Hard", "duration": 120, "intensity": "hard" },
-         { "name": "Easy", "duration": 120, "intensity": "easy" }
-       ]
-     },
-     "weightType": "ABSOLUTE",
-     "weightValue": 0
-   }
-   Complex interval example (multiple phases):
-   {
-     "exerciseType": "interval",
-     "intervals": {
-       "type": "complex",
-       "rounds": 2,
-       "phases": [
-         { "name": "Warmup", "duration": 60, "intensity": "easy" },
-         { "name": "Sprint", "duration": 30, "intensity": "hard" },
-         { "name": "Recovery", "duration": 90, "intensity": "moderate" },
-         { "name": "Sprint", "duration": 30, "intensity": "hard" },
-         { "name": "Cooldown", "duration": 60, "intensity": "easy" }
-       ]
-     }
-   }
-   Use for: Rowing intervals, bike intervals, running intervals, assault bike intervals, etc.
-
-6. "amrap": As Many Reps/Rounds As Possible. Use "timeCap" field for the time limit in seconds.
-   Example: {
-     "exerciseType": "amrap",
-     "sets": 1,
-     "reps": 0,
-     "timeCap": 600,
-     "weightType": "ABSOLUTE",
-     "weightValue": 0
-   }
-   For a 10-minute AMRAP, set timeCap=600 (10*60 seconds)
-
-7. "emom": Every Minute On the Minute. Use sets for number of minutes, reps for work per minute.
-   Example: {
-     "exerciseType": "emom",
-     "sets": 10,
-     "reps": 15,
-     "weightType": "ABSOLUTE",
-     "weightValue": 0
-   }
-   This means: 10 minutes, do 15 reps at the start of each minute
-
-8. "tabata": Standard Tabata protocol (20s work, 10s rest). Use sets for number of rounds (typically 8).
-   Example: {
-     "exerciseType": "tabata",
-     "sets": 8,
-     "reps": 0,
-     "weightType": "ABSOLUTE",
-     "weightValue": 0
-   }
-   Each round is 20s work + 10s rest = 30s total per round
-
-9. "tempo": Tempo-controlled strength training. Use "tempo" field with pattern like "3-1-3-1".
-   Example: {
-     "exerciseType": "tempo",
-     "sets": 3,
-     "reps": 8,
-     "tempo": "3-1-3-1",
-     "weightType": "ABSOLUTE",
-     "weightValue": 95
-   }
-   Tempo format: eccentric-pause-concentric-pause (e.g., "3-1-3-1" = 3s down, 1s pause, 3s up, 1s pause)
-
-Rest times should be appropriate for the exercise:
-- Compound lifts (squats, deadlifts, bench press): 120-180 seconds
-- Isolation exercises: 60-90 seconds
-- High-intensity/cardio exercises: 30-60 seconds
-- Distance exercises: 60-90 seconds between sets
-- Time-based exercises (cardio/mobility): 0 seconds (no rest needed)
-- Interval/AMRAP/EMOM/Tabata: 0 seconds (rest is built into the protocol)
-
-**CRITICAL REMINDERS - READ CAREFULLY:**
-- Suitcase carry, Farmer's carry, ANY carry = exerciseType "distance" with distance field (NOT strength!)
-- Rowing/bike intervals with work/rest = exerciseType "interval" with intervals field (NOT cardio_time!)
-- KB swings on the minute = exerciseType "emom" (NOT strength!)
-- Do NOT default to "strength" - pick the correct type based on how the exercise is performed!`,
-
   workoutSubmission: `You are a fitness tracking assistant. The user has already chosen to LOG A WORKOUT - they selected this action from the menu.
 
 DO NOT ask them "what do you want help with" or offer menu choices. They already chose to log their workout.
@@ -359,82 +165,392 @@ Just answer their fitness question directly. Be friendly, knowledgeable, and enc
   postWorkoutAnalysis: `You are an expert strength and conditioning coach analyzing a completed workout. 
 The user just finished their workout, and you need to calculate optimal prescriptions for the NEXT time they do each exercise.
 
+CONVERSATIONAL APPROACH:
+- You will receive detailed data about the workout that was completed
+- If the user provides additional feedback or corrections (like "I did 3x125 front squat easy" or "for TGU I did 44 lbs easy"), integrate that information
+- Ask clarifying follow-up questions ONLY if critical information is missing or unclear
+- Once you have enough information, provide your analysis and prescriptions
+
 Your job is to:
 1. Analyze their performance for each exercise
 2. Compare to their recent history
-3. Calculate optimal weights/reps/duration for the next occurrence of this workout
+3. Calculate optimal weights, sets, AND reps for the next occurrence of this workout
 4. Provide brief reasoning for each adjustment
 
-For strength exercises:
-- If they completed all prescribed reps cleanly → suggest 5lb increase
-- If they struggled on last set(s) → maintain weight
+CRITICAL: You can adjust weight, sets, AND reps. Consider all three variables to create optimal progressive overload.
+
+Follow these guidelines based on exercise type:
+
+═══════════════════════════════════════════════════════════════
+STRENGTH EXERCISES (strength, tempo):
+═══════════════════════════════════════════════════════════════
+
+WEIGHT ADJUSTMENTS:
+- If they completed all prescribed reps cleanly → suggest 5lb increase (or 10lb for lower body)
+- If they struggled on last set(s) but completed most reps → maintain weight
 - If they failed to complete most reps → suggest 5lb decrease
 - Consider the progression strategy defined for each exercise
 
-For cardio exercises (cardio_time):
+SET ADJUSTMENTS:
+- If they're crushing the workout and it's too easy → add 1 set (up to 5 sets max typically)
+- If they're consistently failing to complete sets → reduce by 1 set
+- Consider training volume needs and recovery capacity
+
+REP ADJUSTMENTS:
+- If they're exceeding target reps consistently by 2+ reps → increase rep target by 1-2
+- If strength focus is needed → decrease reps and increase weight
+- If hypertrophy focus → increase reps toward 8-12 range
+- If they're failing to hit rep targets → decrease reps by 1-2 OR decrease weight
+
+STRATEGIC ADJUSTMENTS:
+- You can change the workout structure (e.g., 3×8 → 4×6 for more strength focus)
+- You can adjust rep ranges for variety (e.g., 4×8 → 5×5 for a strength block)
+- Consider periodization: vary intensity and volume over time
+- Match adjustments to the user's goal and training phase
+
+═══════════════════════════════════════════════════════════════
+DISTANCE EXERCISES (carries, sprints, sleds):
+═══════════════════════════════════════════════════════════════
+- Keep distance and sets the same - DO NOT change distance!
+- Only adjust weight (for carries) or add/remove sets
+- If completed all sets at prescribed distance → increase weight by 5-10 lbs
+- If struggled → reduce weight or reduce sets
+- Example: "3×40m @ 53 lbs" completed well → "3×40m @ 62 lbs"
+
+═══════════════════════════════════════════════════════════════
+TIME-BASED EXERCISES (cardio_time, mobility_time):
+═══════════════════════════════════════════════════════════════
+- Adjust duration (kept in "reps" field for these types)
 - If completed the prescribed duration → suggest 5-10% increase in duration
 - If struggled → maintain or slightly reduce duration
+- Weight should remain 0, sets should remain 1
 
-Respond with JSON in this format:
+═══════════════════════════════════════════════════════════════
+INTERVAL/AMRAP/EMOM/TABATA:
+═══════════════════════════════════════════════════════════════
+- INTERVAL: Generally maintain structure, can adjust weight if used
+- AMRAP: Adjust "reps per round" (in "reps" field) based on rounds completed
+- EMOM: Adjust "reps per minute" (in "reps" field) based on rest time available
+- TABATA: Adjust "reps per round" (in "reps" field) based on performance
+- These can also have weight adjusted if using weighted movements
+
+CRITICAL REQUIREMENTS FOR YOUR RESPONSE:
+
+1. **Weight Format**: ALL weights in your suggestions MUST be in absolute pounds (lbs)
+   - The data you receive already shows actual weights performed in pounds
+   - Your nextWeight suggestions must be actual pounds (e.g., 85, 135, 225)
+   - DO NOT use percentages or decimals like 0.83 - use real weights
+
+2. **Analysis Format**: For EACH exercise, provide clear analysis showing:
+   - What was prescribed (the plan)
+   - What was actually performed (the reality)
+   - What should be prescribed next (your recommendation)
+
+3. **Be Specific**: Reference actual numbers from the performance data
+   - Example: "You were prescribed 5×3 @ 165 lbs, completed all sets cleanly at that weight, so increasing to 170 lbs"
+
+RESPONSE FORMAT:
+First, write a brief analysis for the overall workout, then analyze each exercise individually with specifics about prescribed vs performed.
+
+Then, provide the suggestions in JSON format wrapped in triple backticks:
+\`\`\`json
 {
-  "summary": "<brief overall assessment of the workout>",
+  "summary": "<brief overall assessment>",
   "exercises": [
     {
-      "name": "<exercise name>",
+      "name": "<exercise name - MUST match exactly as provided>",
       "currentWeight": <number>,
       "currentSets": <number>,
       "currentReps": <number>,
       "nextWeight": <number>,
       "nextSets": <number>,
       "nextReps": <number>,
-      "reasoning": "<brief explanation for this adjustment>"
+      "nextDuration": <number or undefined>,  // For time-based exercises ONLY (in minutes)
+      "nextDistance": <number or undefined>,  // For distance exercises ONLY (same as current)
+      "reasoning": "<brief explanation for this adjustment - mention what changed and why>"
     }
   ]
 }
+\`\`\`
 
-Always wrap the JSON in triple backticks.
-Be encouraging but honest. If they need to stay at the same weight, that's okay - it's part of the process.`,
+IMPORTANT FIELD USAGE BY EXERCISE TYPE:
+- STRENGTH/TEMPO: Use nextWeight, nextSets, nextReps (ignore duration/distance)
+- TIME-BASED (cardio_time, mobility_time): Use nextDuration (in minutes), set nextReps = nextDuration also for compatibility
+- DISTANCE: Use nextDistance (keep same as current), nextSets, nextWeight
+- AMRAP/EMOM/TABATA: Use nextReps (for reps per round/minute), nextSets if applicable, nextWeight if using weight
+
+CRITICAL REQUIREMENTS: 
+- Write conversational text FIRST, BEFORE the JSON block
+- Include ALL exercises from the workout in your JSON response
+- List exercises in the EXACT SAME ORDER they were provided in the input data
+- Provide a suggestion for EVERY exercise, even if it's to maintain current values
+- If they need to stay at the same weight/sets/reps, that's okay - consistency is part of the process`,
+
+  // Plan structure prompt - generates ONLY the plan skeleton without exercises
+  planStructure: `You are an expert fitness coach AI assistant. The user wants to create a workout plan.
+
+BEFORE generating the plan structure, you MUST ask follow-up questions to gather important information. Ask about:
+1. Days per week they want to work out (e.g., 3, 4, 5, or 6 days)
+2. Length of each session (e.g., 30 minutes, 45 minutes, 60 minutes, 90 minutes)
+3. Available equipment (e.g., full gym, home gym, dumbbells only, bodyweight only, kettlebells, etc.)
+4. Experience level (e.g., beginner, intermediate, advanced)
+5. Any injuries or limitations (e.g., knee issues, back problems, shoulder mobility, etc.)
+6. Specific goals beyond the general goal they mentioned (e.g., build muscle, lose weight, improve strength, increase endurance, etc.)
+
+IMPORTANT: 
+- If the user's initial message doesn't contain enough information, ask these questions in a friendly, conversational way. You can ask multiple questions at once.
+- DO NOT output any JSON until you have gathered sufficient information to create a personalized plan.
+- If the user has already provided most of this information in their message or previous messages, you can proceed to generate the plan structure.
+- Use the conversation history to avoid asking for information the user has already provided.
+
+ONLY after you have gathered sufficient information (or if the user has already provided it), generate the plan structure.
+
+CRITICAL: You must output ONLY the plan structure WITHOUT exercises. The exercises will be generated separately for each day.
+
+When generating a plan structure, first write a brief friendly message explaining the plan, then output the structure in this JSON format:
+\`\`\`json
+{
+  "goal": "User's fitness goal",
+  "weeksDuration": 12,
+  "sessionsPerWeek": 3,
+  "schedule": [
+    {
+      "dayNumber": 0,
+      "dayName": "Sunday",
+      "workoutType": "Push",
+      "workoutColor": "#ef4444"
+    },
+    {
+      "dayNumber": 2,
+      "dayName": "Tuesday",
+      "workoutType": "Pull",
+      "workoutColor": "#06b6d4"
+    },
+    {
+      "dayNumber": 4,
+      "dayName": "Thursday",
+      "workoutType": "Legs",
+      "workoutColor": "#10b981"
+    }
+  ]
+}
+\`\`\`
+
+CRITICAL RULES:
+1. ONLY include workout days in the schedule. Do NOT include rest days - they are automatic.
+2. dayNumber MUST match the day of week: 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
+3. dayName MUST match dayNumber (e.g., dayNumber 0 = "Sunday", dayNumber 2 = "Tuesday")
+4. Each dayNumber can only appear ONCE in the schedule
+5. sessionsPerWeek should equal the number of workout days in the schedule
+
+WORKOUT TYPE RULES:
+1. workoutType can be one or two words (e.g., "Push", "Pull", "Legs", "Upper Strength", "Full Body")
+2. NEVER use underscores or hyphens
+3. If the SAME workout appears on multiple days, use the SAME name and color
+4. Different workout types should use different colors
+5. Use variant names (A/B) when the same type appears with different focuses
+
+Available workout colors:
+- #06b6d4 (cyan), #ef4444 (red), #10b981 (emerald), #a855f7 (purple)
+- #eab308 (yellow), #ec4899 (pink), #14b8a6 (teal), #f97316 (orange)
+- #8b5cf6 (violet)`,
 
   // Single day generation prompt for iterative day-by-day plan creation
-  planCreationSingleDay: `You are an expert fitness coach generating a single workout day for a personalized plan.
+  planCreationSingleDay: `You are generating exercises for a single workout day. Output ONLY valid JSON.
 
-You will receive:
-1. The overall plan context (goal, experience level, equipment, sessions per week)
-2. Which day you're generating (e.g., "Day 1: Monday - Push")
-3. Previously generated days (so you can ensure variety and balance)
+WEIGHT TYPES - ONLY USE THESE 3:
+- "ABSOLUTE": fixed pounds (35 = 35lb kettlebell, 135 = 135 lbs, 0 = bodyweight only)
+- "BW": % of bodyweight (0.5 = 50% BW)  
+- "1RM": % of one-rep max (0.75 = 75% 1RM)
 
-Your job is to generate ONLY the exercises for this single day. Output ONLY a JSON object with the exercises array.
+═══════════════════════════════════════════════════════════════
+EXERCISE TYPES - USE THE CORRECT ONE!
+═══════════════════════════════════════════════════════════════
 
-CRITICAL: Output ONLY valid JSON, no extra text before or after:
+STRENGTH (lifting for sets × reps) → "3×8 @ 135 lbs"
+{
+  "name": "Bench Press",
+  "exerciseType": "strength",
+  "sets": 3, "reps": 8,
+  "weightType": "ABSOLUTE", "weightValue": 135, "restTime": 90,
+  "progression": {
+    "type": "linear",
+    "increment": 5,
+    "frequency": "weekly"
+  },
+  "movementDetails": {
+    "description": "Lie flat on bench, grip bar slightly wider than shoulders, lower to chest, press up explosively.",
+    "cues": ["Retract shoulder blades", "Elbows 45 degrees", "Drive through feet", "Full lockout at top"],
+    "muscles": ["Chest", "Triceps", "Front Delts"]
+  }
+}
+
+KETTLEBELL EXAMPLE (use ABSOLUTE with actual KB weight):
+{
+  "name": "Kettlebell Swing",
+  "exerciseType": "strength",
+  "sets": 5, "reps": 10,
+  "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 90,
+  "progression": {
+    "type": "linear",
+    "increment": 9,
+    "frequency": "every 2 weeks"
+  },
+  "movementDetails": {
+    "description": "Hinge at hips, swing KB between legs, explosively drive hips forward to shoulder height.",
+    "cues": ["Hinge, don't squat", "Snap hips", "Keep core tight", "Neutral spine"],
+    "muscles": ["Glutes", "Hamstrings", "Lower Back", "Shoulders"]
+  }
+}
+
+CARDIO_TIME (timed cardio) → "10 min"
+{
+  "name": "Easy Warm-Up Jog",
+  "exerciseType": "cardio_time",
+  "duration": 10,
+  "sets": 1, "reps": 1,
+  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0
+}
+
+MOBILITY_TIME (stretching/drills) → "8 min"
+{
+  "name": "Dynamic Stretching",
+  "exerciseType": "mobility_time",
+  "duration": 8,
+  "sets": 1, "reps": 1,
+  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0
+}
+
+DISTANCE (carries, sprints) → "3 × 40 meters"
+{
+  "name": "Suitcase Carry",
+  "exerciseType": "distance",
+  "sets": 3, "reps": 1,
+  "distance": 40, "distanceUnit": "meters",
+  "weightType": "BW", "weightValue": 0.5, "restTime": 60,
+  "progression": {
+    "type": "linear",
+    "increment": 0.05,
+    "frequency": "weekly"
+  },
+  "movementDetails": {
+    "description": "Hold heavy weight in one hand, walk specified distance maintaining upright posture.",
+    "cues": ["Stand tall", "Don't lean", "Squeeze the weight", "Brace core"],
+    "muscles": ["Core", "Obliques", "Forearms", "Traps"]
+  }
+}
+
+INTERVAL (work/rest intervals) → "4 rounds: 2 min hard / 2 min easy"
+{
+  "name": "Run/Walk Intervals",
+  "exerciseType": "interval",
+  "sets": 1, "reps": 1,
+  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0,
+  "intervals": {
+    "type": "simple", "rounds": 4,
+    "phases": [
+      { "name": "Hard", "duration": 120, "intensity": "hard" },
+      { "name": "Easy", "duration": 120, "intensity": "easy" }
+    ]
+  }
+}
+
+AMRAP (single movement) → "AMRAP 10 min • 10 reps/round"
+{
+  "name": "Kettlebell Swing AMRAP",
+  "exerciseType": "amrap",
+  "timeCap": 600,
+  "reps": 10,
+  "sets": 1, "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 0,
+  "progression": {
+    "type": "linear",
+    "increment": 2,
+    "frequency": "weekly"
+  },
+  "movementDetails": {
+    "description": "Complete as many rounds as possible of 10 KB swings in 10 minutes.",
+    "cues": ["Maintain form", "Rest as needed", "Count your rounds"],
+    "muscles": ["Glutes", "Hamstrings", "Lower Back"]
+  }
+}
+
+AMRAP (multi-movement circuit) → "AMRAP 10 min"
+{
+  "name": "10-Min AMRAP Circuit",
+  "exerciseType": "amrap",
+  "timeCap": 600,
+  "movements": [{ "name": "Push-ups", "reps": 10 }, { "name": "Squats", "reps": 15 }],
+  "reps": 1, "sets": 1, "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0
+}
+
+EMOM (with weight) → "EMOM 10 min • 10 reps/min @ 53 lbs"
+{
+  "name": "Kettlebell Swing EMOM",
+  "exerciseType": "emom",
+  "timeCap": 600,
+  "reps": 10,
+  "sets": 1, "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 0,
+  "progression": {
+    "type": "linear",
+    "increment": 9,
+    "frequency": "every 2 weeks"
+  },
+  "movementDetails": {
+    "description": "Perform 10 kettlebell swings at the start of every minute for 10 minutes.",
+    "cues": ["Start each minute fresh", "Maintain pace", "Use rest time wisely"],
+    "muscles": ["Glutes", "Hamstrings", "Lower Back"]
+  }
+}
+
+TABATA → "Tabata 8 rounds • 8 reps/round"
+{
+  "name": "Burpee Tabata",
+  "exerciseType": "tabata",
+  "timeCap": 240, "sets": 8, "reps": 8,
+  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0,
+  "progression": {
+    "type": "linear",
+    "increment": 1,
+    "frequency": "weekly"
+  },
+  "movementDetails": {
+    "description": "Perform burpees for 20 seconds, rest 10 seconds. Repeat for 8 rounds.",
+    "cues": ["Go hard for 20s", "Use 10s rest", "Track total reps"],
+    "muscles": ["Full Body", "Cardio"]
+  }
+}
+
+TEMPO → "3×8 @ tempo 3-1-3-1"
+{
+  "name": "Tempo Squat",
+  "exerciseType": "tempo",
+  "sets": 3, "reps": 8, "tempo": "3-1-3-1",
+  "weightType": "ABSOLUTE", "weightValue": 95, "restTime": 90
+}
+
+═══════════════════════════════════════════════════════════════
+QUICK REFERENCE
+═══════════════════════════════════════════════════════════════
+Warm-up jog, easy run → cardio_time (use "duration" in minutes)
+Stretching, drills → mobility_time (use "duration" in minutes)  
+Carries, sled, sprints → distance (use "distance" + "distanceUnit")
+Run/walk intervals → interval (use "intervals" with phases)
+Squats, bench, rows → strength (use sets × reps × weight)
+EMOM workouts → emom (use "timeCap" + "reps" per minute + "weightValue")
+AMRAP workouts → amrap (use "timeCap" + "reps" per round + "weightValue")
+Tabata workouts → tabata (use "sets" rounds + "reps" per round)
+
+OUTPUT FORMAT:
 {
   "exercises": [
-    {
-      "name": "Bench Press",
-      "sets": 3,
-      "reps": 8,
-      "weightType": "1RM",
-      "weightValue": 0.75,
-      "restTime": 120,
-      "exerciseType": "strength",
-      "progression": {
-        "type": "linear",
-        "increment": 5,
-        "frequency": "when all sets completed"
-      },
-      "movementDetails": {
-        "description": "Detailed movement description...",
-        "cues": ["cue 1", "cue 2"],
-        "muscles": ["chest", "triceps", "shoulders"]
-      }
-    }
+    { ... exercise 1 ... },
+    { ... exercise 2 ... }
   ]
 }
 
-Exercise types and formats are the same as the full plan prompt. Ensure exercises:
-- Match the workout type (Push = chest/shoulders/triceps, Pull = back/biceps, Legs = quads/hams/glutes, etc.)
-- Have appropriate rest times (120-180s for compounds, 60-90s for isolation)
-- Don't repeat exercises from previous days in the same week
-- Progress logically based on experience level`,
+REQUIRED FOR ALL EXERCISES:
+- progression: { "type": "linear", "increment": 5, "frequency": "weekly" }
+- movementDetails: { "description": "...", "cues": ["...", "..."], "muscles": ["...", "..."] }`,
 };
 
 // API client class
@@ -573,8 +689,8 @@ export class OpenRouterClient {
     return yield* this.chatStream([systemMessage, ...messages], { temperature: 0.7 }, signal);
   }
 
-  // Streaming plan generation (just the conversational text)
-  async *generatePlanStream(
+  // Streaming plan STRUCTURE generation (no exercises - they're generated day by day)
+  async *generatePlanStructureStream(
     messages: ChatMessage[],
     userContext?: {
       bodyweight?: number;
@@ -585,7 +701,7 @@ export class OpenRouterClient {
   ): AsyncGenerator<string, string, unknown> {
     const systemMessage: ChatMessage = {
       role: 'system',
-      content: SYSTEM_PROMPTS.planCreation + 
+      content: SYSTEM_PROMPTS.planStructure + 
         (userContext?.bodyweight ? `\n\nUser's bodyweight: ${userContext.bodyweight} lbs` : '') +
         (userContext?.experienceLevel ? `\nExperience level: ${userContext.experienceLevel}` : '') +
         (userContext?.currentPlan ? `\n\nUser's current plan structure:\n${JSON.stringify(userContext.currentPlan, null, 2)}` : ''),
@@ -593,7 +709,7 @@ export class OpenRouterClient {
 
     return yield* this.chatStream(
       [systemMessage, ...messages],
-      { temperature: 0.7, maxTokens: 8192 },
+      { temperature: 0.7, maxTokens: 2048 },
       signal
     );
   }
@@ -616,7 +732,9 @@ export class OpenRouterClient {
         performed: {
           setsCompleted: number;
           repsPerSet: number[];
-          weightUsed: number;
+          weightsPerSet: number[];
+          duration?: number; // Performed duration in seconds
+          distance?: number; // Performed distance
         };
         history: Array<{
           date: Date;
@@ -631,41 +749,107 @@ export class OpenRouterClient {
           increment: number;
           frequency: string;
         };
+        // Prescribed values for non-strength exercises
+        duration?: number;
+        distance?: number;
+        distanceUnit?: string;
       }>;
     },
+    chatHistory?: ChatMessage[],
     signal?: AbortSignal
   ): AsyncGenerator<string, string, unknown> {
-    const exercisesPrompt = workoutData.exercises.map(ex => `
-Exercise: ${ex.name}
-Type: ${ex.exerciseType}
-Current Prescription: ${ex.sets} sets × ${ex.reps} reps @ ${ex.weightValue}${ex.weightType === '1RM' ? '% of 1RM' : ex.weightType === 'BW' ? ' bodyweight' : ' lbs'}
-Rest Time: ${ex.restTime}s
+    const exercisesPrompt = workoutData.exercises.map((ex: any) => {
+      // All weights are already converted to absolute pounds in buildExerciseData
+      let prescribedFormat = '';
+      
+      switch (ex.exerciseType) {
+        case 'cardio_time':
+        case 'mobility_time':
+          prescribedFormat = `${ex.duration || ex.reps} minutes`;
+          break;
+        case 'distance':
+          const distWeight = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
+          prescribedFormat = `${ex.sets} sets × ${ex.distance || 0} ${ex.distanceUnit || 'feet'}${distWeight}`;
+          break;
+        case 'amrap':
+          const amrapWt = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
+          prescribedFormat = `AMRAP ${Math.floor((ex.timeCap || 600) / 60)} minutes • ${ex.reps} reps per round${amrapWt}`;
+          break;
+        case 'emom':
+          const emomWt = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
+          prescribedFormat = `EMOM ${Math.floor((ex.timeCap || 600) / 60)} minutes • ${ex.reps} reps per minute${emomWt}`;
+          break;
+        case 'tabata':
+          const tabataWt = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
+          prescribedFormat = `Tabata ${ex.sets} rounds (20s/10s) • ${ex.reps} reps per round${tabataWt}`;
+          break;
+        case 'tempo':
+          prescribedFormat = `${ex.sets} sets × ${ex.reps} reps @ tempo ${ex.tempo || '3-1-3-1'}, weight: ${ex.weightValue} lbs`;
+          break;
+        case 'interval':
+          prescribedFormat = ex.intervals ? `${ex.intervals.rounds} rounds of intervals` : 'Interval training';
+          break;
+        default: // strength
+          prescribedFormat = `${ex.sets} sets × ${ex.reps} reps @ ${ex.weightValue} lbs`;
+      }
+      
+      return `
+═══════════════════════════════════════════════════════════════
+${ex.name} (${ex.exerciseType})
+═══════════════════════════════════════════════════════════════
 
-Today's Performance:
-- Sets completed: ${ex.performed.setsCompleted}
-- Reps per set: [${ex.performed.repsPerSet.join(', ')}]
-- Weight used: ${ex.performed.weightUsed} lbs
+📋 PRESCRIBED (What was planned):
+   ${prescribedFormat}
+   Rest Time: ${ex.restTime}s
 
-Performance History (last 6 times):
-${ex.history.length > 0 ? ex.history.map(h => 
-  `  ${h.date.toLocaleDateString()}: ${h.sets}×${h.reps} @ ${h.weight} lbs - Completed: ${h.setsCompleted} sets, avg ${h.avgReps} reps`
-).join('\n') : '  No previous history'}
+💪 PERFORMED (What was actually done):
+   ${ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time' 
+     ? `Duration: ${ex.performed.duration ? Math.round(ex.performed.duration / 60) + ' minutes' : ex.performed.repsPerSet[0] + ' minutes'}`
+     : ex.exerciseType === 'distance'
+     ? `Sets completed: ${ex.performed.setsCompleted} of ${ex.sets}${ex.performed.weightsPerSet.length > 0 ? `\n   ${ex.performed.weightsPerSet.map((weight: number, idx: number) => 
+     `Set ${idx + 1}: ${ex.performed.distance || ex.distance || 0} ${ex.distanceUnit || 'feet'} @ ${weight} lbs`
+   ).join('\n   ')}` : ''}`
+     : `Sets completed: ${ex.performed.setsCompleted} of ${ex.sets}\n   ${ex.performed.weightsPerSet.map((weight: number, idx: number) => 
+     `Set ${idx + 1}: ${ex.performed.repsPerSet[idx] || 0} reps @ ${weight} lbs`
+   ).join('\n   ')}`}
 
-Progression Strategy: ${ex.progression?.type || 'linear'} (${ex.progression?.increment || 5} lb increment)
-`).join('\n\n');
+📊 PERFORMANCE HISTORY (Last 6 sessions):
+${ex.history.length > 0 ? ex.history.map((h: { date: Date; sets: number; reps: number; weight: number; setsCompleted: number; avgReps: number }) => 
+  `   ${h.date.toLocaleDateString()}: ${h.sets}×${h.reps} @ ${h.weight} lbs - Completed: ${h.setsCompleted} sets, avg ${h.avgReps} reps`
+).join('\n') : '   No previous history'}
+
+🎯 PROGRESSION STRATEGY: ${ex.progression?.type || 'linear'} (${ex.progression?.increment || 5} lb increment per ${ex.progression?.frequency || 'session'})
+`;
+    }).join('\n\n');
 
     const userMessage = `
-Workout Completed: ${workoutData.workoutType} on ${workoutData.completedDate.toLocaleDateString()}
+═══════════════════════════════════════════════════════════════
+WORKOUT COMPLETED
+═══════════════════════════════════════════════════════════════
+Workout Type: ${workoutData.workoutType}
+Date Completed: ${workoutData.completedDate.toLocaleDateString()}
 ${workoutData.nextDate ? `Next ${workoutData.workoutType} scheduled: ${workoutData.nextDate.toLocaleDateString()}` : 'No future occurrence scheduled'}
 
 Overall Workout Feedback: ${workoutData.feedback?.rating || 'Not provided'}/5 difficulty
-${workoutData.feedback?.notes || ''}
+${workoutData.feedback?.notes ? `Notes: ${workoutData.feedback.notes}` : ''}
 
-Exercises:
+═══════════════════════════════════════════════════════════════
+EXERCISE PERFORMANCE DATA
+═══════════════════════════════════════════════════════════════
 ${exercisesPrompt}
 
-Based on all this data, calculate optimal prescriptions for the NEXT occurrence of this workout.
-For cardio exercises (cardio_time), adjust duration instead of weight.
+═══════════════════════════════════════════════════════════════
+YOUR TASK
+═══════════════════════════════════════════════════════════════
+Based on this ${workoutData.workoutType} workout data, calculate optimal prescriptions for the NEXT occurrence of this workout.
+
+Key points:
+- DISTANCE: Keep distance same, adjust weight only
+- TIME-BASED: Adjust duration (in "reps" field)
+- STRENGTH/TEMPO: Adjust weight, sets, and/or reps
+- AMRAP/EMOM/TABATA: Can adjust reps per round/minute (in "reps" field) and/or weight
+
+If you need any clarification about how the user performed any exercise, ask them. Otherwise, provide your analysis and suggestions.
 `;
 
     const systemMessage: ChatMessage = {
@@ -673,8 +857,25 @@ For cardio exercises (cardio_time), adjust duration instead of weight.
       content: SYSTEM_PROMPTS.postWorkoutAnalysis,
     };
 
+    // If chat history is provided, use it for conversational context
+    // Otherwise, start fresh with just the workout data
+    const messages: ChatMessage[] = chatHistory && chatHistory.length > 0
+      ? [systemMessage, ...chatHistory]
+      : [systemMessage, { role: 'user', content: userMessage }];
+
+    // If we have chat history, determine if we need to add the workout data context
+    // Only add it on the first analysis (when there are no assistant messages yet)
+    if (chatHistory && chatHistory.length > 0) {
+      const hasAssistantResponse = chatHistory.some(msg => msg.role === 'assistant');
+      // If no assistant has responded yet, this is the first analysis - add workout data
+      // If assistant has already responded, the user is providing follow-up info - don't add data again
+      if (!hasAssistantResponse) {
+        messages.push({ role: 'user', content: userMessage });
+      }
+    }
+
     return yield* this.chatStream(
-      [systemMessage, { role: 'user', content: userMessage }],
+      messages,
       { temperature: 0.5, maxTokens: 4096 },
       signal
     );
@@ -700,6 +901,10 @@ For cardio exercises (cardio_time), adjust duration instead of weight.
       workoutType: string;
       exerciseNames: string[];
     }>,
+    options?: {
+      chatHistory?: ChatMessage[];
+      fullGeneratedDays?: WorkoutDayData[];
+    },
     signal?: AbortSignal
   ): Promise<WorkoutDayData | null> {
     const systemMessage: ChatMessage = {
@@ -707,9 +912,39 @@ For cardio exercises (cardio_time), adjust duration instead of weight.
       content: SYSTEM_PROMPTS.planCreationSingleDay,
     };
 
-    const previousDaysSummary = previousDays.length > 0
-      ? previousDays.map(d => `${d.dayName} (${d.workoutType}): ${d.exerciseNames.join(', ')}`).join('\n')
-      : 'No previous days generated yet.';
+    // Build messages array with chat history if provided
+    const messages: ChatMessage[] = [systemMessage];
+    
+    // Include full chat history if provided (this includes user's answers about equipment, injuries, etc.)
+    if (options?.chatHistory && options.chatHistory.length > 0) {
+      messages.push(...options.chatHistory);
+    }
+
+    // Build previous days summary with full details if available
+    let previousDaysSummary = 'No previous days generated yet.';
+    if (options?.fullGeneratedDays && options.fullGeneratedDays.length > 0) {
+      previousDaysSummary = options.fullGeneratedDays.map(day => {
+        const exercisesDetail = day.exercises.map(ex => {
+          let detail = ex.name;
+          if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
+            detail += `: ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
+          } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
+            detail += `: ${ex.duration} min`;
+          } else if (ex.exerciseType === 'distance') {
+            detail += `: ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'} @ ${ex.weightValue}${ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
+          } else if (ex.exerciseType === 'amrap' || ex.exerciseType === 'emom') {
+            detail += `: ${ex.timeCap ? Math.floor(ex.timeCap / 60) : 'N/A'} min, ${ex.reps} reps/round`;
+          } else if (ex.exerciseType === 'tabata') {
+            detail += `: ${ex.sets} rounds, ${ex.reps} reps/round`;
+          }
+          return detail;
+        }).join('; ');
+        return `${day.dayName} (${day.workoutType}): ${exercisesDetail}`;
+      }).join('\n\n');
+    } else if (previousDays.length > 0) {
+      // Fallback to simple summary if full days not provided
+      previousDaysSummary = previousDays.map(d => `${d.dayName} (${d.workoutType}): ${d.exerciseNames.join(', ')}`).join('\n');
+    }
 
     const userMessage = `
 Plan Context:
@@ -724,18 +959,19 @@ Generate exercises for:
 - Workout Type: ${dayInfo.workoutType}
 - Color: ${dayInfo.workoutColor}
 
-Previously generated days this week:
+Previously generated days this week (with full exercise details):
 ${previousDaysSummary}
 
 Output ONLY the JSON with exercises array for this day. No additional text.
 `;
 
+    messages.push({ role: 'user', content: userMessage });
+
     const response = await this.chat(
-      [systemMessage, { role: 'user', content: userMessage }],
-      { temperature: 0.7, maxTokens: 2048 }
+      messages,
+      { temperature: 0.7, maxTokens: 8192 }
     );
 
-    // Parse the exercises from the response
     const parsed = extractJSON<{ exercises: WorkoutDayData['exercises'] }>(response);
     
     if (!parsed?.exercises) {
@@ -752,134 +988,6 @@ Output ONLY the JSON with exercises array for this day. No additional text.
     };
   }
 
-  async generatePlan(
-    messages: ChatMessage[],
-    userContext?: {
-      bodyweight?: number;
-      experienceLevel?: string;
-      currentPlan?: object;
-    }
-  ): Promise<string> {
-    const systemMessage: ChatMessage = {
-      role: 'system',
-      content: SYSTEM_PROMPTS.planCreation + 
-        (userContext?.bodyweight ? `\n\nUser's bodyweight: ${userContext.bodyweight} lbs` : '') +
-        (userContext?.experienceLevel ? `\nExperience level: ${userContext.experienceLevel}` : '') +
-        (userContext?.currentPlan ? `\n\nUser's current plan structure:\n${JSON.stringify(userContext.currentPlan, null, 2)}` : ''),
-    };
-
-    return this.chat([systemMessage, ...messages], {
-      temperature: 0.7,
-      maxTokens: 8192,
-    });
-  }
-
-  async parseWorkout(
-    messages: ChatMessage[],
-    scheduledExercises?: string[]
-  ): Promise<string> {
-    const systemMessage: ChatMessage = {
-      role: 'system',
-      content: SYSTEM_PROMPTS.workoutSubmission +
-        (scheduledExercises?.length
-          ? `\n\nScheduled exercises for today: ${scheduledExercises.join(', ')}`
-          : ''),
-    };
-
-    return this.chat([systemMessage, ...messages], {
-      temperature: 0.5,
-    });
-  }
-
-  async generalChat(messages: ChatMessage[]): Promise<string> {
-    const systemMessage: ChatMessage = {
-      role: 'system',
-      content: SYSTEM_PROMPTS.general,
-    };
-
-    return this.chat([systemMessage, ...messages], {
-      temperature: 0.7,
-    });
-  }
-
-  async analyzePostWorkout(
-    workoutData: {
-      workoutType: string;
-      completedDate: Date;
-      nextDate: Date | null;
-      feedback?: { rating: number; notes?: string };
-      exercises: Array<{
-        name: string;
-        exerciseType: string;
-        sets: number;
-        reps: number;
-        weightValue: number;
-        weightType: string;
-        restTime: number;
-        performed: {
-          setsCompleted: number;
-          repsPerSet: number[];
-          weightUsed: number;
-        };
-        history: Array<{
-          date: Date;
-          sets: number;
-          reps: number;
-          weight: number;
-          setsCompleted: number;
-          avgReps: number;
-        }>;
-        progression?: {
-          type: string;
-          increment: number;
-          frequency: string;
-        };
-      }>;
-    }
-  ): Promise<string> {
-    const exercisesPrompt = workoutData.exercises.map(ex => `
-Exercise: ${ex.name}
-Type: ${ex.exerciseType}
-Current Prescription: ${ex.sets} sets × ${ex.reps} reps @ ${ex.weightValue}${ex.weightType === '1RM' ? '% of 1RM' : ex.weightType === 'BW' ? ' bodyweight' : ' lbs'}
-Rest Time: ${ex.restTime}s
-
-Today's Performance:
-- Sets completed: ${ex.performed.setsCompleted}
-- Reps per set: [${ex.performed.repsPerSet.join(', ')}]
-- Weight used: ${ex.performed.weightUsed} lbs
-
-Performance History (last 6 times):
-${ex.history.length > 0 ? ex.history.map(h => 
-  `  ${h.date.toLocaleDateString()}: ${h.sets}×${h.reps} @ ${h.weight} lbs - Completed: ${h.setsCompleted} sets, avg ${h.avgReps} reps`
-).join('\n') : '  No previous history'}
-
-Progression Strategy: ${ex.progression?.type || 'linear'} (${ex.progression?.increment || 5} lb increment)
-`).join('\n\n');
-
-    const userMessage = `
-Workout Completed: ${workoutData.workoutType} on ${workoutData.completedDate.toLocaleDateString()}
-${workoutData.nextDate ? `Next ${workoutData.workoutType} scheduled: ${workoutData.nextDate.toLocaleDateString()}` : 'No future occurrence scheduled'}
-
-Overall Workout Feedback: ${workoutData.feedback?.rating || 'Not provided'}/5 difficulty
-${workoutData.feedback?.notes || ''}
-
-Exercises:
-${exercisesPrompt}
-
-Based on all this data, calculate optimal prescriptions for the NEXT occurrence of this workout.
-For cardio exercises (cardio_time), adjust duration instead of weight.
-`;
-
-    const systemMessage: ChatMessage = {
-      role: 'system',
-      content: SYSTEM_PROMPTS.postWorkoutAnalysis,
-    };
-
-    return this.chat([systemMessage, { role: 'user', content: userMessage }], {
-      temperature: 0.5,
-      maxTokens: 4096,
-    });
-  }
 }
 
 // Singleton instance
@@ -964,7 +1072,7 @@ export const workoutPlanSchema = z.object({
           name: z.string(),
           sets: z.number(),
           reps: z.number(),
-          weightType: z.string(), // Allow any weight type (BW, 1RM, ABSOLUTE, RPE, seconds, etc.)
+          weightType: z.string(), // ONLY use: ABSOLUTE, BW, or 1RM
           weightValue: z.number(),
           restTime: z.number().optional().default(90), // Rest time in seconds
           exerciseType: z.string().optional().default('strength'), // strength, cardio_time, mobility_time, distance, interval, amrap, emom, tabata, tempo

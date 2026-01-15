@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
-import { Flame, Target, ChevronRight } from 'lucide-react';
+import { Target, ChevronRight, CalendarX, CheckCircle2, Calendar } from 'lucide-react';
 
 interface HomeData {
   user: {
@@ -46,13 +46,21 @@ interface HomeData {
     workoutColor: string;
     exerciseCount: number;
     isGenerated: boolean;
+    logId: string | null;
+    logStatus: string | null;
+    scheduledDate: string | null;
+    calculatedDate: string;
   }[];
+  daysMissed: number;
+  completedWorkouts: number;
+  weeksRemaining: number;
 }
 
 export function HomeContent({ data }: { data: HomeData }) {
-  const { user, userStats, activePlan, todayWorkout, todayLog, weekPreview } = data;
+  const { user, userStats, activePlan, todayWorkout, todayLog, weekPreview, daysMissed, completedWorkouts, weeksRemaining } = data;
 
   const today = new Date();
+  const todayISO = today.toISOString();
   const formattedDate = today.toLocaleDateString('en-US', {
     weekday: 'long',
     month: 'short',
@@ -100,24 +108,12 @@ export function HomeContent({ data }: { data: HomeData }) {
   return (
     <div className="px-5 pt-10 pb-28">
       <div className="max-w-lg mx-auto space-y-6">
-        {/* Header with stats */}
-        <div className="flex items-start justify-between">
-          <div>
-            <p className="text-muted-foreground">{formattedDate}</p>
-            <h1 className="text-2xl font-bold text-foreground mt-1">
-              {greeting}, {userName}!
-            </h1>
-          </div>
-          
-          {/* Streak */}
-          {userStats && userStats.currentStreak > 0 && (
-            <div className="flex items-center gap-1.5 bg-surface px-3 py-1.5 rounded-full">
-              <Flame className="w-4 h-4 text-warning" />
-              <span className="text-sm font-medium text-foreground">
-                {userStats.currentStreak}
-              </span>
-            </div>
-          )}
+        {/* Header */}
+        <div>
+          <p className="text-muted-foreground">{formattedDate}</p>
+          <h1 className="text-2xl font-bold text-foreground mt-1">
+            {greeting}, {userName}!
+          </h1>
         </div>
 
         {/* Progress toward goal */}
@@ -183,12 +179,13 @@ export function HomeContent({ data }: { data: HomeData }) {
                 </Button>
               </Link>
             ) : todayLog?.status === 'completed' ? (
-              <div className="flex items-center justify-center gap-2 py-3 text-success">
-                <span className="text-lg">✓</span>
-                <span className="font-medium">Workout Completed!</span>
-              </div>
+              <Link href={`/workout/live?logId=${todayLog.id}`}>
+                <Button fullWidth size="lg" variant="secondary">
+                  View Workout
+                </Button>
+              </Link>
             ) : (
-              <Link href={`/workout/live?dayId=${todayWorkout.id}&planId=${activePlan.id}`}>
+              <Link href={`/workout/live?dayId=${todayWorkout.id}&planId=${activePlan.id}&date=${todayISO}`}>
                 <Button fullWidth size="lg">
                   Start Workout
                 </Button>
@@ -227,13 +224,23 @@ export function HomeContent({ data }: { data: HomeData }) {
                 const isToday = index === new Date().getDay();
                 const dayAbbr = day.dayName.slice(0, 3);
                 const hasWorkout = day.id && day.workoutType !== 'rest' && day.exerciseCount > 0;
+                const isCompleted = day.logStatus === 'completed';
+                
+                // Check if this workout is in the future
+                const isFuture = day.scheduledDate ? (() => {
+                  const today = new Date();
+                  today.setHours(0, 0, 0, 0);
+                  const scheduledDate = new Date(day.scheduledDate);
+                  scheduledDate.setHours(0, 0, 0, 0);
+                  return scheduledDate > today;
+                })() : false;
 
                 const content = (
                   <div
                     className={`
                       flex-1 flex flex-col items-center gap-2 py-3 rounded-lg h-[110px]
                       ${isToday ? 'bg-surface ring-2 ring-primary' : 'bg-surface/50'}
-                      ${hasWorkout ? 'cursor-pointer hover:bg-surface transition-colors' : ''}
+                      ${hasWorkout && !isCompleted ? 'cursor-pointer hover:bg-surface transition-colors' : ''}
                     `}
                   >
                     <span className="text-xs text-muted-foreground">{dayAbbr}</span>
@@ -244,15 +251,23 @@ export function HomeContent({ data }: { data: HomeData }) {
                         height: '28px',
                         backgroundColor: day.workoutType === 'rest' 
                           ? 'transparent' 
+                          : isCompleted
+                          ? day.workoutColor
                           : day.workoutColor + '30',
                         border: day.workoutType === 'rest' 
                           ? '2px dashed var(--border)' 
+                          : isCompleted
+                          ? 'none'
                           : `2px solid ${day.workoutColor}`,
                       }}
                     >
-                      <span className="text-xs font-medium" style={{ color: day.workoutType === 'rest' ? 'var(--muted)' : day.workoutColor }}>
-                        {day.workoutType === 'rest' ? '' : day.workoutType.charAt(0).toUpperCase()}
-                      </span>
+                      {isCompleted ? (
+                        <span className="text-white text-xs">✓</span>
+                      ) : (
+                        <span className="text-xs font-medium" style={{ color: day.workoutType === 'rest' ? 'var(--muted)' : day.workoutColor }}>
+                          {day.workoutType === 'rest' ? '' : day.workoutType.charAt(0).toUpperCase()}
+                        </span>
+                      )}
                     </div>
                     <span className="text-xs capitalize text-muted-foreground text-center leading-tight">
                       {day.workoutType}
@@ -260,15 +275,52 @@ export function HomeContent({ data }: { data: HomeData }) {
                   </div>
                 );
 
-                return hasWorkout ? (
-                  <Link
-                    key={day.dayNumber}
-                    href={`/workout/live?dayId=${day.id}&planId=${activePlan.id}`}
-                    className="flex-1"
-                  >
-                    {content}
-                  </Link>
-                ) : (
+                // If completed, link to view
+                if (isCompleted && day.logId) {
+                  return (
+                    <Link
+                      key={day.dayNumber}
+                      href={`/workout/live?logId=${day.logId}`}
+                      className="flex-1"
+                    >
+                      {content}
+                    </Link>
+                  );
+                }
+
+                // If has workout log (in progress), link to resume
+                if (hasWorkout && day.logId) {
+                  return (
+                    <Link
+                      key={day.dayNumber}
+                      href={`/workout/live?logId=${day.logId}`}
+                      className="flex-1"
+                    >
+                      {content}
+                    </Link>
+                  );
+                }
+
+                // If has workout but no log - check if future or not
+                if (hasWorkout && day.isGenerated) {
+                  // For future workouts, add preview=true
+                  const url = isFuture
+                    ? `/workout/live?dayId=${day.id}&planId=${activePlan.id}&date=${day.calculatedDate}&preview=true`
+                    : `/workout/live?dayId=${day.id}&planId=${activePlan.id}&date=${day.calculatedDate}`;
+                  
+                  return (
+                    <Link
+                      key={day.dayNumber}
+                      href={url}
+                      className="flex-1"
+                    >
+                      {content}
+                    </Link>
+                  );
+                }
+
+                // Rest day or no workout generated yet
+                return (
                   <div key={day.dayNumber} className="flex-1">
                     {content}
                   </div>
@@ -277,6 +329,42 @@ export function HomeContent({ data }: { data: HomeData }) {
             </div>
           </div>
         )}
+
+        {/* Stats Grid */}
+        <div className="grid grid-cols-3 gap-3">
+          {/* Completed Workouts */}
+          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
+            <CheckCircle2 className="w-5 h-5 text-success mb-2" />
+            <span className="text-2xl font-bold text-foreground">
+              {completedWorkouts}
+            </span>
+            <span className="text-xs text-muted-foreground text-center mt-1">
+              Completed
+            </span>
+          </div>
+
+          {/* Workouts Missed */}
+          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
+            <CalendarX className="w-5 h-5 text-muted-foreground mb-2" />
+            <span className="text-2xl font-bold text-foreground">
+              {daysMissed}
+            </span>
+            <span className="text-xs text-muted-foreground text-center mt-1">
+              Missed
+            </span>
+          </div>
+
+          {/* Weeks Remaining */}
+          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
+            <Calendar className="w-5 h-5 text-primary mb-2" />
+            <span className="text-2xl font-bold text-foreground">
+              {weeksRemaining}
+            </span>
+            <span className="text-xs text-muted-foreground text-center mt-1">
+              Weeks left
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );

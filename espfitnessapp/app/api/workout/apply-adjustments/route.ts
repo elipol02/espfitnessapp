@@ -46,9 +46,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (pendingAdjustment.status !== 'pending') {
+    // Allow re-applying if status is pending or approved (user might change their mind)
+    // Only reject if status is explicitly rejected
+    if (pendingAdjustment.status === 'rejected') {
       return NextResponse.json(
-        { success: false, error: 'Adjustment has already been processed' },
+        { success: false, error: 'Adjustment has been rejected' },
         { status: 400 }
       );
     }
@@ -85,23 +87,27 @@ export async function POST(request: NextRequest) {
       return suggestion;
     });
 
-    // Apply the adjustments to the next workout
+    console.log('Applying adjustments for workout type:', workoutLog.day.workoutType);
+    console.log('Suggestions to apply:', finalSuggestions);
+
+    // Apply the adjustments to ALL future workouts of this type
+    // Use the completed workout's date to find all future occurrences after it
     const applyResult = await applyAdjustments(
       pendingAdjustment.planId,
       workoutLog.day.workoutType,
-      new Date(),
+      workoutLog.workoutDate,
       finalSuggestions
     );
 
     if (!applyResult.success) {
+      console.error('Failed to apply adjustments:', applyResult.error);
       return NextResponse.json(
         { success: false, error: applyResult.error },
         { status: 400 }
       );
     }
 
-    // Ensure we have enough workouts generated ahead
-    await ensureWorkoutsGenerated(pendingAdjustment.planId, new Date());
+    console.log('Adjustments applied to workouts:', applyResult.updatedWorkoutIds?.length || 0);
 
     // Mark the pending adjustment as approved
     await prisma.pendingAdjustment.update({
@@ -112,10 +118,12 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    console.log('Adjustment marked as approved:', adjustmentId);
+
     return NextResponse.json({
       success: true,
       data: {
-        nextWorkoutId: applyResult.nextWorkoutId,
+        updatedWorkoutIds: applyResult.updatedWorkoutIds || [],
       },
     });
   } catch (error) {

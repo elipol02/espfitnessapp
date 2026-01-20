@@ -74,60 +74,83 @@ export async function POST(request: NextRequest) {
         schedule: planData.schedule.map((d: any) => ({ dayNumber: d.dayNumber, dayName: d.dayName, workoutType: d.workoutType }))
       }, null, 2));
 
-      // Delete all future workouts
       const now = new Date();
-      console.log(`Current time: ${now.toISOString()}`);
-      
-      const deletedCount = await prisma.workoutDay.deleteMany({
-        where: {
-          planId: currentActivePlan.id,
-          scheduledDate: { gt: now },
-        },
-      });
+      const newScheduleDayNumbers = planData.schedule.map((d: any) => d.dayNumber);
+      console.log(`New schedule day numbers: [${newScheduleDayNumbers.join(', ')}]`);
 
-      console.log(`Deleted ${deletedCount.count} future workout days`);
-
-      // Update the plan metadata with new structure
-      const updatedPlan = await prisma.workoutPlan.update({
-        where: { id: currentActivePlan.id },
-        data: {
-          goal: planData.goal,
-          weeksDuration: planData.weeksDuration,
-          aiContext: {
-            sessionsPerWeek: planData.sessionsPerWeek,
-            schedule: planData.schedule.map((day: any) => ({
-              dayNumber: day.dayNumber,
-              dayName: day.dayName,
-              workoutType: day.workoutType,
-              workoutColor: day.workoutColor,
-            })),
+      // Use a transaction for all operations
+      await prisma.$transaction(async (tx) => {
+        // 1. Delete all future workouts
+        const deletedFuture = await tx.workoutDay.deleteMany({
+          where: {
+            planId: currentActivePlan.id,
+            scheduledDate: { gt: now },
           },
-        },
-      });
-      
-      console.log(`Updated plan metadata. New weeksDuration: ${updatedPlan.weeksDuration}`);
-      console.log(`Updated plan aiContext:`, JSON.stringify(updatedPlan.aiContext, null, 2));
+        });
+        console.log(`Deleted ${deletedFuture.count} future workout days`);
 
-      // Create new workout days from the plan JSON (use NEW plan duration)
-      let createdCount = 0;
-      console.log(`Creating workouts for ${planData.weeksDuration} weeks with ${planData.schedule.length} days per week`);
-      
-      for (let week = 0; week < planData.weeksDuration; week++) {
-        for (const dayData of planData.schedule) {
-          const scheduledDate = new Date(startOfWeek);
-          scheduledDate.setDate(startOfWeek.getDate() + (week * 7) + dayData.dayNumber);
+        // 2. Delete past incomplete workouts not in new schedule
+        const pastIncompleteWorkouts = await tx.workoutDay.findMany({
+          where: {
+            planId: currentActivePlan.id,
+            scheduledDate: { lte: now },
+            workoutLogs: {
+              none: {
+                completedAt: { not: null },
+              },
+            },
+          },
+          select: {
+            id: true,
+            dayNumber: true,
+          },
+        });
 
-          // Skip if this date is in the past
-          if (scheduledDate.getTime() < now.getTime()) {
-            console.log(`Skipping past date: ${scheduledDate.toISOString()} for ${dayData.dayName}`);
-            continue;
-          }
+        const toDeleteIds = pastIncompleteWorkouts
+          .filter(w => !newScheduleDayNumbers.includes(w.dayNumber))
+          .map(w => w.id);
 
-          console.log(`Creating workout: Week ${week + 1}, ${dayData.dayName} (${dayData.workoutType}) on ${scheduledDate.toISOString().split('T')[0]}`);
+        if (toDeleteIds.length > 0) {
+          const deletedPast = await tx.workoutDay.deleteMany({
+            where: { id: { in: toDeleteIds } },
+          });
+          console.log(`Deleted ${deletedPast.count} past incomplete workouts not in new schedule`);
+        }
 
-          // Create the workout day
-          const createdDay = await prisma.workoutDay.create({
-            data: {
+        // 3. Update plan metadata
+        await tx.workoutPlan.update({
+          where: { id: currentActivePlan.id },
+          data: {
+            goal: planData.goal,
+            weeksDuration: planData.weeksDuration,
+            aiContext: {
+              sessionsPerWeek: planData.sessionsPerWeek,
+              schedule: planData.schedule.map((day: any) => ({
+                dayNumber: day.dayNumber,
+                dayName: day.dayName,
+                workoutType: day.workoutType,
+                workoutColor: day.workoutColor,
+              })),
+            },
+          },
+        });
+
+        // 4. Prepare all workout days and exercises for bulk insert
+        const workoutDaysToCreate: any[] = [];
+        const exercisesMap = new Map<string, any[]>(); // tempId -> exercises array
+
+        for (let week = 0; week < planData.weeksDuration; week++) {
+          for (const dayData of planData.schedule) {
+            const scheduledDate = new Date(startOfWeek);
+            scheduledDate.setDate(startOfWeek.getDate() + (week * 7) + dayData.dayNumber);
+
+            if (scheduledDate.getTime() < now.getTime()) {
+              continue;
+            }
+
+            const tempId = `${week}-${dayData.dayNumber}`;
+            workoutDaysToCreate.push({
+              tempId, // For mapping exercises
               planId: currentActivePlan.id,
               dayNumber: dayData.dayNumber,
               dayName: dayData.dayName,
@@ -135,89 +158,106 @@ export async function POST(request: NextRequest) {
               workoutType: dayData.workoutType,
               workoutColor: dayData.workoutColor,
               isGenerated: true,
-            },
-          });
-
-          createdCount++;
-
-          // Create exercises
-          for (let j = 0; j < dayData.exercises.length; j++) {
-            const ex = dayData.exercises[j];
-            await prisma.exercise.create({
-              data: {
-                dayId: createdDay.id,
-                name: ex.name,
-                sets: ex.sets,
-                setsMin: ex.setsMin,
-                reps: ex.reps,
-                repsMin: ex.repsMin,
-                weightType: ex.weightType || 'ABSOLUTE',
-                weightValue: ex.weightValue,
-                restTime: ex.restTime || 90,
-                exerciseType: ex.exerciseType || 'strength',
-                progression: ex.progression,
-                movementDetails: ex.movementDetails,
-                order: j,
-                duration: ex.duration,
-                distance: ex.distance,
-                distanceUnit: ex.distanceUnit,
-                intervals: ex.intervals as Prisma.InputJsonValue,
-                tempo: ex.tempo,
-                timeCap: ex.timeCap,
-                movements: ex.movements as Prisma.InputJsonValue,
-              },
             });
+
+            // Store exercises for this day
+            exercisesMap.set(tempId, dayData.exercises);
           }
         }
-      }
 
-      console.log(`Created ${createdCount} new workout days`);
+        console.log(`Creating ${workoutDaysToCreate.length} workout days in bulk`);
+
+        // 5. Create all workout days and collect their IDs
+        const createdDays = [];
+        for (const dayToCreate of workoutDaysToCreate) {
+          const { tempId, ...dayData } = dayToCreate;
+          const createdDay = await tx.workoutDay.create({ data: dayData });
+          createdDays.push({ id: createdDay.id, tempId });
+        }
+
+        // 6. Prepare all exercises for bulk insert
+        const allExercises: any[] = [];
+        for (const { id: dayId, tempId } of createdDays) {
+          const exercises = exercisesMap.get(tempId) || [];
+          exercises.forEach((ex: any, j: number) => {
+            allExercises.push({
+              dayId,
+              name: ex.name,
+              sets: ex.sets,
+              setsMin: ex.setsMin,
+              reps: ex.reps,
+              repsMin: ex.repsMin,
+              weightType: ex.weightType || 'ABSOLUTE',
+              weightValue: ex.weightValue,
+              restTime: ex.restTime || 90,
+              exerciseType: ex.exerciseType || 'strength',
+              progression: ex.progression as Prisma.InputJsonValue,
+              movementDetails: ex.movementDetails as Prisma.InputJsonValue,
+              order: j,
+              duration: ex.duration,
+              distance: ex.distance,
+              distanceUnit: ex.distanceUnit,
+              intervals: ex.intervals as Prisma.InputJsonValue,
+              tempo: ex.tempo,
+              timeCap: ex.timeCap,
+              movements: ex.movements as Prisma.InputJsonValue,
+            });
+          });
+        }
+
+        // 7. Bulk insert all exercises
+        if (allExercises.length > 0) {
+          await tx.exercise.createMany({ data: allExercises });
+          console.log(`Created ${allExercises.length} exercises in bulk`);
+        }
+
+        console.log(`Transaction complete: ${createdDays.length} days, ${allExercises.length} exercises`);
+      });
 
       return NextResponse.json({
         success: true,
         message: 'Plan replaced successfully',
-        details: {
-          deletedWorkouts: deletedCount.count,
-          createdWorkouts: createdCount,
-        },
       });
     } else {
       // Create new plan (activate or save as new)
-      // Deactivate other active plans
-      await prisma.workoutPlan.updateMany({
-        where: {
-          userId: session.user.id,
-          status: 'active',
-        },
-        data: { status: 'archived' },
-      });
-
-      // Create the new plan
-      const newPlan = await prisma.workoutPlan.create({
-        data: {
-          userId: session.user.id,
-          goal: planData.goal,
-          status: 'active',
-          weeksDuration: planData.weeksDuration,
-          startDate: today,
-          aiContext: {
-            sessionsPerWeek: planData.sessionsPerWeek,
+      await prisma.$transaction(async (tx) => {
+        // 1. Deactivate other active plans
+        await tx.workoutPlan.updateMany({
+          where: {
+            userId: session.user.id,
+            status: 'active',
           },
-        },
-      });
+          data: { status: 'archived' },
+        });
 
-      console.log(`Created new plan ${newPlan.id}`);
+        // 2. Create the new plan
+        const newPlan = await tx.workoutPlan.create({
+          data: {
+            userId: session.user.id,
+            goal: planData.goal,
+            status: 'active',
+            weeksDuration: planData.weeksDuration,
+            startDate: today,
+            aiContext: {
+              sessionsPerWeek: planData.sessionsPerWeek,
+            },
+          },
+        });
 
-      // Create workout days from the plan JSON
-      let createdCount = 0;
-      for (let week = 0; week < planData.weeksDuration; week++) {
-        for (const dayData of planData.schedule) {
-          const scheduledDate = new Date(startOfWeek);
-          scheduledDate.setDate(startOfWeek.getDate() + (week * 7) + dayData.dayNumber);
+        console.log(`Created new plan ${newPlan.id}`);
 
-          // Create the workout day
-          const createdDay = await prisma.workoutDay.create({
-            data: {
+        // 3. Prepare all workout days and exercises
+        const workoutDaysToCreate: any[] = [];
+        const exercisesMap = new Map<string, any[]>();
+
+        for (let week = 0; week < planData.weeksDuration; week++) {
+          for (const dayData of planData.schedule) {
+            const scheduledDate = new Date(startOfWeek);
+            scheduledDate.setDate(startOfWeek.getDate() + (week * 7) + dayData.dayNumber);
+
+            const tempId = `${week}-${dayData.dayNumber}`;
+            workoutDaysToCreate.push({
+              tempId,
               planId: newPlan.id,
               dayNumber: dayData.dayNumber,
               dayName: dayData.dayName,
@@ -225,51 +265,61 @@ export async function POST(request: NextRequest) {
               workoutType: dayData.workoutType,
               workoutColor: dayData.workoutColor,
               isGenerated: true,
-            },
-          });
-
-          createdCount++;
-
-          // Create exercises
-          for (let j = 0; j < dayData.exercises.length; j++) {
-            const ex = dayData.exercises[j];
-            await prisma.exercise.create({
-              data: {
-                dayId: createdDay.id,
-                name: ex.name,
-                sets: ex.sets,
-                setsMin: ex.setsMin,
-                reps: ex.reps,
-                repsMin: ex.repsMin,
-                weightType: ex.weightType || 'ABSOLUTE',
-                weightValue: ex.weightValue,
-                restTime: ex.restTime || 90,
-                exerciseType: ex.exerciseType || 'strength',
-                progression: ex.progression,
-                movementDetails: ex.movementDetails,
-                order: j,
-                duration: ex.duration,
-                distance: ex.distance,
-                distanceUnit: ex.distanceUnit,
-                intervals: ex.intervals as Prisma.InputJsonValue,
-                tempo: ex.tempo,
-                timeCap: ex.timeCap,
-                movements: ex.movements as Prisma.InputJsonValue,
-              },
             });
+
+            exercisesMap.set(tempId, dayData.exercises);
           }
         }
-      }
 
-      console.log(`Created ${createdCount} new workout days`);
+        // 4. Create all workout days
+        const createdDays = [];
+        for (const dayToCreate of workoutDaysToCreate) {
+          const { tempId, ...dayData } = dayToCreate;
+          const createdDay = await tx.workoutDay.create({ data: dayData });
+          createdDays.push({ id: createdDay.id, tempId });
+        }
+
+        // 5. Prepare all exercises for bulk insert
+        const allExercises: any[] = [];
+        for (const { id: dayId, tempId } of createdDays) {
+          const exercises = exercisesMap.get(tempId) || [];
+          exercises.forEach((ex: any, j: number) => {
+            allExercises.push({
+              dayId,
+              name: ex.name,
+              sets: ex.sets,
+              setsMin: ex.setsMin,
+              reps: ex.reps,
+              repsMin: ex.repsMin,
+              weightType: ex.weightType || 'ABSOLUTE',
+              weightValue: ex.weightValue,
+              restTime: ex.restTime || 90,
+              exerciseType: ex.exerciseType || 'strength',
+              progression: ex.progression as Prisma.InputJsonValue,
+              movementDetails: ex.movementDetails as Prisma.InputJsonValue,
+              order: j,
+              duration: ex.duration,
+              distance: ex.distance,
+              distanceUnit: ex.distanceUnit,
+              intervals: ex.intervals as Prisma.InputJsonValue,
+              tempo: ex.tempo,
+              timeCap: ex.timeCap,
+              movements: ex.movements as Prisma.InputJsonValue,
+            });
+          });
+        }
+
+        // 6. Bulk insert all exercises
+        if (allExercises.length > 0) {
+          await tx.exercise.createMany({ data: allExercises });
+        }
+
+        console.log(`Created ${createdDays.length} workout days and ${allExercises.length} exercises`);
+      });
 
       return NextResponse.json({
         success: true,
         message: 'Plan activated successfully',
-        data: newPlan,
-        details: {
-          createdWorkouts: createdCount,
-        },
       });
     }
   } catch (error) {

@@ -542,11 +542,67 @@ export async function POST(request: NextRequest) {
             exercises: exerciseData,
           }, chatHistory);
 
-          // Stream the analysis text to show the AI's reasoning to the user
-          // This allows for conversational back-and-forth
+          // Stream the analysis text but filter out JSON - only send conversational text
+          let analysisInJsonBlock = false;
+          let analysisJsonDepth = 0;
+          let analysisTextBuffer = '';
+          
           for await (const chunk of analysisGenerator) {
             fullResponse += chunk;
-            await sendEvent({ type: 'text-chunk', content: chunk });
+            
+            // Process chunk character by character to detect JSON
+            for (const char of chunk) {
+              if (char === '`' && analysisTextBuffer.endsWith('``')) {
+                // Detected start of code block
+                analysisInJsonBlock = true;
+                analysisTextBuffer = analysisTextBuffer.slice(0, -2); // Remove the backticks from buffer
+                // Send any buffered text before the JSON
+                if (analysisTextBuffer.trim()) {
+                  await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
+                }
+                analysisTextBuffer = '';
+                continue;
+              }
+              
+              if (analysisInJsonBlock) {
+                // Look for end of code block
+                if (char === '`' && analysisTextBuffer.endsWith('``')) {
+                  analysisInJsonBlock = false;
+                  analysisTextBuffer = '';
+                }
+                continue;
+              }
+              
+              // Also detect raw JSON objects (starting with {)
+              if (char === '{' && !analysisInJsonBlock) {
+                analysisJsonDepth++;
+                if (analysisJsonDepth === 1 && analysisTextBuffer.trim()) {
+                  // Send buffered text before JSON starts
+                  await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
+                  analysisTextBuffer = '';
+                }
+                continue;
+              }
+              
+              if (analysisJsonDepth > 0) {
+                if (char === '{') analysisJsonDepth++;
+                if (char === '}') analysisJsonDepth--;
+                continue;
+              }
+              
+              analysisTextBuffer += char;
+            }
+            
+            // Send buffered text if we have enough
+            if (analysisTextBuffer.length > 50 && !analysisInJsonBlock && analysisJsonDepth === 0) {
+              await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
+              analysisTextBuffer = '';
+            }
+          }
+          
+          // Send any remaining text
+          if (analysisTextBuffer.trim() && !analysisInJsonBlock && analysisJsonDepth === 0) {
+            await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
           }
 
           await sendEvent({ type: 'text-done' });
@@ -576,6 +632,10 @@ export async function POST(request: NextRequest) {
           }>(fullResponse);
 
           if (suggestionData && suggestionData.exercises) {
+            // Log exercise names for debugging matching issues
+            console.log('AI returned exercise names:', suggestionData.exercises.map(e => e.name));
+            console.log('Expected exercise names:', exerciseData.map(e => e.name));
+            
             // Format suggestions in the same order as the original exercises
             const formattedSuggestions = exerciseData.map((original) => {
               // Find the matching suggestion from AI with flexible matching
@@ -592,11 +652,15 @@ export async function POST(request: NextRequest) {
                   const aiBaseName = aiName.split('(')[0].trim();
                   const dbBaseName = dbName.split('(')[0].trim();
                   
-                  // Base name match
+                  // Base name match (after removing parenthetical notes)
                   if (aiBaseName === dbBaseName) return true;
                   
-                  // Check if one name contains the other
-                  return aiName.includes(dbBaseName) || dbName.includes(aiBaseName);
+                  // Only allow "contains" matching if the names are very similar
+                  // This prevents "Front Squat" from matching both "KB Front Squat" and "2KB Front Squat"
+                  // Only match if the AI name is the full database name or vice versa (no partial substring matches)
+                  if (aiName === dbBaseName || dbName === aiBaseName) return true;
+                  
+                  return false;
                 }
               );
               

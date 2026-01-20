@@ -157,6 +157,7 @@ export async function getExerciseHistory(
 /**
  * Build exercise data with performance for AI analysis
  * Converts all percentage-based weights to absolute pounds
+ * OPTIMIZED: Batches history queries to avoid N+1
  */
 export async function buildExerciseData(
   workoutLogId: string,
@@ -186,16 +187,64 @@ export async function buildExerciseData(
     return [];
   }
 
-  const exercises: ExerciseWithPerformance[] = [];
+  // Get all exercise names for batch query
+  const exerciseNames = workoutLog.exerciseLogs.map(log => log.exercise.name);
 
+  // Fetch ALL history in ONE query (instead of N queries)
+  const allLogs = await prisma.workoutLog.findMany({
+    where: {
+      planId,
+      day: { workoutType },
+      status: 'completed',
+      workoutDate: { lt: workoutDate },
+    },
+    include: {
+      exerciseLogs: {
+        where: {
+          exercise: {
+            name: { in: exerciseNames },
+          },
+        },
+        include: {
+          exercise: true,
+        },
+      },
+      day: true,
+    },
+    orderBy: { workoutDate: 'desc' },
+    take: 6,
+  });
+
+  // Build history map: exerciseName -> PerformanceHistory[]
+  const historyMap = new Map<string, PerformanceHistory[]>();
+  for (const log of allLogs) {
+    for (const exerciseLog of log.exerciseLogs) {
+      const name = exerciseLog.exercise.name;
+      if (!historyMap.has(name)) {
+        historyMap.set(name, []);
+      }
+      
+      const repsPerSet = exerciseLog.repsPerSet as number[];
+      const avgReps = repsPerSet.length > 0
+        ? repsPerSet.reduce((a, b) => a + b, 0) / repsPerSet.length
+        : 0;
+
+      historyMap.get(name)!.push({
+        date: log.workoutDate,
+        sets: exerciseLog.exercise.sets,
+        reps: exerciseLog.exercise.reps,
+        weight: exerciseLog.weightUsed as number,
+        setsCompleted: exerciseLog.setsCompleted,
+        avgReps: Math.round(avgReps * 10) / 10,
+      });
+    }
+  }
+
+  // Build exercise data using the history map (no additional queries!)
+  const exercises: ExerciseWithPerformance[] = [];
   for (const exerciseLog of workoutLog.exerciseLogs) {
     const exercise = exerciseLog.exercise;
-    const history = await getExerciseHistory(
-      exercise.name,
-      planId,
-      workoutType,
-      workoutDate
-    );
+    const history = historyMap.get(exercise.name) || [];
 
     const progression = exercise.progression as {
       type: string;
@@ -208,13 +257,10 @@ export async function buildExerciseData(
     if (exercise.weightType === 'BW' && userBodyweight) {
       prescribedWeightInLbs = Math.round(exercise.weightValue * userBodyweight);
     } else if (exercise.weightType === '1RM') {
-      // For 1RM, we use the actual weight performed as a reasonable estimate
-      // since we don't track 1RM separately
       const weightsPerSet = exerciseLog.weightUsed as number[];
       prescribedWeightInLbs = Array.isArray(weightsPerSet) ? Math.max(...weightsPerSet) : (weightsPerSet as unknown as number);
     }
 
-    // Handle weightUsed as array
     const weightsPerSet = exerciseLog.weightUsed as number[];
     const weightsArray = Array.isArray(weightsPerSet) ? weightsPerSet : [weightsPerSet as unknown as number];
 
@@ -223,24 +269,21 @@ export async function buildExerciseData(
       exerciseType: exercise.exerciseType,
       sets: exercise.sets,
       reps: exercise.reps,
-      weightValue: prescribedWeightInLbs, // NOW IN ABSOLUTE POUNDS
-      weightType: 'ABSOLUTE', // Mark as absolute since we converted it
+      weightValue: prescribedWeightInLbs,
+      weightType: 'ABSOLUTE',
       restTime: exercise.restTime,
       performed: {
         setsCompleted: exerciseLog.setsCompleted,
         repsPerSet: exerciseLog.repsPerSet as number[],
-        weightsPerSet: weightsArray, // Array of weights per set
-        // PERFORMED values (not prescribed)
+        weightsPerSet: weightsArray,
         duration: exerciseLog.duration || undefined,
         distance: exerciseLog.distance || undefined,
       },
       history,
       progression: progression || undefined,
-      // PRESCRIBED values
       duration: exercise.duration || undefined,
       distance: exercise.distance || undefined,
       distanceUnit: exercise.distanceUnit || undefined,
-      // Interval fields
       intervals: exercise.intervals ? (exercise.intervals as {
         type: string;
         rounds: number;
@@ -250,9 +293,7 @@ export async function buildExerciseData(
           intensity?: string;
         }>;
       }) : undefined,
-      // Tempo fields
       tempo: exercise.tempo || undefined,
-      // AMRAP/EMOM/Tabata fields
       timeCap: exercise.timeCap || undefined,
       movements: exercise.movements as object || undefined,
     });
@@ -263,6 +304,7 @@ export async function buildExerciseData(
 
 /**
  * Generate exercises for a workout day from the most recent completed workout of the same type
+ * OPTIMIZED: Uses bulk insert instead of individual creates
  */
 export async function generateWorkoutExercises(
   workoutDayId: string,
@@ -290,54 +332,49 @@ export async function generateWorkoutExercises(
     return;
   }
 
-  // Create exercises based on template, with adjustments if provided
-  for (const templateExercise of templateDay.exercises) {
+  // Prepare all exercises for bulk insert
+  const exercisesToCreate = templateDay.exercises.map((templateExercise) => {
     const suggestion = suggestions?.find(
       (s) => s.name.toLowerCase().trim() === templateExercise.name.toLowerCase().trim()
     );
 
-    await prisma.exercise.create({
-      data: {
-        dayId: workoutDayId,
-        name: templateExercise.name,
-        sets: suggestion?.nextSets ?? templateExercise.sets,
-        setsMin: templateExercise.setsMin || undefined,
-        reps: suggestion?.nextReps ?? templateExercise.reps,
-        repsMin: templateExercise.repsMin || undefined,
-        // If we have a suggestion, use ABSOLUTE weight type since suggestions are in pounds
-        // Otherwise, keep the template's weight type
-        weightType: suggestion ? 'ABSOLUTE' : templateExercise.weightType,
-        weightValue: suggestion?.nextWeight ?? templateExercise.weightValue,
-        restTime: templateExercise.restTime,
-        exerciseType: templateExercise.exerciseType,
-        progression: templateExercise.progression || undefined,
-        movementDetails: templateExercise.movementDetails || undefined,
-        order: templateExercise.order,
-        // Time-based exercise fields (use suggestion if available)
-        duration: suggestion?.nextDuration ?? (templateExercise.duration || undefined),
-        // Distance-based exercise fields (use suggestion if available)
-        distance: suggestion?.nextDistance ?? (templateExercise.distance || undefined),
-        distanceUnit: templateExercise.distanceUnit || undefined,
-        // Interval exercise fields (use suggestion if available)
-        intervals: suggestion?.nextIntervals ?? (templateExercise.intervals || undefined),
-        // Tempo exercise fields
-        tempo: templateExercise.tempo || undefined,
-        // AMRAP/EMOM/Tabata fields (use suggestion if available)
-        timeCap: suggestion?.nextTimeCap ?? (templateExercise.timeCap || undefined),
-        movements: templateExercise.movements || undefined,
-      },
-    });
-  }
-
-  // Mark the workout day as generated
-  await prisma.workoutDay.update({
-    where: { id: workoutDayId },
-    data: { isGenerated: true },
+    return {
+      dayId: workoutDayId,
+      name: templateExercise.name,
+      sets: suggestion?.nextSets ?? templateExercise.sets,
+      setsMin: templateExercise.setsMin || undefined,
+      reps: suggestion?.nextReps ?? templateExercise.reps,
+      repsMin: templateExercise.repsMin || undefined,
+      weightType: suggestion ? 'ABSOLUTE' : templateExercise.weightType,
+      weightValue: suggestion?.nextWeight ?? templateExercise.weightValue,
+      restTime: templateExercise.restTime,
+      exerciseType: templateExercise.exerciseType,
+      progression: templateExercise.progression || undefined,
+      movementDetails: templateExercise.movementDetails || undefined,
+      order: templateExercise.order,
+      duration: suggestion?.nextDuration ?? (templateExercise.duration || undefined),
+      distance: suggestion?.nextDistance ?? (templateExercise.distance || undefined),
+      distanceUnit: templateExercise.distanceUnit || undefined,
+      intervals: suggestion?.nextIntervals ?? (templateExercise.intervals || undefined),
+      tempo: templateExercise.tempo || undefined,
+      timeCap: suggestion?.nextTimeCap ?? (templateExercise.timeCap || undefined),
+      movements: templateExercise.movements || undefined,
+    };
   });
+
+  // Bulk insert all exercises + update workout in transaction
+  await prisma.$transaction([
+    prisma.exercise.createMany({ data: exercisesToCreate }),
+    prisma.workoutDay.update({
+      where: { id: workoutDayId },
+      data: { isGenerated: true },
+    }),
+  ]);
 }
 
 /**
  * Apply AI suggestions to ALL future occurrences of a workout type
+ * OPTIMIZED: Uses transaction for atomicity and better performance
  */
 export async function applyAdjustments(
   planId: string,
@@ -369,63 +406,65 @@ export async function applyAdjustments(
 
   const updatedWorkoutIds: string[] = [];
 
-  // Update all future workouts with the suggestions
-  for (const workout of futureWorkouts) {
-    if (workout.isGenerated && workout.exercises.length > 0) {
-      console.log(`Updating workout ${workout.id} (scheduled ${workout.scheduledDate?.toISOString()}) with suggestions:`, suggestions);
-      
-      for (const suggestion of suggestions) {
-        const exercise = workout.exercises.find(
-          (e) => e.name.toLowerCase().trim() === suggestion.name.toLowerCase().trim()
-        );
+  // Use transaction for atomicity and better performance
+  await prisma.$transaction(async (tx) => {
+    for (const workout of futureWorkouts) {
+      if (workout.isGenerated && workout.exercises.length > 0) {
+        console.log(`Updating workout ${workout.id} (scheduled ${workout.scheduledDate?.toISOString()}) with suggestions`);
+        
+        for (const suggestion of suggestions) {
+          const exercise = workout.exercises.find(
+            (e) => e.name.toLowerCase().trim() === suggestion.name.toLowerCase().trim()
+          );
 
-        if (exercise) {
-          console.log(`  - Updating exercise "${exercise.name}": ${exercise.sets}×${exercise.reps} @ ${exercise.weightValue} lbs → ${suggestion.nextSets}×${suggestion.nextReps} @ ${suggestion.nextWeight} lbs`);
-          
-          // Build update data object with only defined fields
-          const updateData: any = {
-            sets: suggestion.nextSets,
-            reps: suggestion.nextReps,
-            weightValue: suggestion.nextWeight,
-            weightType: 'ABSOLUTE', // AI suggestions are always in absolute pounds
-          };
-          
-          // Add optional fields only if they're defined in the suggestion
-          if (suggestion.nextDuration !== undefined) {
-            updateData.duration = suggestion.nextDuration;
+          if (exercise) {
+            console.log(`  - Updating exercise "${exercise.name}": ${exercise.sets}×${exercise.reps} @ ${exercise.weightValue} lbs → ${suggestion.nextSets}×${suggestion.nextReps} @ ${suggestion.nextWeight} lbs`);
+            
+            // Build update data object with only defined fields
+            const updateData: any = {
+              sets: suggestion.nextSets,
+              reps: suggestion.nextReps,
+              weightValue: suggestion.nextWeight,
+              weightType: 'ABSOLUTE',
+            };
+            
+            if (suggestion.nextDuration !== undefined) {
+              updateData.duration = suggestion.nextDuration;
+            }
+            if (suggestion.nextDistance !== undefined) {
+              updateData.distance = suggestion.nextDistance;
+            }
+            if (suggestion.nextTimeCap !== undefined) {
+              updateData.timeCap = suggestion.nextTimeCap;
+            }
+            if (suggestion.nextIntervals !== undefined) {
+              updateData.intervals = suggestion.nextIntervals;
+            }
+            
+            // Update within transaction
+            await tx.exercise.update({
+              where: { id: exercise.id },
+              data: updateData,
+            });
+          } else {
+            console.log(`  - Warning: Exercise "${suggestion.name}" not found in workout. Available exercises:`, workout.exercises.map(e => e.name));
           }
-          if (suggestion.nextDistance !== undefined) {
-            updateData.distance = suggestion.nextDistance;
-          }
-          if (suggestion.nextTimeCap !== undefined) {
-            updateData.timeCap = suggestion.nextTimeCap;
-          }
-          if (suggestion.nextIntervals !== undefined) {
-            updateData.intervals = suggestion.nextIntervals;
-          }
-          
-          await prisma.exercise.update({
-            where: { id: exercise.id },
-            data: updateData,
-          });
-        } else {
-          console.log(`  - Warning: Exercise "${suggestion.name}" not found in workout. Available exercises:`, workout.exercises.map(e => e.name));
         }
+        
+        updatedWorkoutIds.push(workout.id);
+      } else {
+        // Generate the workout with the suggestions
+        console.log(`Generating workout ${workout.id} with suggestions`);
+        await generateWorkoutExercises(
+          workout.id,
+          workoutType,
+          planId,
+          suggestions
+        );
+        updatedWorkoutIds.push(workout.id);
       }
-      
-      updatedWorkoutIds.push(workout.id);
-    } else {
-      // Generate the workout with the suggestions
-      console.log(`Generating workout ${workout.id} with suggestions`);
-      await generateWorkoutExercises(
-        workout.id,
-        workoutType,
-        planId,
-        suggestions
-      );
-      updatedWorkoutIds.push(workout.id);
     }
-  }
+  });
   
   console.log(`Adjustments applied successfully to ${updatedWorkoutIds.length} future workouts`);
 

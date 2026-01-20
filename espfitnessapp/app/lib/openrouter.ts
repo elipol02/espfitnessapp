@@ -264,7 +264,9 @@ CRITICAL REQUIREMENTS FOR YOUR RESPONSE:
 RESPONSE FORMAT:
 First, write a brief analysis for the overall workout, then analyze each exercise individually with specifics about prescribed vs performed.
 
-Then, provide the suggestions in JSON format wrapped in triple backticks:
+At the end of your conversational analysis, include a brief transition statement like "Here are your updated prescriptions:" or "Your next workout:" to signal you're providing the recommendations. DO NOT MENTION "JSON" to the user - they don't need to know about the technical format.
+
+Then, provide the suggestions in JSON format wrapped in triple backticks (the user won't see this raw data):
 \`\`\`json
 {
   "summary": "<brief overall assessment>",
@@ -335,6 +337,7 @@ CRITICAL REQUIREMENTS:
 - Write conversational text FIRST, BEFORE the JSON block
 - Include ALL exercises from the workout in your JSON response
 - List exercises in the EXACT SAME ORDER they were provided in the input data
+- **CRITICAL: Exercise names in JSON MUST MATCH EXACTLY character-for-character** (including "KB", "2KB", etc. - DO NOT abbreviate or modify exercise names)
 - Provide a suggestion for EVERY exercise, even if it's to maintain current values
 - If they need to stay at the same weight/sets/reps, that's okay - consistency is part of the process`,
 

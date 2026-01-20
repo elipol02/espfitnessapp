@@ -114,9 +114,17 @@ export interface ExerciseAdjustment {
   currentWeight: number;
   currentSets: number;
   currentReps: number;
+  currentDuration?: number;
+  currentDistance?: number;
+  currentTimeCap?: number;
+  currentIntervals?: object;
   nextWeight: number;
   nextSets: number;
   nextReps: number;
+  nextDuration?: number;
+  nextDistance?: number;
+  nextTimeCap?: number;
+  nextIntervals?: object;
   reasoning: string;
 }
 
@@ -228,10 +236,14 @@ TIME-BASED EXERCISES (cardio_time, mobility_time):
 ═══════════════════════════════════════════════════════════════
 INTERVAL/AMRAP/EMOM/TABATA:
 ═══════════════════════════════════════════════════════════════
-- INTERVAL: Generally maintain structure, can adjust weight if used
-- AMRAP: Adjust "reps per round" (in "reps" field) based on rounds completed
-- EMOM: Adjust "reps per minute" (in "reps" field) based on rest time available
-- TABATA: Adjust "reps per round" (in "reps" field) based on performance
+- INTERVAL: Generally maintain structure (rounds and phase durations in "intervals" field), can adjust weight if used
+  Example: If they crushed 6 rounds of 1:00 hard / 1:00 easy → increase to 8 rounds or adjust to 1:15 hard / 0:45 easy
+- AMRAP: Adjust "reps per round" (in "reps" field) AND/OR "timeCap" (duration in seconds) based on rounds completed
+  Example: AMRAP 10 min (600s) completed 15 rounds → increase to 12 min (720s) or increase reps per round
+- EMOM: Adjust "reps per minute" (in "reps" field) AND/OR "timeCap" (duration in seconds) based on rest time available
+  Example: EMOM 10 min (600s) • 10 reps/min with lots of rest → increase to 12 reps/min or extend to 15 min (900s)
+- TABATA: Adjust "reps per round" (in "reps" field) OR "sets" (number of rounds) based on performance
+  Example: Tabata 8 rounds completed easily → increase reps per round or add 2 more rounds (sets: 10)
 - These can also have weight adjusted if using weighted movements
 
 CRITICAL REQUIREMENTS FOR YOUR RESPONSE:
@@ -267,17 +279,57 @@ Then, provide the suggestions in JSON format wrapped in triple backticks:
       "nextReps": <number>,
       "nextDuration": <number or undefined>,  // For time-based exercises ONLY (in minutes)
       "nextDistance": <number or undefined>,  // For distance exercises ONLY (same as current)
+      "nextTimeCap": <number or undefined>,   // For EMOM/AMRAP/Tabata ONLY (in seconds)
+      "nextIntervals": <object or undefined>, // For interval exercises ONLY (full intervals structure with rounds and phases)
       "reasoning": "<brief explanation for this adjustment - mention what changed and why>"
     }
   ]
 }
 \`\`\`
 
+EXAMPLES:
+
+Example 1 - EMOM exercise:
+{
+  "name": "Kettlebell Swing",
+  "currentWeight": 39,
+  "currentSets": 1,
+  "currentReps": 10,
+  "nextWeight": 44,
+  "nextSets": 1,
+  "nextReps": 10,
+  "nextTimeCap": 1080,
+  "reasoning": "Completed 16 rounds easily, increasing to 18 minutes (1080 seconds) to build more work capacity"
+}
+
+Example 2 - Interval exercise:
+{
+  "name": "Assault Bike Intervals",
+  "currentWeight": 0,
+  "currentSets": 1,
+  "currentReps": 1,
+  "nextWeight": 0,
+  "nextSets": 1,
+  "nextReps": 1,
+  "nextIntervals": {
+    "type": "simple",
+    "rounds": 14,
+    "phases": [
+      { "name": "Hard", "duration": 15, "intensity": "hard" },
+      { "name": "Easy", "duration": 15, "intensity": "easy" }
+    ]
+  },
+  "reasoning": "Completed 12 rounds well, increasing to 14 rounds for continued progression"
+}
+
 IMPORTANT FIELD USAGE BY EXERCISE TYPE:
-- STRENGTH/TEMPO: Use nextWeight, nextSets, nextReps (ignore duration/distance)
+- STRENGTH/TEMPO: Use nextWeight, nextSets, nextReps (ignore other fields)
 - TIME-BASED (cardio_time, mobility_time): Use nextDuration (in minutes), set nextReps = nextDuration also for compatibility
 - DISTANCE: Use nextDistance (keep same as current), nextSets, nextWeight
-- AMRAP/EMOM/TABATA: Use nextReps (for reps per round/minute), nextSets if applicable, nextWeight if using weight
+- INTERVAL: MUST include nextIntervals (with rounds and phases array), nextWeight if using weight. DO NOT just use nextSets/nextReps.
+- EMOM: MUST include nextTimeCap (duration in seconds), nextReps (reps per minute), nextWeight if using weight. Sets should be 1.
+- AMRAP: MUST include nextTimeCap (duration in seconds), nextReps (reps per round), nextWeight if using weight. Sets should be 1.
+- TABATA: MUST include nextTimeCap (duration in seconds), nextSets (number of rounds), nextReps (reps per round), nextWeight if using weight
 
 CRITICAL REQUIREMENTS: 
 - Write conversational text FIRST, BEFORE the JSON block
@@ -302,6 +354,36 @@ IMPORTANT:
 - DO NOT output any JSON until you have gathered sufficient information to create a personalized plan.
 - If the user has already provided most of this information in their message or previous messages, you can proceed to generate the plan structure.
 - Use the conversation history to avoid asking for information the user has already provided.
+
+EDITING EXISTING PLANS:
+- If the user has an existing plan (you'll see it in the context), and they're asking to modify it:
+  * PRESERVE existing workout days unless they explicitly ask to change them
+  * If adding a new day (e.g., "add a Tuesday cardio day"), include BOTH the existing days AND the new day in your schedule
+  * Only regenerate days that the user explicitly asks to change
+  
+  TWO TYPES OF PRESERVATION:
+  1. **Copy from database plan**: Use workoutType: "(no changes)" 
+     - Copies from the user's currently active plan in the database
+     - Use when editing their existing active plan
+     
+  2. **Copy from last draft in chat**: Use workoutType: "(copy from draft)"
+     - Copies from the last plan you generated in THIS conversation
+     - Use when user is iterating on a new plan you just created
+     - Example: You generated a plan, user says "change Monday to upper/lower", use "(copy from draft)" for unchanged days
+  
+  * Example 1 - Adding to active plan:
+    User has Mon/Wed/Fri workouts in database, asks to "add Tuesday cardio" → Output:
+    - Monday: workoutType: "(no changes)" (preserves from database)
+    - Tuesday: workoutType: "Active Recovery" (new day)
+    - Wednesday: workoutType: "(no changes)" (preserves from database)
+    - Friday: workoutType: "(no changes)" (preserves from database)
+  
+  * Example 2 - Iterating on a draft:
+    You just generated a 4-day plan, user says "change Monday to upper body" → Output:
+    - Monday: workoutType: "Upper Body" (regenerate this day)
+    - Tuesday: workoutType: "(copy from draft)" (keep from your last generation)
+    - Wednesday: workoutType: "(copy from draft)" (keep from your last generation)
+    - Friday: workoutType: "(copy from draft)" (keep from your last generation)
 
 ONLY after you have gathered sufficient information (or if the user has already provided it), generate the plan structure.
 
@@ -342,6 +424,9 @@ CRITICAL RULES:
 3. dayName MUST match dayNumber (e.g., dayNumber 0 = "Sunday", dayNumber 2 = "Tuesday")
 4. Each dayNumber can only appear ONCE in the schedule
 5. sessionsPerWeek should equal the number of workout days in the schedule
+6. When editing, use special markers to preserve days:
+   - "(no changes)" = copy from database plan
+   - "(copy from draft)" = copy from last plan generated in this chat
 
 WORKOUT TYPE RULES:
 1. workoutType can be one or two words (e.g., "Push", "Pull", "Legs", "Upper Strength", "Full Body")
@@ -695,16 +780,71 @@ export class OpenRouterClient {
     userContext?: {
       bodyweight?: number;
       experienceLevel?: string;
-      currentPlan?: object;
+      currentPlan?: any;
     },
     signal?: AbortSignal
   ): AsyncGenerator<string, string, unknown> {
+    // Build detailed current plan summary if editing
+    let currentPlanContext = '';
+    if (userContext?.currentPlan) {
+      const plan = userContext.currentPlan;
+      currentPlanContext = `\n\nUSER'S CURRENT PLAN (from database):
+Goal: ${plan.goal}
+Duration: ${plan.weeksDuration} weeks
+Sessions per week: ${plan.aiContext?.sessionsPerWeek || plan.workoutDays?.length || 'Unknown'}
+
+CURRENT WEEKLY SCHEDULE:
+${plan.workoutDays?.map((day: any) => {
+  const exercisesSummary = day.exercises?.map((ex: any) => {
+    let exStr = `${ex.name}`;
+    if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
+      exStr += ` - ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
+    } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
+      exStr += ` - ${ex.duration || ex.reps} min`;
+    } else if (ex.exerciseType === 'distance') {
+      exStr += ` - ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'}`;
+    }
+    return exStr;
+  }).join('\n  ') || 'No exercises';
+  
+  return `${day.dayName} (Day ${day.dayNumber}) - ${day.workoutType} [${day.workoutColor}]:
+  ${exercisesSummary}`;
+}).join('\n\n') || 'No days configured'}
+
+IMPORTANT: When editing, preserve all existing days and their exercises UNLESS the user explicitly asks to change them. If adding a new day, include it alongside the existing ones.`;
+    }
+    
+    // Check for last generated draft in conversation
+    let lastDraftContext = '';
+    const lastAssistantWithPlan = messages
+      .filter((m: ChatMessage) => m.role === 'assistant')
+      .reverse()
+      .find((m: ChatMessage) => {
+        // Check if message content contains a plan structure JSON
+        try {
+          const jsonMatch = m.content.match(/```(?:json)?\s*([\s\S]*?)```/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[1]);
+            return parsed.schedule && Array.isArray(parsed.schedule);
+          }
+        } catch {
+          return false;
+        }
+        return false;
+      });
+    
+    if (lastAssistantWithPlan) {
+      lastDraftContext = `\n\nLAST PLAN YOU GENERATED IN THIS CHAT (draft):
+You previously generated a plan in this conversation. If the user is asking to modify that draft, use "(copy from draft)" for unchanged days.`;
+    }
+    
     const systemMessage: ChatMessage = {
       role: 'system',
       content: SYSTEM_PROMPTS.planStructure + 
         (userContext?.bodyweight ? `\n\nUser's bodyweight: ${userContext.bodyweight} lbs` : '') +
         (userContext?.experienceLevel ? `\nExperience level: ${userContext.experienceLevel}` : '') +
-        (userContext?.currentPlan ? `\n\nUser's current plan structure:\n${JSON.stringify(userContext.currentPlan, null, 2)}` : ''),
+        currentPlanContext +
+        lastDraftContext,
     };
 
     return yield* this.chatStream(
@@ -904,6 +1044,8 @@ If you need any clarification about how the user performed any exercise, ask the
     options?: {
       chatHistory?: ChatMessage[];
       fullGeneratedDays?: WorkoutDayData[];
+      currentPlan?: any; // User's active plan from database
+      lastDraftPlan?: any; // Last generated plan JSON from chat
     },
     signal?: AbortSignal
   ): Promise<WorkoutDayData | null> {
@@ -946,6 +1088,54 @@ If you need any clarification about how the user performed any exercise, ask the
       previousDaysSummary = previousDays.map(d => `${d.dayName} (${d.workoutType}): ${d.exerciseNames.join(', ')}`).join('\n');
     }
 
+    // Add context about current active plan (for "(no changes)" option)
+    let currentPlanContext = '';
+    if (options?.currentPlan) {
+      const plan = options.currentPlan;
+      const dayInPlan = plan.workoutDays?.find((d: any) => d.dayNumber === dayInfo.dayNumber);
+      if (dayInPlan && dayInPlan.exercises && dayInPlan.exercises.length > 0) {
+        currentPlanContext = `\n\nCURRENT ACTIVE PLAN - ${dayInfo.dayName} (from database):
+This is what the user currently has scheduled for ${dayInfo.dayName}:
+${dayInPlan.exercises.map((ex: any) => {
+  let exStr = `- ${ex.name}`;
+  if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
+    exStr += `: ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
+  } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
+    exStr += `: ${ex.duration || ex.reps} min`;
+  } else if (ex.exerciseType === 'distance') {
+    exStr += `: ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'}`;
+  }
+  return exStr;
+}).join('\n')}
+
+IMPORTANT: If the workout type for this day is "(no changes)", you should reference this existing day's exercises.`;
+      }
+    }
+
+    // Add context about last draft plan (for "(copy from draft)" option)
+    let lastDraftContext = '';
+    if (options?.lastDraftPlan) {
+      const draft = options.lastDraftPlan;
+      const dayInDraft = draft.schedule?.find((d: any) => d.dayNumber === dayInfo.dayNumber);
+      if (dayInDraft && dayInDraft.exercises && dayInDraft.exercises.length > 0) {
+        lastDraftContext = `\n\nLAST GENERATED DRAFT - ${dayInfo.dayName} (from chat):
+This is what you previously generated for ${dayInfo.dayName} in this conversation:
+${dayInDraft.exercises.map((ex: any) => {
+  let exStr = `- ${ex.name}`;
+  if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
+    exStr += `: ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
+  } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
+    exStr += `: ${ex.duration || ex.reps} min`;
+  } else if (ex.exerciseType === 'distance') {
+    exStr += `: ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'}`;
+  }
+  return exStr;
+}).join('\n')}
+
+IMPORTANT: If the workout type for this day is "(copy from draft)", you should reference this draft day's exercises.`;
+      }
+    }
+
     const userMessage = `
 Plan Context:
 - Goal: ${planContext.goal}
@@ -960,7 +1150,7 @@ Generate exercises for:
 - Color: ${dayInfo.workoutColor}
 
 Previously generated days this week (with full exercise details):
-${previousDaysSummary}
+${previousDaysSummary}${currentPlanContext}${lastDraftContext}
 
 Output ONLY the JSON with exercises array for this day. No additional text.
 `;

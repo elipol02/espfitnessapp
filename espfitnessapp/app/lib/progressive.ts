@@ -37,7 +37,15 @@ export interface ExerciseWithPerformance {
   distance?: number;
   distanceUnit?: string;
   // Interval fields
-  intervals?: object;
+  intervals?: {
+    type: string;
+    rounds: number;
+    phases: Array<{
+      name: string;
+      duration: number;
+      intensity?: string;
+    }>;
+  };
   // Tempo fields
   tempo?: string;
   // AMRAP/EMOM/Tabata fields
@@ -53,6 +61,18 @@ export interface AdjustmentSuggestion {
   nextWeight: number;
   nextSets: number;
   nextReps: number;
+  nextDuration?: number;
+  nextDistance?: number;
+  nextTimeCap?: number;
+  nextIntervals?: {
+    type: string;
+    rounds: number;
+    phases: Array<{
+      name: string;
+      duration: number;
+      intensity?: string;
+    }>;
+  };
   reasoning: string;
 }
 
@@ -221,7 +241,15 @@ export async function buildExerciseData(
       distance: exercise.distance || undefined,
       distanceUnit: exercise.distanceUnit || undefined,
       // Interval fields
-      intervals: exercise.intervals as object || undefined,
+      intervals: exercise.intervals ? (exercise.intervals as {
+        type: string;
+        rounds: number;
+        phases: Array<{
+          name: string;
+          duration: number;
+          intensity?: string;
+        }>;
+      }) : undefined,
       // Tempo fields
       tempo: exercise.tempo || undefined,
       // AMRAP/EMOM/Tabata fields
@@ -285,17 +313,17 @@ export async function generateWorkoutExercises(
         progression: templateExercise.progression || undefined,
         movementDetails: templateExercise.movementDetails || undefined,
         order: templateExercise.order,
-        // Time-based exercise fields
-        duration: templateExercise.duration || undefined,
-        // Distance-based exercise fields
-        distance: templateExercise.distance || undefined,
+        // Time-based exercise fields (use suggestion if available)
+        duration: suggestion?.nextDuration ?? (templateExercise.duration || undefined),
+        // Distance-based exercise fields (use suggestion if available)
+        distance: suggestion?.nextDistance ?? (templateExercise.distance || undefined),
         distanceUnit: templateExercise.distanceUnit || undefined,
-        // Interval exercise fields
-        intervals: templateExercise.intervals || undefined,
+        // Interval exercise fields (use suggestion if available)
+        intervals: suggestion?.nextIntervals ?? (templateExercise.intervals || undefined),
         // Tempo exercise fields
         tempo: templateExercise.tempo || undefined,
-        // AMRAP/EMOM/Tabata fields
-        timeCap: templateExercise.timeCap || undefined,
+        // AMRAP/EMOM/Tabata fields (use suggestion if available)
+        timeCap: suggestion?.nextTimeCap ?? (templateExercise.timeCap || undefined),
         movements: templateExercise.movements || undefined,
       },
     });
@@ -354,14 +382,31 @@ export async function applyAdjustments(
         if (exercise) {
           console.log(`  - Updating exercise "${exercise.name}": ${exercise.sets}×${exercise.reps} @ ${exercise.weightValue} lbs → ${suggestion.nextSets}×${suggestion.nextReps} @ ${suggestion.nextWeight} lbs`);
           
+          // Build update data object with only defined fields
+          const updateData: any = {
+            sets: suggestion.nextSets,
+            reps: suggestion.nextReps,
+            weightValue: suggestion.nextWeight,
+            weightType: 'ABSOLUTE', // AI suggestions are always in absolute pounds
+          };
+          
+          // Add optional fields only if they're defined in the suggestion
+          if (suggestion.nextDuration !== undefined) {
+            updateData.duration = suggestion.nextDuration;
+          }
+          if (suggestion.nextDistance !== undefined) {
+            updateData.distance = suggestion.nextDistance;
+          }
+          if (suggestion.nextTimeCap !== undefined) {
+            updateData.timeCap = suggestion.nextTimeCap;
+          }
+          if (suggestion.nextIntervals !== undefined) {
+            updateData.intervals = suggestion.nextIntervals;
+          }
+          
           await prisma.exercise.update({
             where: { id: exercise.id },
-            data: {
-              sets: suggestion.nextSets,
-              reps: suggestion.nextReps,
-              weightValue: suggestion.nextWeight,
-              weightType: 'ABSOLUTE', // AI suggestions are always in absolute pounds
-            },
+            data: updateData,
           });
         } else {
           console.log(`  - Warning: Exercise "${suggestion.name}" not found in workout. Available exercises:`, workout.exercises.map(e => e.name));

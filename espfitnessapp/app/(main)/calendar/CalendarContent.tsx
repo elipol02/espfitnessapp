@@ -23,6 +23,7 @@ interface CalendarData {
   }[];
   planId: string | null;
   startDate: string | null;
+  programEndDate: string | null;
   weeksDuration: number;
 }
 
@@ -32,7 +33,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>('month');
 
-  const { workoutDays, workoutLogs, planId, startDate } = data;
+  const { workoutDays, workoutLogs, planId, startDate, programEndDate } = data;
 
   // Check if a date is before the plan start date
   const isBeforeStartDate = (date: Date) => {
@@ -44,6 +45,18 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     const checkDate = new Date(date);
     checkDate.setHours(0, 0, 0, 0);
     return checkDate < start;
+  };
+
+  // Check if a date is after the program end date (for programs with limited duration)
+  const isAfterProgramEnd = (date: Date) => {
+    if (!programEndDate) return false;
+    // Parse the ISO date as local date to avoid timezone issues
+    const endDateOnly = programEndDate.split('T')[0]; // Get YYYY-MM-DD part
+    const [year, month, day] = endDateOnly.split('-').map(Number);
+    const end = new Date(year, month - 1, day);
+    const checkDate = new Date(date);
+    checkDate.setHours(0, 0, 0, 0);
+    return checkDate > end;
   };
 
   // Check if a date is in the future (for greying out and preventing submission)
@@ -271,10 +284,11 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                 const isTodayDate = isToday(date);
                 const isCompleted = log?.status === 'completed';
                 const beforeStart = isBeforeStartDate(date);
+                const afterEnd = isAfterProgramEnd(date);
                 const isFuture = isFutureDate(date);
                 const isGenerated = workout?.isGenerated ?? false;
                 // Allow clicking workouts that are generated, even if they're in the future
-                const isClickable = workout && planId && !beforeStart && isGenerated;
+                const isClickable = workout && planId && !beforeStart && !afterEnd && isGenerated;
 
                 return (
                   <Link
@@ -291,7 +305,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                       transition-colors relative
                       ${isTodayDate ? 'ring-2 ring-primary' : ''}
                       ${isClickable ? 'hover:bg-surface-elevated cursor-pointer' : 'cursor-default'}
-                      ${beforeStart ? 'opacity-30' : ''}
+                      ${beforeStart || afterEnd ? 'opacity-30' : ''}
                     `}
                     onClick={(e) => {
                       if (!isClickable) {
@@ -307,7 +321,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                       {date.getDate()}
                     </span>
 
-                    {workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && !beforeStart && (
+                    {workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && !beforeStart && !afterEnd && (
                       <div
                         className={`
                           w-6 h-6 rounded-full flex items-center justify-center mt-0.5
@@ -336,6 +350,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
               const isTodayDate = isToday(date);
               const isCompleted = log?.status === 'completed';
               const beforeStart = isBeforeStartDate(date);
+              const afterEnd = isAfterProgramEnd(date);
               const isFuture = isFutureDate(date);
               const isGenerated = workout?.isGenerated ?? false;
 
@@ -345,7 +360,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                   className={`
                     bg-surface rounded-xl p-4 
                     ${isTodayDate ? 'ring-2 ring-primary' : ''}
-                    ${beforeStart ? 'opacity-50' : ''}
+                    ${beforeStart || afterEnd ? 'opacity-50' : ''}
                   `}
                 >
                   <div className="flex items-center justify-between">
@@ -374,7 +389,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                       )}
                     </div>
 
-                    {workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && !beforeStart && (
+                    {workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && !beforeStart && !afterEnd && (
                       isFuture ? (
                         isGenerated ? (
                           <Link href={`/workout/live?dayId=${workout.id}&planId=${planId}&date=${date.toISOString()}&preview=true`}>
@@ -407,8 +422,8 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                         </Link>
                       )
                     )}
-                    {beforeStart && workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && (
-                      <span className="text-xs text-muted-foreground">Not started</span>
+                    {(beforeStart || afterEnd) && workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && (
+                      <span className="text-xs text-muted-foreground">{beforeStart ? 'Not started' : 'Program ended'}</span>
                     )}
                   </div>
                 </div>

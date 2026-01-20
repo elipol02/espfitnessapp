@@ -12,9 +12,9 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { messageId, adjustmentId } = body;
 
-    if (!messageId || !adjustmentId) {
+    if (!messageId) {
       return NextResponse.json(
-        { success: false, error: 'Message ID and Adjustment ID required' },
+        { success: false, error: 'Message ID required' },
         { status: 400 }
       );
     }
@@ -31,23 +31,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get the suggestions from this message's metadata
-    const messageMetadata = message.metadata as { 
-      adjustmentData?: { exercises: Array<unknown> };
-      [key: string]: unknown;
-    } | null;
-    
-    const messageSuggestions = messageMetadata?.adjustmentData?.exercises;
-
-    // Update the pendingAdjustment with this message's suggestions
-    if (messageSuggestions) {
-      await prisma.pendingAdjustment.update({
-        where: { id: adjustmentId },
-        data: {
-          suggestions: messageSuggestions,
-        },
-      });
-    }
+    const messageMetadata = message.metadata as any;
 
     // Update this message to approved
     await prisma.chatMessage.update({
@@ -60,28 +44,75 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Find all other messages with the same adjustmentId and mark them as not approved
-    const sessionMessages = await prisma.chatMessage.findMany({
-      where: {
-        sessionId: message.sessionId,
-        userId: session.user.id,
-        id: { not: messageId },
-      },
-    });
+    // Handle plan approval
+    if (messageMetadata?.type === 'plan_preview') {
+      // Find all other messages with plan_preview and mark them as not approved
+      const sessionMessages = await prisma.chatMessage.findMany({
+        where: {
+          sessionId: message.sessionId,
+          userId: session.user.id,
+          id: { not: messageId },
+        },
+      });
 
-    for (const msg of sessionMessages) {
-      const metadata = msg.metadata as { adjustmentId?: string; approved?: boolean } | null;
-      if (metadata?.adjustmentId === adjustmentId) {
-        await prisma.chatMessage.update({
-          where: { id: msg.id },
-          data: {
-            metadata: {
-              ...metadata,
-              approved: false,
+      for (const msg of sessionMessages) {
+        const metadata = msg.metadata as { type?: string; approved?: boolean } | null;
+        if (metadata?.type === 'plan_preview') {
+          await prisma.chatMessage.update({
+            where: { id: msg.id },
+            data: {
+              metadata: {
+                ...metadata,
+                approved: false,
+              },
             },
+          });
+        }
+      }
+
+      return NextResponse.json({ success: true });
+    }
+
+    // Handle adjustment approval
+    if (adjustmentId) {
+      const adjustmentMetadata = messageMetadata?.adjustmentData;
+      const messageSuggestions = adjustmentMetadata?.exercises;
+
+      // Update the pendingAdjustment with this message's suggestions
+      if (messageSuggestions) {
+        await prisma.pendingAdjustment.update({
+          where: { id: adjustmentId },
+          data: {
+            suggestions: messageSuggestions,
           },
         });
       }
+
+      // Find all other messages with the same adjustmentId and mark them as not approved
+      const sessionMessages = await prisma.chatMessage.findMany({
+        where: {
+          sessionId: message.sessionId,
+          userId: session.user.id,
+          id: { not: messageId },
+        },
+      });
+
+      for (const msg of sessionMessages) {
+        const metadata = msg.metadata as { adjustmentId?: string; approved?: boolean } | null;
+        if (metadata?.adjustmentId === adjustmentId) {
+          await prisma.chatMessage.update({
+            where: { id: msg.id },
+            data: {
+              metadata: {
+                ...metadata,
+                approved: false,
+              },
+            },
+          });
+        }
+      }
+
+      return NextResponse.json({ success: true });
     }
 
     return NextResponse.json({ success: true });

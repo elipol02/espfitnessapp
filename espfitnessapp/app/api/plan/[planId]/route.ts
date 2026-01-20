@@ -56,7 +56,9 @@ export async function PATCH(
 
     const { planId } = await params;
     const body = await request.json();
-    const { status, goal, weeksDuration, startDate } = body;
+    const { status, goal, weeksDuration, startDate, action } = body;
+
+    console.log(`PATCH /api/plan/${planId}`, { status, action, body });
 
     // Verify ownership
     const existingPlan = await prisma.workoutPlan.findUnique({
@@ -66,9 +68,169 @@ export async function PATCH(
     if (!existingPlan || existingPlan.userId !== session.user.id) {
       return NextResponse.json({ success: false, error: 'Plan not found' }, { status: 404 });
     }
+    
+    console.log(`Existing plan found: ${existingPlan.id}, status: ${existingPlan.status}`);
 
-    // If activating a new plan, deactivate other active plans
-    if (status === 'active' && existingPlan.status !== 'active') {
+    // Handle "replace" action - replace current active plan with this one
+    if (action === 'replace' && status === 'active') {
+      // Find the current active plan
+      const currentActivePlan = await prisma.workoutPlan.findFirst({
+        where: {
+          userId: session.user.id,
+          status: 'active',
+          id: { not: planId },
+        },
+        include: {
+          workoutDays: {
+            include: {
+              exercises: true,
+            },
+            orderBy: { dayNumber: 'asc' },
+          },
+        },
+      });
+
+      if (!currentActivePlan) {
+        // No active plan to replace - just activate this one normally
+        console.log('No active plan found to replace, activating new plan normally');
+        // Fall through to normal activation logic below
+      } else {
+        console.log(`Replacing active plan ${currentActivePlan.id} with new plan ${planId}`);
+        console.log(`Current active plan has ${currentActivePlan.workoutDays.length} workout days`);
+        
+        // Get the new plan structure
+        console.log(`Fetching new plan structure for plan ${planId}`);
+        const newPlan = await prisma.workoutPlan.findUnique({
+          where: { id: planId },
+          include: {
+            workoutDays: {
+              include: {
+                exercises: true,
+              },
+              orderBy: { dayNumber: 'asc' },
+            },
+          },
+        });
+
+        if (!newPlan) {
+          console.error(`ERROR: New plan ${planId} not found when trying to replace!`);
+          return NextResponse.json({ success: false, error: 'New plan not found' }, { status: 404 });
+        }
+        
+        console.log(`New plan found with ${newPlan.workoutDays.length} workout days`);
+
+        // Delete all future workouts from the current active plan
+        const now = new Date();
+        const deletedCount = await prisma.workoutDay.deleteMany({
+          where: {
+            planId: currentActivePlan.id,
+            scheduledDate: { gt: now },
+          },
+        });
+        
+        console.log(`Deleted ${deletedCount.count} future workout days`);
+
+        // Update the current active plan with new structure
+        await prisma.workoutPlan.update({
+          where: { id: currentActivePlan.id },
+          data: {
+            goal: newPlan.goal,
+            weeksDuration: newPlan.weeksDuration,
+            aiContext: newPlan.aiContext,
+          },
+        });
+
+        // Copy workout day structure from new plan to active plan
+        // Calculate start date based on current week
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const dayOfWeek = today.getDay();
+        const startOfWeek = new Date(today.getFullYear(), today.getMonth(), today.getDate() - dayOfWeek);
+
+        // Create workout days for remaining weeks
+        const weeksRemaining = currentActivePlan.weeksDuration;
+        let createdCount = 0;
+        
+        for (let week = 0; week < weeksRemaining; week++) {
+          for (const newDay of newPlan.workoutDays) {
+            // Calculate scheduled date for this week
+            let scheduledDate = new Date(startOfWeek);
+            scheduledDate.setDate(startOfWeek.getDate() + (week * 7) + newDay.dayNumber);
+            
+            // Skip if this date is in the past
+            if (scheduledDate.getTime() < now.getTime()) {
+              continue;
+            }
+
+            // Create the workout day
+            const createdDay = await prisma.workoutDay.create({
+              data: {
+                planId: currentActivePlan.id,
+                dayNumber: newDay.dayNumber,
+                dayName: newDay.dayName,
+                scheduledDate: scheduledDate,
+                workoutType: newDay.workoutType,
+                workoutColor: newDay.workoutColor,
+                isGenerated: true,
+              },
+            });
+            
+            createdCount++;
+
+            // Copy exercises from the new plan
+            for (const exercise of newDay.exercises) {
+              await prisma.exercise.create({
+                data: {
+                  dayId: createdDay.id,
+                  name: exercise.name,
+                  sets: exercise.sets,
+                  setsMin: exercise.setsMin,
+                  reps: exercise.reps,
+                  repsMin: exercise.repsMin,
+                  weightType: exercise.weightType,
+                  weightValue: exercise.weightValue,
+                  restTime: exercise.restTime,
+                  exerciseType: exercise.exerciseType,
+                  progression: exercise.progression,
+                  movementDetails: exercise.movementDetails,
+                  order: exercise.order,
+                  duration: exercise.duration,
+                  distance: exercise.distance,
+                  distanceUnit: exercise.distanceUnit,
+                  intervals: exercise.intervals,
+                  tempo: exercise.tempo,
+                  timeCap: exercise.timeCap,
+                  movements: exercise.movements,
+                },
+              });
+            }
+          }
+        }
+        
+        console.log(`Created ${createdCount} new workout days`);
+
+        // Mark the draft plan as 'applied' instead of deleting it
+        // This allows the user to go back and reactivate it later
+        await prisma.workoutPlan.update({
+          where: { id: planId },
+          data: { status: 'archived' }, // Archive instead of delete
+        });
+
+        console.log(`Successfully replaced plan ${currentActivePlan.id} with new structure, archived draft ${planId}`);
+
+        return NextResponse.json({ 
+          success: true, 
+          data: currentActivePlan,
+          message: 'Plan replaced successfully',
+          details: {
+            deletedWorkouts: deletedCount.count,
+            createdWorkouts: createdCount,
+          }
+        });
+      }
+    }
+
+    // If activating a new plan (not replace), deactivate other active plans
+    if (status === 'active' && existingPlan.status !== 'active' && action !== 'replace') {
       await prisma.workoutPlan.updateMany({
         where: {
           userId: session.user.id,

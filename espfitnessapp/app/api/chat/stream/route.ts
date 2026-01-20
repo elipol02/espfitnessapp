@@ -222,19 +222,13 @@ export async function POST(request: NextRequest) {
             const weeksDuration = structureData.weeksDuration || 12;
             const sessionsPerWeek = structureData.sessionsPerWeek || structureData.schedule.filter(d => d.workoutType !== 'Rest').length;
             
-            // Create draft plan in database
-            const newPlan = await prisma.workoutPlan.create({
-              data: {
-                userId,
-                goal: structureData.goal,
-                status: 'draft',
-                weeksDuration: weeksDuration,
-                startDate: today,
-                aiContext: {
-                  sessionsPerWeek: sessionsPerWeek,
-                },
-              },
-            });
+            // Don't create plan in database yet - just generate the structure
+            const planData = {
+              goal: structureData.goal,
+              weeksDuration: weeksDuration,
+              sessionsPerWeek: sessionsPerWeek,
+              startDate: today.toISOString(),
+            };
 
             // Find the start of the current week (Sunday)
             const dayOfWeek = today.getDay();
@@ -258,98 +252,140 @@ export async function POST(request: NextRequest) {
 
             // Step 3: Generate exercises for each day one by one (first week only shown)
             // Filter out any rest days the AI might have included (we don't store them)
+            // Keep "(no changes)" and "(copy from draft)" entries - they indicate days to preserve
             const workoutDays = structureData.schedule.filter(d => d.workoutType !== 'Rest');
             const totalWorkoutDays = workoutDays.length;
             const generatedDays: WorkoutDayData[] = [];
             const previousDaysSummary: Array<{ dayName: string; workoutType: string; exerciseNames: string[] }> = [];
 
+            // If editing existing plan, map existing exercises to days (from database)
+            const existingDaysMap = new Map<number, WorkoutDayData>();
+            if (currentPlan && mode === 'edit') {
+              for (const workoutDay of currentPlan.workoutDays) {
+                const exercises = workoutDay.exercises.map((ex: any) => ({
+                  name: ex.name,
+                  sets: ex.sets,
+                  setsMin: ex.setsMin,
+                  reps: ex.reps,
+                  repsMin: ex.repsMin,
+                  weightType: ex.weightType,
+                  weightValue: ex.weightValue,
+                  restTime: ex.restTime,
+                  exerciseType: ex.exerciseType,
+                  progression: ex.progression,
+                  movementDetails: ex.movementDetails,
+                  duration: ex.duration,
+                  distance: ex.distance,
+                  distanceUnit: ex.distanceUnit,
+                  intervals: ex.intervals,
+                  tempo: ex.tempo,
+                  timeCap: ex.timeCap,
+                  movements: ex.movements,
+                }));
+                
+                existingDaysMap.set(workoutDay.dayNumber, {
+                  dayNumber: workoutDay.dayNumber,
+                  dayName: workoutDay.dayName,
+                  workoutType: workoutDay.workoutType,
+                  workoutColor: workoutDay.workoutColor,
+                  exercises: exercises,
+                });
+              }
+            }
+
+            // Get last generated plan from chat history (for "(copy from draft)")
+            const lastDraftDaysMap = new Map<number, WorkoutDayData>();
+            let lastDraftPlan = null;
+            const lastAssistantMessage = recentMessages
+              .filter(m => m.role === 'assistant' && m.metadata && typeof m.metadata === 'object')
+              .reverse()
+              .find(m => {
+                const meta = m.metadata as any;
+                return meta?.type === 'plan_preview' && meta?.planData?.schedule;
+              });
+            
+            if (lastAssistantMessage?.metadata) {
+              const lastPlanData = (lastAssistantMessage.metadata as any).planData;
+              if (lastPlanData?.schedule) {
+                lastDraftPlan = lastPlanData; // Store entire plan for context
+                for (const day of lastPlanData.schedule) {
+                  lastDraftDaysMap.set(day.dayNumber, day);
+                }
+              }
+            }
+
             // Generate first week's exercises day by day
             for (let i = 0; i < workoutDays.length; i++) {
               const dayStructure = workoutDays[i];
 
-              // Generate exercises for this day using AI
-              const dayWithExercises = await openRouter.generateDay(
-                {
-                  goal: structureData.goal,
-                  weeksDuration: weeksDuration,
-                  sessionsPerWeek: sessionsPerWeek,
-                  bodyweight: context?.bodyweight,
-                  experienceLevel: context?.experienceLevel,
-                },
-                {
-                  dayNumber: dayStructure.dayNumber,
-                  dayName: dayStructure.dayName,
-                  workoutType: dayStructure.workoutType,
-                  workoutColor: dayStructure.workoutColor,
-                },
-                previousDaysSummary,
-                {
-                  chatHistory: chatHistory,
-                  fullGeneratedDays: generatedDays,
+              // Check if this day should use existing data
+              let dayWithExercises: WorkoutDayData | null = null;
+              let sourceDescription = '';
+              
+              if (dayStructure.workoutType === '(no changes)') {
+                // Copy from database plan
+                const existingDay = existingDaysMap.get(dayStructure.dayNumber);
+                if (existingDay) {
+                  dayWithExercises = existingDay;
+                  sourceDescription = 'database plan';
+                } else {
+                  console.warn(`Day marked as "(no changes)" but no existing data found for day ${dayStructure.dayNumber}`);
                 }
-              );
-
-              if (dayWithExercises) {
-                // Save to database - schedule workout based on day number
-                // If the workout day is before today in the current week, schedule it for next week instead
-                let scheduledDate = new Date(startOfWeek);
-                scheduledDate.setDate(startOfWeek.getDate() + dayStructure.dayNumber);
-                
-                // If the scheduled date is before the plan start date (today), move it to next week
-                // Use getTime() for accurate date comparison
-                if (scheduledDate.getTime() < today.getTime()) {
-                  scheduledDate.setDate(scheduledDate.getDate() + 7);
+              } else if (dayStructure.workoutType === '(copy from draft)') {
+                // Copy from last generated plan in this chat
+                const lastDraftDay = lastDraftDaysMap.get(dayStructure.dayNumber);
+                if (lastDraftDay) {
+                  dayWithExercises = lastDraftDay;
+                  sourceDescription = 'last draft';
+                } else {
+                  console.warn(`Day marked as "(copy from draft)" but no previous draft found for day ${dayStructure.dayNumber}`);
                 }
-                
-                const day = await prisma.workoutDay.create({
-                  data: {
-                    planId: newPlan.id,
-                    dayNumber: dayStructure.dayNumber,
-                    dayName: dayStructure.dayName,
-                    scheduledDate: scheduledDate,
+              } else if (currentPlan && mode === 'edit' && existingDaysMap.has(dayStructure.dayNumber)) {
+                // Implicit preservation - day exists in current plan and wasn't explicitly marked
+                const existingDay = existingDaysMap.get(dayStructure.dayNumber);
+                if (existingDay) {
+                  // Update type/color if specified, keep exercises
+                  dayWithExercises = {
+                    ...existingDay,
                     workoutType: dayStructure.workoutType,
                     workoutColor: dayStructure.workoutColor,
-                    isGenerated: true,
-                  },
-                });
-
-                // Create exercises
-                for (let j = 0; j < dayWithExercises.exercises.length; j++) {
-                  const ex = dayWithExercises.exercises[j];
-                  const setsRange = parseRange(ex.sets);
-                  const repsRange = parseRange(ex.reps);
-                  
-                  await prisma.exercise.create({
-                    data: {
-                      dayId: day.id,
-                      name: ex.name,
-                      sets: setsRange.value,
-                      setsMin: setsRange.min,
-                      reps: repsRange.value,
-                      repsMin: repsRange.min,
-                      weightType: ex.weightType || 'ABSOLUTE',
-                      weightValue: typeof ex.weightValue === 'number' ? ex.weightValue : parseFloat(String(ex.weightValue)) || 0,
-                      restTime: ex.restTime || 90,
-                      exerciseType: ex.exerciseType || 'strength',
-                      progression: ex.progression || undefined,
-                      movementDetails: ex.movementDetails || undefined,
-                      order: j,
-                      // Time-based fields
-                      duration: ex.duration || undefined,
-                      // Distance fields
-                      distance: ex.distance || undefined,
-                      distanceUnit: ex.distanceUnit || undefined,
-                      // Interval fields
-                      intervals: ex.intervals as Prisma.InputJsonValue || undefined,
-                      // Tempo fields
-                      tempo: ex.tempo || undefined,
-                      // AMRAP/EMOM/Tabata fields
-                      timeCap: ex.timeCap || undefined,
-                      movements: ex.movements as Prisma.InputJsonValue || undefined,
-                    },
-                  });
+                  };
+                  sourceDescription = 'implicit preservation (updated type/color)';
                 }
+              }
+              
+              if (!dayWithExercises) {
+                // Generate exercises for this day using AI (new day or create mode)
+                dayWithExercises = await openRouter.generateDay(
+                  {
+                    goal: structureData.goal,
+                    weeksDuration: weeksDuration,
+                    sessionsPerWeek: sessionsPerWeek,
+                    bodyweight: context?.bodyweight,
+                    experienceLevel: context?.experienceLevel,
+                  },
+                  {
+                    dayNumber: dayStructure.dayNumber,
+                    dayName: dayStructure.dayName,
+                    workoutType: dayStructure.workoutType,
+                    workoutColor: dayStructure.workoutColor,
+                  },
+                  previousDaysSummary,
+                  {
+                    chatHistory: chatHistory,
+                    fullGeneratedDays: generatedDays,
+                    currentPlan: currentPlan, // Pass active plan for "(no changes)"
+                    lastDraftPlan: lastDraftPlan, // Pass last draft for "(copy from draft)"
+                  }
+                );
+                sourceDescription = 'generated';
+              }
+              
+              if (sourceDescription) {
+                console.log(`Day ${dayStructure.dayNumber} (${dayStructure.dayName}): ${sourceDescription}`);
+              }
 
+              if (dayWithExercises) {
                 // Track for next day's context
                 previousDaysSummary.push({
                   dayName: dayStructure.dayName,
@@ -395,77 +431,19 @@ export async function POST(request: NextRequest) {
               }
             }
 
-            // Create remaining weeks (copy exercises from week 1 for all weeks)
-            for (let week = 2; week <= weeksDuration; week++) {
-              for (const dayStructure of workoutDays) {
-                const scheduledDate = new Date(startOfWeek);
-                scheduledDate.setDate(startOfWeek.getDate() + (week - 1) * 7 + dayStructure.dayNumber);
-                
-                // Find the week 1 day template for this workout type
-                const week1Day = generatedDays.find(d => d.dayNumber === dayStructure.dayNumber);
-                
-                const day = await prisma.workoutDay.create({
-                  data: {
-                    planId: newPlan.id,
-                    dayNumber: dayStructure.dayNumber,
-                    dayName: dayStructure.dayName,
-                    scheduledDate: scheduledDate,
-                    workoutType: dayStructure.workoutType,
-                    workoutColor: dayStructure.workoutColor,
-                    isGenerated: true, // All workouts are generated with exercises
-                  },
-                });
-
-                // Copy exercises from week 1 for all weeks (same lift amounts)
-                if (week1Day && week1Day.exercises.length > 0) {
-                  for (let j = 0; j < week1Day.exercises.length; j++) {
-                    const ex = week1Day.exercises[j];
-                    await prisma.exercise.create({
-                      data: {
-                        dayId: day.id,
-                        name: ex.name,
-                        sets: ex.sets,
-                        setsMin: ex.setsMin || undefined,
-                        reps: ex.reps,
-                        repsMin: ex.repsMin || undefined,
-                        weightType: ex.weightType,
-                        weightValue: ex.weightValue,
-                        restTime: ex.restTime || 90,
-                        exerciseType: ex.exerciseType || 'strength',
-                        progression: ex.progression || undefined,
-                        movementDetails: ex.movementDetails || undefined,
-                        order: j,
-                        duration: ex.duration || undefined,
-                        distance: ex.distance || undefined,
-                        distanceUnit: ex.distanceUnit || undefined,
-                        intervals: ex.intervals as Prisma.InputJsonValue || undefined,
-                        tempo: ex.tempo || undefined,
-                        timeCap: ex.timeCap || undefined,
-                        movements: ex.movements as Prisma.InputJsonValue || undefined,
-                      },
-                    });
-                  }
-                }
-              }
-            }
-
-            // Build final plan data with exercises
+            // Build final plan data with exercises (full JSON saved in message)
             const finalPlanData = {
-              goal: structureData.goal,
-              weeksDuration: weeksDuration,
-              sessionsPerWeek: sessionsPerWeek,
+              ...planData,
               schedule: generatedDays,
             };
 
             metadata = {
               type: 'plan_preview',
-              planId: newPlan.id,
               planData: finalPlanData as unknown as Prisma.InputJsonValue,
             };
 
             await sendEvent({
               type: 'done',
-              planId: newPlan.id,
             });
           } else {
             // No plan structure extracted - just a conversation message (maybe asking questions)
@@ -581,8 +559,18 @@ export async function POST(request: NextRequest) {
               nextSets: number;
               nextReps: number;
               nextWeight: number;
-              nextDuration?: number;  // For time-based exercises
+              nextDuration?: number;  // For time-based exercises (in minutes)
               nextDistance?: number;  // For distance exercises
+              nextTimeCap?: number;   // For EMOM/AMRAP/Tabata (in seconds)
+              nextIntervals?: {       // For interval exercises
+                type: string;
+                rounds: number;
+                phases: Array<{
+                  name: string;
+                  duration: number;
+                  intensity?: string;
+                }>;
+              };
               reasoning: string;
             }>;
           }>(fullResponse);
@@ -633,6 +621,8 @@ export async function POST(request: NextRequest) {
                   currentDuration: original.duration,
                   currentDistance: original.distance,
                   currentDistanceUnit: original.distanceUnit,
+                  currentTimeCap: original.timeCap,
+                  currentIntervals: original.intervals,
                   performedSets: original.performed.setsCompleted,
                   performedReps: avgRepsPerformed,
                   performedRepsDetail: repsDetail,
@@ -646,6 +636,8 @@ export async function POST(request: NextRequest) {
                   nextReps: original.reps,
                   nextDuration: original.duration,
                   nextDistance: original.distance,
+                  nextTimeCap: original.timeCap,
+                  nextIntervals: original.intervals,
                   reasoning: 'Maintain current prescription',
                 };
               }
@@ -663,6 +655,8 @@ export async function POST(request: NextRequest) {
                 currentDuration: original.duration,
                 currentDistance: original.distance,
                 currentDistanceUnit: original.distanceUnit,
+                currentTimeCap: original.timeCap,
+                currentIntervals: original.intervals,
                 performedSets: original.performed.setsCompleted,
                 performedReps: avgRepsPerformed,
                 performedRepsDetail: repsDetail,
@@ -676,6 +670,8 @@ export async function POST(request: NextRequest) {
                 nextReps: suggestion.nextReps,
                 nextDuration: suggestion.nextDuration,
                 nextDistance: suggestion.nextDistance,
+                nextTimeCap: suggestion.nextTimeCap,
+                nextIntervals: suggestion.nextIntervals,
                 reasoning: suggestion.reasoning,
               };
             });

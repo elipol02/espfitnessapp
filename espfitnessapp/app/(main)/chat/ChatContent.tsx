@@ -70,9 +70,17 @@ interface ExerciseAdjustment {
   currentWeight: number;
   currentSets: number;
   currentReps: number;
+  currentDuration?: number;
+  currentDistance?: number;
+  currentTimeCap?: number;
+  currentIntervals?: object;
   nextWeight: number;
   nextSets: number;
   nextReps: number;
+  nextDuration?: number;
+  nextDistance?: number;
+  nextTimeCap?: number;
+  nextIntervals?: object;
   reasoning: string;
 }
 
@@ -948,19 +956,61 @@ export function ChatContent({
 
 
   // Handle plan approval
-  const handleApprove = async (planId: string, action: 'activate' | 'replace' = 'activate') => {
+  const handleApprove = async (messageId: string, action: 'activate' | 'replace' = 'activate') => {
     try {
-      await fetch(`/api/plan/${planId}`, {
-        method: 'PATCH',
+      console.log(`[handleApprove] Starting with messageId: ${messageId}, action: ${action}`);
+      
+      // Get the message to see what we're sending
+      const message = messages.find(m => m.id === messageId);
+      if (message?.metadata) {
+        const metadata = message.metadata as { planData?: any };
+        if (metadata.planData) {
+          console.log(`[handleApprove] Plan data structure:`, {
+            goal: metadata.planData.goal,
+            weeksDuration: metadata.planData.weeksDuration,
+            sessionsPerWeek: metadata.planData.sessionsPerWeek,
+            scheduleDays: metadata.planData.schedule?.length,
+            schedulePreview: metadata.planData.schedule?.map((d: any) => ({
+              dayNumber: d.dayNumber,
+              dayName: d.dayName,
+              workoutType: d.workoutType,
+              exerciseCount: d.exercises?.length
+            }))
+          });
+        }
+      }
+      
+      const response = await fetch('/api/plan/apply-from-message', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'active', action }),
+        body: JSON.stringify({ messageId, action }),
       });
 
-      // Mark plan as approved in UI
-      setApprovedPlans((prev) => new Set(prev).add(planId));
+      console.log(`[handleApprove] Response status: ${response.status}`);
+      const result = await response.json();
+      console.log(`[handleApprove] Response result:`, result);
+      
+      if (!result.success) {
+        console.error('Plan approval failed:', result.error);
+        alert(`Failed to ${action} plan: ${result.error || 'Unknown error'}`);
+        return;
+      }
+
+      console.log(`Plan ${action} successful:`, result);
+
+      // Mark the message as approved in the database
+      await fetch('/api/chat/approve-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId }),
+      });
+
+      // Mark plan as approved in UI (for immediate feedback)
+      setApprovedPlans((prev) => new Set(prev).add(messageId));
       router.refresh();
     } catch (error) {
       console.error('Approval error:', error);
+      alert(`Failed to ${action} plan. Please try again.`);
     }
   };
 
@@ -1453,49 +1503,68 @@ export function ChatContent({
                 ) : null}
 
                 {/* Approval buttons or approved status if this is a plan preview */}
-                {message.metadata?.type === 'plan_preview' && message.metadata?.planId && (
+                {message.metadata?.type === 'plan_preview' && message.metadata?.planData && (
                   <div className="mt-4 pt-4 border-t border-border">
-                    {approvedPlans.has(message.metadata.planId as string) ? (
-                      <div className="text-center text-success font-medium py-2">
-                        ✓ Plan Saved
-                      </div>
-                    ) : (
-                      <div className="flex gap-2">
-                        {activePlan ? (
-                          <>
+                    {(() => {
+                      const messageMetadata = message.metadata as { approved?: boolean };
+                      const isApproved = messageMetadata.approved === true;
+                      
+                      // Check if this message is still being generated
+                      const isCurrentlyGenerating = message.id === streamingMessageIdRef.current && isGeneratingDays;
+                      
+                      // If approved, show success message
+                      if (isApproved) {
+                        return (
+                          <div className="text-center text-success font-medium py-2">
+                            ✓ Plan Applied Successfully
+                          </div>
+                        );
+                      }
+                      
+                      // If still generating, don't show buttons yet
+                      if (isCurrentlyGenerating) {
+                        return null; // Buttons will appear after generation is complete
+                      }
+                      
+                      // Show approval buttons for any plan (user can revert to older versions)
+                      return (
+                        <div className="flex gap-2">
+                          {activePlan ? (
+                            <>
+                              <button
+                                onClick={() => handleApprove(message.id, 'replace')}
+                                className="flex-1 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-lg
+                                         hover:bg-primary/90 active:bg-primary/80 transition-colors"
+                              >
+                                Replace Current
+                              </button>
+                              <button
+                                onClick={() => handleApprove(message.id, 'activate')}
+                                className="flex-1 px-4 py-2.5 bg-surface-elevated text-foreground text-sm font-medium rounded-lg
+                                         hover:bg-white/10 active:bg-white/5 transition-colors border border-border"
+                              >
+                                Save as New
+                              </button>
+                            </>
+                          ) : (
                             <button
-                              onClick={() => handleApprove(message.metadata!.planId as string, 'replace')}
+                              onClick={() => handleApprove(message.id, 'activate')}
                               className="flex-1 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-lg
                                        hover:bg-primary/90 active:bg-primary/80 transition-colors"
                             >
-                              Replace Current
+                              Activate Plan
                             </button>
-                            <button
-                              onClick={() => handleApprove(message.metadata!.planId as string, 'activate')}
-                              className="flex-1 px-4 py-2.5 bg-surface-elevated text-foreground text-sm font-medium rounded-lg
-                                       hover:bg-white/10 active:bg-white/5 transition-colors border border-border"
-                            >
-                              Save as New
-                            </button>
-                          </>
-                        ) : (
+                          )}
                           <button
-                            onClick={() => handleApprove(message.metadata!.planId as string, 'activate')}
-                            className="flex-1 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-lg
-                                     hover:bg-primary/90 active:bg-primary/80 transition-colors"
+                            onClick={() => setInput("I'd like to make some changes...")}
+                            className="flex-1 px-4 py-2.5 bg-transparent text-muted-foreground text-sm font-medium rounded-lg
+                                     hover:bg-white/5 hover:text-foreground active:bg-white/10 transition-colors border border-border/50"
                           >
-                            Activate Plan
+                            Request Changes
                           </button>
-                        )}
-                        <button
-                          onClick={() => setInput("I'd like to make some changes...")}
-                          className="flex-1 px-4 py-2.5 bg-transparent text-muted-foreground text-sm font-medium rounded-lg
-                                   hover:bg-white/5 hover:text-foreground active:bg-white/10 transition-colors border border-border/50"
-                        >
-                          Request Changes
-                        </button>
-                      </div>
-                    )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -1540,6 +1609,29 @@ export function ChatContent({
                               } else if (ex.exerciseType === 'distance') {
                                 const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
                                 return `${ex.currentSets} sets × ${ex.currentDistance || 0} ${ex.currentDistanceUnit || 'feet'}${weightDisplay}`;
+                              } else if (ex.exerciseType === 'interval') {
+                                if (ex.currentIntervals) {
+                                  const intervals = ex.currentIntervals as any;
+                                  const { rounds, phases } = intervals;
+                                  const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
+                                  if (phases && phases.length === 2) {
+                                    return `${rounds} rounds: ${Math.floor(phases[0].duration / 60)}:${String(phases[0].duration % 60).padStart(2, '0')} ${phases[0].name} / ${Math.floor(phases[1].duration / 60)}:${String(phases[1].duration % 60).padStart(2, '0')} ${phases[1].name}${weightDisplay}`;
+                                  }
+                                  return `${rounds} rounds interval${weightDisplay}`;
+                                }
+                                return 'Interval training';
+                              } else if (ex.exerciseType === 'emom') {
+                                const mins = Math.floor((ex.currentTimeCap || 600) / 60);
+                                const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
+                                return `EMOM ${mins} min: ${ex.currentReps} reps/min${weightDisplay}`;
+                              } else if (ex.exerciseType === 'amrap') {
+                                const mins = Math.floor((ex.currentTimeCap || 600) / 60);
+                                const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
+                                return `AMRAP ${mins} min: ${ex.currentReps} reps/round${weightDisplay}`;
+                              } else if (ex.exerciseType === 'tabata') {
+                                const mins = Math.floor((ex.currentTimeCap || 240) / 60);
+                                const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
+                                return `Tabata ${ex.currentSets} rounds: ${ex.currentReps} reps/round${weightDisplay}`;
                               } else {
                                 return `${ex.currentSets}×${ex.currentReps} @ ${currentWeightDisplay}`;
                               }
@@ -1585,6 +1677,29 @@ export function ChatContent({
                               } else if (ex.exerciseType === 'distance') {
                                 const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
                                 return `${ex.nextSets} sets × ${ex.nextDistance || 0} ${ex.currentDistanceUnit || 'feet'}${weightDisplay}`;
+                              } else if (ex.exerciseType === 'interval') {
+                                if (ex.nextIntervals) {
+                                  const intervals = ex.nextIntervals as any;
+                                  const { rounds, phases } = intervals;
+                                  const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
+                                  if (phases && phases.length === 2) {
+                                    return `${rounds} rounds: ${Math.floor(phases[0].duration / 60)}:${String(phases[0].duration % 60).padStart(2, '0')} ${phases[0].name} / ${Math.floor(phases[1].duration / 60)}:${String(phases[1].duration % 60).padStart(2, '0')} ${phases[1].name}${weightDisplay}`;
+                                  }
+                                  return `${rounds} rounds interval${weightDisplay}`;
+                                }
+                                return 'Interval training';
+                              } else if (ex.exerciseType === 'emom') {
+                                const mins = Math.floor((ex.nextTimeCap || ex.currentTimeCap || 600) / 60);
+                                const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
+                                return `EMOM ${mins} min: ${ex.nextReps} reps/min${weightDisplay}`;
+                              } else if (ex.exerciseType === 'amrap') {
+                                const mins = Math.floor((ex.nextTimeCap || ex.currentTimeCap || 600) / 60);
+                                const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
+                                return `AMRAP ${mins} min: ${ex.nextReps} reps/round${weightDisplay}`;
+                              } else if (ex.exerciseType === 'tabata') {
+                                const mins = Math.floor((ex.nextTimeCap || ex.currentTimeCap || 240) / 60);
+                                const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
+                                return `Tabata ${ex.nextSets} rounds: ${ex.nextReps} reps/round${weightDisplay}`;
                               } else {
                                 return `${ex.nextSets}×${ex.nextReps} @ ${nextWeightDisplay}`;
                               }

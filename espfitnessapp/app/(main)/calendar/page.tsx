@@ -19,6 +19,9 @@ async function getCalendarData(userId: string) {
     },
   });
 
+  // Filter to only include generated workouts
+  const generatedWorkoutDays = activePlan?.workoutDays.filter(day => day.isGenerated) || [];
+
   // Get ALL workout logs for this plan (not just current month)
   const workoutLogs = activePlan ? await prisma.workoutLog.findMany({
     where: {
@@ -33,8 +36,16 @@ async function getCalendarData(userId: string) {
     },
   }) : [];
 
+  // Calculate actual program duration based on generated workouts
+  let programStartDate = activePlan?.startDate?.toISOString() || null;
+  let programEndDate = null;
+  
+  if (generatedWorkoutDays.length > 0 && generatedWorkoutDays[generatedWorkoutDays.length - 1].scheduledDate) {
+    programEndDate = generatedWorkoutDays[generatedWorkoutDays.length - 1].scheduledDate.toISOString();
+  }
+
   return {
-    workoutDays: activePlan?.workoutDays.map((day) => ({
+    workoutDays: generatedWorkoutDays.map((day) => ({
       id: day.id,
       dayNumber: day.dayNumber,
       dayName: day.dayName,
@@ -42,7 +53,7 @@ async function getCalendarData(userId: string) {
       workoutType: day.workoutType,
       workoutColor: day.workoutColor,
       isGenerated: day.isGenerated,
-    })) || [],
+    })),
     workoutLogs: workoutLogs.map((log) => ({
       id: log.id,
       dayId: log.dayId,
@@ -50,7 +61,8 @@ async function getCalendarData(userId: string) {
       status: log.status,
     })),
     planId: activePlan?.id || null,
-    startDate: activePlan?.startDate?.toISOString() || null,
+    startDate: programStartDate,
+    programEndDate: programEndDate,
     weeksDuration: activePlan?.weeksDuration || 12,
   };
 }

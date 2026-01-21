@@ -11,6 +11,6 @@ export default defineConfig({
   datasource: {
     // Use DIRECT_URL (port 5432) for CLI (migrate, db push); pooler (6543) hangs.
     // App runtime uses DATABASE_URL from env. Set DIRECT_URL in .env to the Session/Direct URI.
-    url: process.env["DIRECT_URL"] || process.env["DATABASE_URL"],
+    url: (process.env["DIRECT_URL"] || process.env["DATABASE_URL"]) as string,
   },
 });

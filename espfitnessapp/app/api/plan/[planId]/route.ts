@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
+
+type JsonValue = object | string | number | boolean | null | undefined;
 
 // GET - Get plan details
 export async function GET(
@@ -137,7 +138,7 @@ export async function PATCH(
           data: {
             goal: newPlan.goal,
             weeksDuration: newPlan.weeksDuration,
-            aiContext: newPlan.aiContext === null ? Prisma.JsonNull : (newPlan.aiContext as Prisma.InputJsonValue),
+            aiContext: (newPlan.aiContext === null ? null : (newPlan.aiContext as JsonValue)) as any,
           },
         });
 
@@ -191,16 +192,16 @@ export async function PATCH(
                   weightValue: exercise.weightValue,
                   restTime: exercise.restTime,
                   exerciseType: exercise.exerciseType,
-                  progression: exercise.progression === null ? Prisma.JsonNull : (exercise.progression as Prisma.InputJsonValue),
-                  movementDetails: exercise.movementDetails === null ? Prisma.JsonNull : (exercise.movementDetails as Prisma.InputJsonValue),
+                  progression: (exercise.progression === null ? null : (exercise.progression as JsonValue)) as any,
+                  movementDetails: (exercise.movementDetails === null ? null : (exercise.movementDetails as JsonValue)) as any,
                   order: exercise.order,
                   duration: exercise.duration,
                   distance: exercise.distance,
                   distanceUnit: exercise.distanceUnit,
-                  intervals: exercise.intervals === null ? Prisma.JsonNull : (exercise.intervals as Prisma.InputJsonValue),
+                  intervals: (exercise.intervals === null ? null : (exercise.intervals as JsonValue)) as any,
                   tempo: exercise.tempo,
                   timeCap: exercise.timeCap,
-                  movements: exercise.movements === null ? Prisma.JsonNull : (exercise.movements as Prisma.InputJsonValue),
+                  movements: (exercise.movements === null ? null : (exercise.movements as JsonValue)) as any,
                 },
               });
             }

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
+
+type JsonValue = object | string | number | boolean | null | undefined;
 
 export async function POST(request: NextRequest) {
   try {
@@ -192,16 +193,16 @@ export async function POST(request: NextRequest) {
               weightValue: ex.weightValue,
               restTime: ex.restTime || 90,
               exerciseType: ex.exerciseType || 'strength',
-              progression: ex.progression as Prisma.InputJsonValue,
-              movementDetails: ex.movementDetails as Prisma.InputJsonValue,
+              progression: ex.progression as JsonValue,
+              movementDetails: ex.movementDetails as JsonValue,
               order: j,
               duration: ex.duration,
               distance: ex.distance,
               distanceUnit: ex.distanceUnit,
-              intervals: ex.intervals as Prisma.InputJsonValue,
+              intervals: ex.intervals as JsonValue,
               tempo: ex.tempo,
               timeCap: ex.timeCap,
-              movements: ex.movements as Prisma.InputJsonValue,
+              movements: ex.movements as JsonValue,
             });
           });
         }
@@ -296,16 +297,16 @@ export async function POST(request: NextRequest) {
               weightValue: ex.weightValue,
               restTime: ex.restTime || 90,
               exerciseType: ex.exerciseType || 'strength',
-              progression: ex.progression as Prisma.InputJsonValue,
-              movementDetails: ex.movementDetails as Prisma.InputJsonValue,
+              progression: ex.progression as JsonValue,
+              movementDetails: ex.movementDetails as JsonValue,
               order: j,
               duration: ex.duration,
               distance: ex.distance,
               distanceUnit: ex.distanceUnit,
-              intervals: ex.intervals as Prisma.InputJsonValue,
+              intervals: ex.intervals as JsonValue,
               tempo: ex.tempo,
               timeCap: ex.timeCap,
-              movements: ex.movements as Prisma.InputJsonValue,
+              movements: ex.movements as JsonValue,
             });
           });
         }

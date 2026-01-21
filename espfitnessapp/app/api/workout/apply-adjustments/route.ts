@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import { z } from 'zod';
@@ -116,7 +115,7 @@ export async function POST(request: NextRequest) {
       where: { id: adjustmentId },
       data: {
         status: 'approved',
-        suggestions: finalSuggestions as unknown as Prisma.InputJsonValue,
+        suggestions: finalSuggestions as unknown as any,
       },
     });
 

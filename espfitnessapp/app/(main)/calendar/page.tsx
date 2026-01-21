@@ -20,7 +20,8 @@ async function getCalendarData(userId: string) {
   });
 
   // Filter to only include generated workouts
-  const generatedWorkoutDays = activePlan?.workoutDays.filter(day => day.isGenerated) || [];
+  const workoutDays = activePlan?.workoutDays ?? [];
+  const generatedWorkoutDays = workoutDays.filter((day) => day.isGenerated);
 
   // Get ALL workout logs for this plan (not just current month)
   const workoutLogs = activePlan ? await prisma.workoutLog.findMany({

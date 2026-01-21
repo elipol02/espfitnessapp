@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   try {
     const { session, error } = await validateSession();
     if (error || !session?.user?.id) {

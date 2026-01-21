@@ -5,7 +5,7 @@ import { prisma } from '@/app/lib/db';
 
 // GET - Get plan details
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ planId: string }> }
 ) {
   try {
@@ -316,7 +316,7 @@ export async function PATCH(
 
 // DELETE - Delete plan
 export async function DELETE(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ planId: string }> }
 ) {
   try {

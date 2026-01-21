@@ -1050,7 +1050,7 @@ If you need any clarification about how the user performed any exercise, ask the
       currentPlan?: any; // User's active plan from database
       lastDraftPlan?: any; // Last generated plan JSON from chat
     },
-    signal?: AbortSignal
+    _signal?: AbortSignal
   ): Promise<WorkoutDayData | null> {
     const systemMessage: ChatMessage = {
       role: 'system',

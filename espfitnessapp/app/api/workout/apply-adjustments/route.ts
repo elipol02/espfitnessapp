@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import { z } from 'zod';
-import { applyAdjustments, ensureWorkoutsGenerated, type AdjustmentSuggestion } from '@/app/lib/progressive';
+import { applyAdjustments, type AdjustmentSuggestion } from '@/app/lib/progressive';
 
 const applySchema = z.object({
   adjustmentId: z.string(),

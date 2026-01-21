@@ -24,7 +24,7 @@ interface AdjustmentSuggestion {
  * Analyze workout performance and suggest adjustments
  */
 export function analyzePerformance(data: PerformanceData): AdjustmentSuggestion {
-  const { targetSets, targetReps, actualSets, actualReps, actualWeight, targetWeight, feedback } = data;
+  const { targetSets, targetReps, actualSets, actualReps, feedback } = data;
   
   const avgActualReps = actualReps.length > 0 
     ? actualReps.reduce((a, b) => a + b, 0) / actualReps.length 
@@ -32,7 +32,6 @@ export function analyzePerformance(data: PerformanceData): AdjustmentSuggestion 
   
   const completionRate = actualSets / targetSets;
   const repsCompletionRate = avgActualReps / targetReps;
-  const weightDiff = actualWeight - targetWeight;
 
   // User reported workout was too easy
   if (feedback && feedback >= 4 && completionRate >= 1 && repsCompletionRate >= 1) {
@@ -164,7 +163,7 @@ export async function applyAdaptiveAdjustments(
   }
 
   // Analyze each exercise's performance over recent workouts
-  for (const [exerciseId, performances] of exercisePerformance) {
+  for (const [_exerciseId, performances] of exercisePerformance) {
     if (performances.length < 2) continue; // Need at least 2 data points
 
     // Check for consistent trend
@@ -193,7 +192,7 @@ export async function applyAdaptiveAdjustments(
 export async function calculateGoalProgress(
   userId: string,
   goalDescription: string,
-  exerciseName?: string
+  _exerciseName?: string
 ): Promise<number> {
   // Try to parse goal for specific lift targets (e.g., "225 bench press")
   const targetMatch = goalDescription.match(/(\d+)\s*(lb|lbs|pound|pounds)?\s*(bench|squat|deadlift|press)/i);

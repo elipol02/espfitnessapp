@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Plus, Minus, Check, Timer, ChevronRight, Play, Pause, RotateCcw } from 'lucide-react';
+import { ArrowLeft, Plus, Minus, Check, Timer, ChevronRight, Play } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import { haptic } from '@/app/lib/utils';
 
@@ -417,7 +417,6 @@ export function LiveWorkoutContent({
   }, [completedSets, exercises, saving, finishWorkout, workoutCompleted]);
 
   const currentSets = completedSets.get(currentExercise?.id) || [];
-  const setsRemaining = currentExercise ? currentExercise.sets - currentSets.length : 0;
   const exerciseType = currentExercise?.exerciseType || 'strength';
   const isTimeBased = exerciseType === 'cardio_time' || exerciseType === 'mobility_time';
   const isDistanceBased = exerciseType === 'distance';

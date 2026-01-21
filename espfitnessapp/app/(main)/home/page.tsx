@@ -8,7 +8,6 @@ export const dynamic = 'force-dynamic';
 async function getHomeData(userId: string) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const dayOfWeek = today.getDay(); // 0 = Sunday, 1 = Monday, etc.
   
   // Get user's active plan with today's workout
   const activePlan = await prisma.workoutPlan.findFirst({
@@ -257,11 +256,6 @@ async function getHomeData(userId: string) {
     completedWorkouts,
     weeksRemaining,
   };
-}
-
-function getDayName(dayNumber: number): string {
-  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  return days[dayNumber];
 }
 
 export default async function HomePage() {

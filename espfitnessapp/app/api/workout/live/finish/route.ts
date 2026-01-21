@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import { z } from 'zod';
-import { findNextWorkout } from '@/app/lib/progressive';
 
 const finishSchema = z.object({
   workoutLogId: z.string(),
@@ -96,14 +95,6 @@ export async function POST(request: NextRequest) {
     const isNotRestDay = workoutLog.day.workoutType !== 'Rest';
     
     if (hasExerciseLogs && isNotRestDay) {
-      // Check if there's a future occurrence of this workout type
-      // This is used by the AI to determine which workout to adjust
-      const nextWorkout = await findNextWorkout(
-        workoutLog.planId,
-        workoutLog.day.workoutType,
-        workoutLog.workoutDate // Already validated above
-      );
-
       // Create pending adjustment for AI to process
       // We create this even if there's no next workout, as the user should still be able to analyze
       const pendingAdjustment = await prisma.pendingAdjustment.create({

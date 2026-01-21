@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { SendHorizontal, Plus, Edit3, Dumbbell, MessageSquare, History, FileText, Square } from 'lucide-react';
+import { SendHorizontal, Plus, Edit3, MessageSquare, History, FileText, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Button } from '@/app/components/Button';
 
@@ -141,7 +141,7 @@ interface ChatData {
 
 export function ChatContent({ 
   data, 
-  userId, 
+  userId: _userId, 
   isNewSession = false,
   urlMode,
   adjustmentId
@@ -191,8 +191,8 @@ export function ChatContent({
   });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [approvedPlans, setApprovedPlans] = useState<Set<string>>(new Set(data.approvedPlanIds));
-  const [approvedAdjustments, setApprovedAdjustments] = useState<Set<string>>(new Set(data.approvedAdjustmentIds));
+  const [_approvedPlans, setApprovedPlans] = useState<Set<string>>(new Set(data.approvedPlanIds));
+  const [_approvedAdjustments, setApprovedAdjustments] = useState<Set<string>>(new Set(data.approvedAdjustmentIds));
   const [selectedAction, setSelectedAction] = useState<'create' | 'addCurrent' | 'edit' | 'ask' | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const postWorkoutProcessedRef = useRef<string | null>(null);
@@ -247,18 +247,18 @@ export function ChatContent({
 
   // Restore streaming state flags on mount (messages are already restored in useState initializer)
   useEffect(() => {
-    if (streamStateRestoredRef.current) return;
+    if (streamStateRestoredRef.current) return undefined;
     streamStateRestoredRef.current = true;
 
     const savedState = sessionStorage.getItem(`chat-streaming-${data.sessionId}`);
-    if (!savedState) return;
+    if (!savedState) return undefined;
 
     try {
       const state = JSON.parse(savedState);
       // Only restore if state is recent (within last 5 minutes)
       if (Date.now() - state.timestamp > 5 * 60 * 1000) {
         clearStreamingState();
-        return;
+        return undefined;
       }
 
       // Check if stream already completed on server
@@ -266,7 +266,7 @@ export function ChatContent({
       if (lastServerMessage?.role === 'assistant' && lastServerMessage.content) {
         // Stream completed while away, clear saved state
         clearStreamingState();
-        return;
+        return undefined;
       }
 
       // Restore streaming state flags (messages already restored in useState initializer)
@@ -299,6 +299,7 @@ export function ChatContent({
       };
     } catch {
       clearStreamingState();
+      return undefined;
     }
   }, [data.sessionId, data.messages, clearStreamingState, router]);
 
@@ -931,6 +932,7 @@ export function ChatContent({
         clearTimeout(timeout);
       };
     }
+    return undefined;
   }, [isLoading, isStreaming, router, data.sessionId]);
 
   // Handle sending message when an action is selected (now uses streaming)
@@ -1629,7 +1631,6 @@ export function ChatContent({
                                 const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
                                 return `AMRAP ${mins} min: ${ex.currentReps} reps/round${weightDisplay}`;
                               } else if (ex.exerciseType === 'tabata') {
-                                const mins = Math.floor((ex.currentTimeCap || 240) / 60);
                                 const weightDisplay = ex.currentWeight > 0 ? ` @ ${currentWeightDisplay}` : '';
                                 return `Tabata ${ex.currentSets} rounds: ${ex.currentReps} reps/round${weightDisplay}`;
                               } else {
@@ -1697,7 +1698,6 @@ export function ChatContent({
                                 const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
                                 return `AMRAP ${mins} min: ${ex.nextReps} reps/round${weightDisplay}`;
                               } else if (ex.exerciseType === 'tabata') {
-                                const mins = Math.floor((ex.nextTimeCap || ex.currentTimeCap || 240) / 60);
                                 const weightDisplay = ex.nextWeight > 0 ? ` @ ${nextWeightDisplay}` : '';
                                 return `Tabata ${ex.nextSets} rounds: ${ex.nextReps} reps/round${weightDisplay}`;
                               } else {

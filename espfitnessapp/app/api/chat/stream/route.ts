@@ -5,7 +5,6 @@ import { prisma } from '@/app/lib/db';
 import {
   getOpenRouterClient,
   extractJSON,
-  workoutPlanSchema,
   type ChatMessage,
   type SSEEvent,
   type WorkoutDayData,
@@ -19,20 +18,6 @@ export const maxDuration = 300;
 function encodeSSE(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
-
-// Schema for plan structure (without exercises - those come day by day)
-const planStructureSchema = workoutPlanSchema.pick({
-  goal: true,
-  weeksDuration: true,
-  sessionsPerWeek: true,
-}).extend({
-  schedule: workoutPlanSchema.shape.schedule.element.pick({
-    dayNumber: true,
-    dayName: true,
-    workoutType: true,
-    workoutColor: true,
-  }).array(),
-});
 
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
@@ -229,10 +214,6 @@ export async function POST(request: NextRequest) {
               sessionsPerWeek: sessionsPerWeek,
               startDate: today.toISOString(),
             };
-
-            // Find the start of the current week (Sunday)
-            const dayOfWeek = today.getDay();
-            const startOfWeek = new Date(today.getFullYear(), today.getMonth(), today.getDate() - dayOfWeek);
 
             // Helper to parse reps/sets - handles "6-8" range format
             // Returns { value: max, min: min or null }

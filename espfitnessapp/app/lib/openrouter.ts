@@ -764,14 +764,106 @@ export class OpenRouterClient {
     return fullContent;
   }
 
-  // Streaming general chat
+  // Format a single exercise for plan context (supports all exercise types)
+  private formatExerciseForContext(ex: {
+    name: string;
+    sets?: number;
+    reps?: number;
+    weightType?: string;
+    weightValue?: number;
+    exerciseType?: string;
+    duration?: number;
+    distance?: number;
+    distanceUnit?: string;
+    intervals?: { rounds?: number; phases?: Array<{ name: string; duration: number }> };
+    timeCap?: number;
+    tempo?: string;
+  }): string {
+    const type = ex.exerciseType || 'strength';
+    const w = ex.weightValue ?? 0;
+    const wt = ex.weightType || 'ABSOLUTE';
+    const fmt = () => {
+      if (wt === '1RM') return `${Math.round((w || 0) * 100)}% 1RM`;
+      if (wt === 'BW') return `${Math.round((w || 0) * 100)}% BW`;
+      if (w > 0) return `${w} lbs`;
+      return '';
+    };
+    if (type === 'cardio_time' || type === 'mobility_time') {
+      return `${ex.name} – ${ex.duration ?? ex.reps ?? 0} min`;
+    }
+    if (type === 'distance') {
+      const wStr = w > 0 ? ` @ ${fmt()}` : '';
+      return `${ex.name} – ${ex.sets ?? 1}×${ex.distance ?? 0} ${ex.distanceUnit || 'feet'}${wStr}`;
+    }
+    if (type === 'interval' && ex.intervals) {
+      const { rounds, phases } = ex.intervals as { rounds?: number; phases?: Array<{ name: string; duration: number }> };
+      const wStr = w > 0 ? ` @ ${fmt()}` : '';
+      if (phases?.length === 2) {
+        return `${ex.name} – ${rounds ?? 0} rounds: ${Math.floor((phases[0]?.duration ?? 0) / 60)} min ${phases[0]?.name} / ${Math.floor((phases[1]?.duration ?? 0) / 60)} min ${phases[1]?.name}${wStr}`;
+      }
+      return `${ex.name} – ${rounds ?? 0} rounds interval${wStr}`;
+    }
+    if (type === 'amrap') {
+      const wStr = w > 0 ? ` @ ${fmt()}` : '';
+      return `${ex.name} – AMRAP ${Math.floor((ex.timeCap ?? 600) / 60)} min • ${ex.reps ?? 0} reps/round${wStr}`;
+    }
+    if (type === 'emom') {
+      const wStr = w > 0 ? ` @ ${fmt()}` : '';
+      return `${ex.name} – EMOM ${Math.floor((ex.timeCap ?? 600) / 60)} min • ${ex.reps ?? 0} reps/min${wStr}`;
+    }
+    if (type === 'tabata') {
+      const wStr = w > 0 ? ` @ ${fmt()}` : '';
+      return `${ex.name} – Tabata ${ex.sets ?? 8} rounds • ${ex.reps ?? 0} reps/round${wStr}`;
+    }
+    if (type === 'tempo') {
+      return `${ex.name} – ${ex.sets ?? 0}×${ex.reps ?? 0} @ tempo ${ex.tempo || '3-1-3-1'}${w > 0 ? `, ${fmt()}` : ''}`;
+    }
+    // strength or default
+    return `${ex.name} – ${ex.sets ?? 0}×${ex.reps ?? 0} @ ${fmt() || 'bodyweight'}`;
+  }
+
+  // Streaming general chat (optional: include current plan so the AI can answer questions about it)
   async *generalChatStream(
     messages: ChatMessage[],
+    context?: { currentPlan?: object; userName?: string | null; bodyweight?: number | null },
     signal?: AbortSignal
   ): AsyncGenerator<string, string, unknown> {
+    let systemContent = SYSTEM_PROMPTS.general;
+
+    if (context?.currentPlan) {
+      const plan = context.currentPlan as { goal?: string; weeksDuration?: number; workoutDays?: Array<{ dayNumber: number; dayName: string; workoutType: string; workoutColor?: string; exercises?: unknown[] }> };
+      const sessionsPerWeek = plan.workoutDays?.filter((d: { workoutType?: string }) => d.workoutType !== 'Rest')?.length ?? plan.workoutDays?.length ?? 0;
+      const planBlock = `
+
+YOU HAVE ACCESS TO THE USER'S CURRENT WORKOUT PLAN. Use it to answer questions about their schedule, exercises, sets, reps, progressions, when they do each workout, what's on a specific day, etc. Do NOT say you don't have access to their plan.
+
+USER'S CURRENT WORKOUT PLAN:
+Goal: ${plan.goal ?? 'Not set'}
+Duration: ${plan.weeksDuration ?? 12} weeks
+Sessions per week: ${sessionsPerWeek}
+
+WEEKLY SCHEDULE:
+${(plan.workoutDays ?? [])
+  .sort((a: { dayNumber: number }, b: { dayNumber: number }) => a.dayNumber - b.dayNumber)
+  .map((day: { dayNumber: number; dayName: string; workoutType: string; workoutColor?: string; exercises?: unknown[] }) => {
+    const exList = (day.exercises ?? [])
+      .map((ex: unknown) => this.formatExerciseForContext(ex as { name: string; sets?: number; reps?: number; weightType?: string; weightValue?: number; exerciseType?: string; duration?: number; distance?: number; distanceUnit?: string; intervals?: { rounds?: number; phases?: Array<{ name: string; duration: number }> }; timeCap?: number; tempo?: string }))
+      .join('\n  ');
+    return `${day.dayName} (Day ${day.dayNumber}) – ${day.workoutType}:\n  ${exList || 'No exercises'}`;
+  })
+  .join('\n\n')}`;
+      systemContent += planBlock;
+    }
+    if (context?.userName) {
+      systemContent += `\n\nUser's name: ${context.userName}`;
+    }
+    if (context?.bodyweight != null) {
+      systemContent += `\n\nUser's bodyweight: ${context.bodyweight} lbs`;
+    }
+
     const systemMessage: ChatMessage = {
       role: 'system',
-      content: SYSTEM_PROMPTS.general,
+      content: systemContent,
     };
 
     return yield* this.chatStream([systemMessage, ...messages], { temperature: 0.7 }, signal);

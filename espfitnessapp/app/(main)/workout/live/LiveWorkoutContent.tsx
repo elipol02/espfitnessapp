@@ -522,7 +522,13 @@ export function LiveWorkoutContent({
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
 
-    // Save to database
+    // Start rest timer immediately (while save runs in background) - but not if this was the last set
+    const isLastSet = newSets.length >= currentExercise.sets;
+    if (!isLastSet) {
+      setRestTimer(currentExercise.restTime);
+    }
+
+    // Save to database (fire-and-forget; timer already running)
     try {
       await fetch('/api/workout/live/add-set', {
         method: 'POST',
@@ -536,12 +542,6 @@ export function LiveWorkoutContent({
       });
     } catch (error) {
       console.error('Failed to save set:', error);
-    }
-
-    // Start rest timer if not last set
-    const isLastSet = newSets.length >= currentExercise.sets;
-    if (!isLastSet) {
-      setRestTimer(currentExercise.restTime);
     }
   };
 
@@ -696,7 +696,13 @@ export function LiveWorkoutContent({
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
 
-    // Save to database
+    // Start rest timer immediately (while save runs in background) - but not if this was the last set
+    const isLastSet = newSets.length >= currentExercise.sets;
+    if (!isLastSet) {
+      setRestTimer(currentExercise.restTime);
+    }
+
+    // Save to database (fire-and-forget; timer already running)
     try {
       await fetch('/api/workout/live/add-set', {
         method: 'POST',
@@ -709,12 +715,6 @@ export function LiveWorkoutContent({
       });
     } catch (error) {
       console.error('Failed to save set:', error);
-    }
-
-    // Start rest timer using the exercise's rest time - but not if this was the last set
-    const isLastSet = newSets.length >= currentExercise.sets;
-    if (!isLastSet) {
-      setRestTimer(currentExercise.restTime);
     }
   };
 

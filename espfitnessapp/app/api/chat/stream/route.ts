@@ -755,8 +755,12 @@ export async function POST(request: NextRequest) {
           break;
 
         default:
-          // General chat - stream the response
-          const generalGenerator = openRouter.generalChatStream(chatHistory);
+          // General chat (includes "Ask me anything") - stream the response with full plan context when available
+          const generalGenerator = openRouter.generalChatStream(chatHistory, {
+            currentPlan: currentPlan || undefined,
+            userName: context?.userName,
+            bodyweight: context?.bodyweight,
+          });
 
           for await (const chunk of generalGenerator) {
             fullResponse += chunk;

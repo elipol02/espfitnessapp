@@ -5,6 +5,16 @@ import { redirect } from 'next/navigation';
 
 export const dynamic = 'force-dynamic';
 
+type WorkoutDayForCalendar = {
+  id: string;
+  dayNumber: number;
+  dayName: string;
+  scheduledDate: Date | null;
+  workoutType: string;
+  workoutColor: string;
+  isGenerated: boolean;
+};
+
 async function getCalendarData(userId: string) {
   // Get user's active plan with all workout days (full 12-week skeleton)
   const activePlan = await prisma.workoutPlan.findFirst({
@@ -20,8 +30,8 @@ async function getCalendarData(userId: string) {
   });
 
   // Filter to only include generated workouts
-  const workoutDays = activePlan?.workoutDays ?? [];
-  const generatedWorkoutDays = workoutDays.filter((day: { isGenerated: boolean }) => day.isGenerated);
+  const workoutDays = (activePlan?.workoutDays ?? []) as WorkoutDayForCalendar[];
+  const generatedWorkoutDays = workoutDays.filter((day) => day.isGenerated);
 
   // Get ALL workout logs for this plan (not just current month)
   const workoutLogs = activePlan ? await prisma.workoutLog.findMany({

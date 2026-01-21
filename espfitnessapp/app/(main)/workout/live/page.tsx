@@ -300,7 +300,8 @@ export default async function LiveWorkoutPage({
   });
 
   // Normalize Prisma exercises: convert null to undefined and narrow types for LiveWorkoutContent's Exercise
-  const exercises = data.exercises.map((e) => ({
+  type PrismaExercise = { id: string; name: string; sets: number; reps: number; weightType: string; weightValue: number; restTime: number; exerciseType: string; duration?: number | null; distance?: number | null; distanceUnit?: string | null; intervals?: unknown; tempo?: string | null; timeCap?: number | null };
+  const exercises = data.exercises.map((e: PrismaExercise) => ({
     id: e.id,
     name: e.name,
     sets: e.sets,

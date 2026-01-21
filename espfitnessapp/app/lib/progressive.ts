@@ -133,9 +133,10 @@ export async function getExerciseHistory(
     take: 6,
   });
 
-  return logs
-    .filter((log) => log.exerciseLogs.length > 0)
-    .map((log) => {
+  type LogRow = { workoutDate: Date; exerciseLogs: Array<{ repsPerSet: unknown; weightUsed: unknown; setsCompleted: number; exercise: { sets: number; reps: number } }> };
+  return (logs as LogRow[])
+    .filter((log: LogRow) => log.exerciseLogs.length > 0)
+    .map((log: LogRow) => {
       const exerciseLog = log.exerciseLogs[0];
       const repsPerSet = exerciseLog.repsPerSet as number[];
       const avgReps =
@@ -193,7 +194,7 @@ export async function buildExerciseData(
   }
 
   // Get all exercise names for batch query
-  const exerciseNames = workoutLog.exerciseLogs.map(log => log.exercise.name);
+  const exerciseNames = workoutLog.exerciseLogs.map((log: { exercise: { name: string } }) => log.exercise.name);
 
   // Fetch ALL history in ONE query (instead of N queries)
   const allLogs = await prisma.workoutLog.findMany({
@@ -338,7 +339,8 @@ export async function generateWorkoutExercises(
   }
 
   // Prepare all exercises for bulk insert
-  const exercisesToCreate = templateDay.exercises.map((templateExercise) => {
+  type TemplateEx = { name: string; sets: number; setsMin?: number | null; reps: number; repsMin?: number | null; weightType: string; weightValue: number; restTime: number; exerciseType: string; progression?: unknown; movementDetails?: unknown; order: number; duration?: number | null; distance?: number | null; distanceUnit?: string | null; intervals?: unknown; tempo?: string | null; timeCap?: number | null; movements?: unknown };
+  const exercisesToCreate = templateDay.exercises.map((templateExercise: TemplateEx) => {
     const suggestion = suggestions?.find(
       (s) => s.name.toLowerCase().trim() === templateExercise.name.toLowerCase().trim()
     );
@@ -412,14 +414,14 @@ export async function applyAdjustments(
   const updatedWorkoutIds: string[] = [];
 
   // Use transaction for atomicity and better performance
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: any) => {
     for (const workout of futureWorkouts) {
       if (workout.isGenerated && workout.exercises.length > 0) {
         console.log(`Updating workout ${workout.id} (scheduled ${workout.scheduledDate?.toISOString()}) with suggestions`);
         
         for (const suggestion of suggestions) {
           const exercise = workout.exercises.find(
-            (e) => e.name.toLowerCase().trim() === suggestion.name.toLowerCase().trim()
+            (e: { name: string }) => e.name.toLowerCase().trim() === suggestion.name.toLowerCase().trim()
           );
 
           if (exercise) {
@@ -452,7 +454,7 @@ export async function applyAdjustments(
               data: updateData,
             });
           } else {
-            console.log(`  - Warning: Exercise "${suggestion.name}" not found in workout. Available exercises:`, workout.exercises.map(e => e.name));
+            console.log(`  - Warning: Exercise "${suggestion.name}" not found in workout. Available exercises:`, workout.exercises.map((e: { name: string }) => e.name));
           }
         }
         

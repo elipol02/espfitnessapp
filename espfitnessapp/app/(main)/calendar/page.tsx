@@ -5,6 +5,23 @@ import { redirect } from 'next/navigation';
 
 export const dynamic = 'force-dynamic';
 
+// Explicit types so filter+map stay typed on Vercel (avoids "implicit any" / missing props)
+type WorkoutDayRow = {
+  id: string;
+  dayNumber: number;
+  dayName: string;
+  scheduledDate: Date | null;
+  workoutType: string;
+  workoutColor: string;
+  isGenerated: boolean;
+};
+type WorkoutLogRow = {
+  id: string;
+  dayId: string;
+  workoutDate: Date;
+  status: string;
+};
+
 async function getCalendarData(userId: string) {
   // Get user's active plan with all workout days (full 12-week skeleton)
   const activePlan = await prisma.workoutPlan.findFirst({
@@ -19,23 +36,25 @@ async function getCalendarData(userId: string) {
     },
   });
 
-  // Filter to only include generated workouts
-  const workoutDays = activePlan?.workoutDays ?? [];
-  const generatedWorkoutDays = workoutDays.filter((day: { isGenerated: boolean }) => day.isGenerated);
+  // Cast so TS keeps the full type through ??[] and filter (Vercel's strict build otherwise loses it)
+  const workoutDays: WorkoutDayRow[] = (activePlan?.workoutDays ?? []) as WorkoutDayRow[];
+  const generatedWorkoutDays = workoutDays.filter((day) => day.isGenerated);
 
   // Get ALL workout logs for this plan (not just current month)
-  const workoutLogs = activePlan ? await prisma.workoutLog.findMany({
-    where: {
-      userId,
-      planId: activePlan.id,
-    },
-    select: {
-      id: true,
-      dayId: true,
-      workoutDate: true,
-      status: true,
-    },
-  }) : [];
+  const workoutLogs: WorkoutLogRow[] = activePlan
+    ? ((await prisma.workoutLog.findMany({
+        where: {
+          userId,
+          planId: activePlan.id,
+        },
+        select: {
+          id: true,
+          dayId: true,
+          workoutDate: true,
+          status: true,
+        },
+      })) as WorkoutLogRow[])
+    : [];
 
   // Calculate actual program duration based on generated workouts
   let programStartDate = activePlan?.startDate?.toISOString() || null;

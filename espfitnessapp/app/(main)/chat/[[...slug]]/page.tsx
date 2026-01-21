@@ -149,12 +149,12 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
   });
   
   const approvedPlanIds = plans
-    .filter((p) => p.status === 'active')
-    .map((p) => p.id);
+    .filter((p: { id: string; status: string }) => p.status === 'active')
+    .map((p: { id: string; status: string }) => p.id);
 
   // Get all adjustment IDs mentioned in messages and check their status
   const adjustmentIds = messages
-    .map((m: any) => m.metadata?.adjustmentId)
+    .map((m: { metadata?: { adjustmentId?: unknown } }) => m.metadata?.adjustmentId)
     .filter((id): id is string => typeof id === 'string');
   
   const adjustments = await prisma.pendingAdjustment.findMany({
@@ -163,8 +163,8 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
   });
   
   const approvedAdjustmentIds = adjustments
-    .filter((a) => a.status === 'approved')
-    .map((a) => a.id);
+    .filter((a: { id: string; status: string }) => a.status === 'approved')
+    .map((a: { id: string; status: string }) => a.id);
 
   // Detect mode from message history if present
   let detectedMode: string | null = null;

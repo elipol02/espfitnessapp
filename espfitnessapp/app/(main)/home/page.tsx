@@ -117,9 +117,9 @@ async function getHomeData(userId: string) {
     });
     
     // Find if there's a log for this workout day on this date
-    const log = workoutDay ? weekLogs.find((l) => {
+    const log = workoutDay ? weekLogs.find((l: { id: string; dayId: string; workoutDate: Date; status: string }) => {
       const logDate = new Date(l.workoutDate);
-      const dateMatches = 
+      const dateMatches =
         logDate.getFullYear() === dayDate.getFullYear() &&
         logDate.getMonth() === dayDate.getMonth() &&
         logDate.getDate() === dayDate.getDate();
@@ -194,7 +194,7 @@ async function getHomeData(userId: string) {
       // Only count if the day is in the past (before today) and after plan start
       if (scheduledDate < today && scheduledDate >= startDate) {
         // Check if there's a completed log for this workout day on this date
-        const hasCompletedLog = allCompletedLogs.some((log) => {
+        const hasCompletedLog = allCompletedLogs.some((log: { dayId: string; workoutDate: Date }) => {
           const logDate = new Date(log.workoutDate);
           logDate.setHours(0, 0, 0, 0);
           return (

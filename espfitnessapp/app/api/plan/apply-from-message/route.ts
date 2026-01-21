@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
-import { Prisma } from '@prisma/client';
 
 export async function POST(request: NextRequest) {
   try {
@@ -79,8 +79,8 @@ export async function POST(request: NextRequest) {
       const newScheduleDayNumbers = planData.schedule.map((d: any) => d.dayNumber);
       console.log(`New schedule day numbers: [${newScheduleDayNumbers.join(', ')}]`);
 
-      // Use a transaction for all operations
-      await prisma.$transaction(async (tx) => {
+      // Use a transaction for all operations (tx typed as any: Prisma's ITXClientDenyList can omit delegates in some versions)
+      await prisma.$transaction(async (tx: any) => {
         // 1. Delete all future workouts
         const deletedFuture = await tx.workoutDay.deleteMany({
           where: {
@@ -108,8 +108,8 @@ export async function POST(request: NextRequest) {
         });
 
         const toDeleteIds = pastIncompleteWorkouts
-          .filter(w => !newScheduleDayNumbers.includes(w.dayNumber))
-          .map(w => w.id);
+          .filter((w: { id: string; dayNumber: number }) => !newScheduleDayNumbers.includes(w.dayNumber))
+          .map((w: { id: string; dayNumber: number }) => w.id);
 
         if (toDeleteIds.length > 0) {
           const deletedPast = await tx.workoutDay.deleteMany({
@@ -221,7 +221,7 @@ export async function POST(request: NextRequest) {
       });
     } else {
       // Create new plan (activate or save as new)
-      await prisma.$transaction(async (tx) => {
+      await prisma.$transaction(async (tx: any) => {
         // 1. Deactivate other active plans
         await tx.workoutPlan.updateMany({
           where: {

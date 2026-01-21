@@ -33,14 +33,15 @@ export async function GET(_request: NextRequest) {
     });
 
     // Format sessions for response, filtering out empty conversations
+    type SessionRow = { id: string; title: string | null; createdAt: Date; updatedAt: Date; _count: { messages: number } };
     const formattedSessions = sessions
-      .filter((session) => session._count.messages > 0)
-      .map((session) => ({
-        id: session.id,
-        title: session.title,
-        createdAt: session.createdAt.toISOString(),
-        updatedAt: session.updatedAt.toISOString(),
-        messageCount: session._count.messages,
+      .filter((s: SessionRow) => s._count.messages > 0)
+      .map((s: SessionRow) => ({
+        id: s.id,
+        title: s.title,
+        createdAt: s.createdAt.toISOString(),
+        updatedAt: s.updatedAt.toISOString(),
+        messageCount: s._count.messages,
       }));
 
     return NextResponse.json({

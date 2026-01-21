@@ -1,5 +1,4 @@
 import { NextRequest } from 'next/server';
-import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import {
@@ -85,8 +84,8 @@ export async function POST(request: NextRequest) {
 
       const chatHistory: ChatMessage[] = recentMessages
         .reverse()
-        .filter((m) => m.role !== 'system')
-        .map((m) => ({
+        .filter((m: { role: string; content: string }) => m.role !== 'system')
+        .map((m: { role: string; content: string }) => ({
           role: m.role as 'user' | 'assistant',
           content: m.content,
         }));
@@ -94,7 +93,7 @@ export async function POST(request: NextRequest) {
       // Get OpenRouter client
       const openRouter = getOpenRouterClient();
       let fullResponse = '';
-      let metadata: Prisma.InputJsonValue | undefined = undefined;
+      let metadata: object | string | number | boolean | null | undefined = undefined;
 
       // Get current plan for context (for both create and edit modes)
       let currentPlan = null;
@@ -277,11 +276,12 @@ export async function POST(request: NextRequest) {
             // Get last generated plan from chat history (for "(copy from draft)")
             const lastDraftDaysMap = new Map<number, WorkoutDayData>();
             let lastDraftPlan = null;
-            const lastAssistantMessage = recentMessages
-              .filter(m => m.role === 'assistant' && m.metadata && typeof m.metadata === 'object')
+            type RecentMsg = { role: string; metadata?: unknown };
+            const lastAssistantMessage = (recentMessages as RecentMsg[])
+              .filter((m: RecentMsg) => m.role === 'assistant' && m.metadata && typeof m.metadata === 'object')
               .reverse()
-              .find(m => {
-                const meta = m.metadata as any;
+              .find((m: RecentMsg) => {
+                const meta = m.metadata as { type?: string; planData?: { schedule?: unknown } } | undefined;
                 return meta?.type === 'plan_preview' && meta?.planData?.schedule;
               });
             
@@ -420,7 +420,7 @@ export async function POST(request: NextRequest) {
 
             metadata = {
               type: 'plan_preview',
-              planData: finalPlanData as unknown as Prisma.InputJsonValue,
+              planData: finalPlanData as unknown as object,
             };
 
             await sendEvent({
@@ -443,7 +443,7 @@ export async function POST(request: NextRequest) {
                 sessionId,
                 metadata: {
                   path: ['adjustmentId'],
-                  not: Prisma.JsonNull,
+                  not: null as any,
                 },
               },
               orderBy: { createdAt: 'desc' },

@@ -34,7 +34,8 @@ async function getPlans(userId: string) {
     },
   });
 
-  return plans.map((plan) => ({
+  type PlanRow = { id: string; goal: string; status: string; weeksDuration: number; startDate: Date | null; createdAt: Date; _count: { workoutDays: number } };
+  return plans.map((plan: PlanRow) => ({
     id: plan.id,
     goal: plan.goal,
     status: plan.status,

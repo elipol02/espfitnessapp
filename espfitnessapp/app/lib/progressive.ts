@@ -143,11 +143,16 @@ export async function getExerciseHistory(
           ? repsPerSet.reduce((a, b) => a + b, 0) / repsPerSet.length
           : 0;
 
+      const weightArr = exerciseLog.weightUsed as number[] | null;
+      const weight = Array.isArray(weightArr) && weightArr.length > 0
+        ? weightArr.reduce((a, b) => a + b, 0) / weightArr.length
+        : 0;
+
       return {
         date: log.workoutDate,
         sets: exerciseLog.exercise.sets,
         reps: exerciseLog.exercise.reps,
-        weight: exerciseLog.weightUsed,
+        weight,
         setsCompleted: exerciseLog.setsCompleted,
         avgReps: Math.round(avgReps * 10) / 10,
       };

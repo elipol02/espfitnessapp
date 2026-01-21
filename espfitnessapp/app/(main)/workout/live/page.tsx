@@ -299,11 +299,29 @@ export default async function LiveWorkoutPage({
     select: { bodyweight: true },
   });
 
+  // Normalize Prisma exercises: convert null to undefined and narrow types for LiveWorkoutContent's Exercise
+  const exercises = data.exercises.map((e) => ({
+    id: e.id,
+    name: e.name,
+    sets: e.sets,
+    reps: e.reps,
+    weightType: e.weightType,
+    weightValue: e.weightValue,
+    restTime: e.restTime,
+    exerciseType: e.exerciseType,
+    duration: e.duration ?? undefined,
+    distance: e.distance ?? undefined,
+    distanceUnit: (e.distanceUnit ?? undefined) as 'feet' | 'yards' | 'meters' | undefined,
+    intervals: (e.intervals ?? undefined) as Parameters<typeof LiveWorkoutContent>[0]['exercises'][number]['intervals'],
+    tempo: e.tempo ?? undefined,
+    timeCap: e.timeCap ?? undefined,
+  }));
+
   return (
     <LiveWorkoutContent
       workoutLogId={data.workoutLog?.id || ''}
       workoutDay={data.workoutDay}
-      exercises={data.exercises}
+      exercises={exercises}
       existingLogs={data.existingLogs}
       userBodyweight={user?.bodyweight || null}
       workoutStatus={data.workoutLog?.status || 'preview'}

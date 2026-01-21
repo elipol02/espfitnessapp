@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { timingSafeEqual } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '@/app/lib/db';
 import { hashPassword } from '@/app/lib/auth';
@@ -7,6 +8,7 @@ const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string().min(6, 'Password must be at least 6 characters'),
   name: z.string().min(1, 'Name is required').optional(),
+  systemPassword: z.string().optional(),
 });
 
 export async function POST(request: NextRequest) {
@@ -21,7 +23,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { email, password, name } = result.data;
+    const { email, password, name, systemPassword } = result.data;
+
+    // Verify system password when SYSTEM_PASSWORD is set in env
+    const expectedSystemPassword = process.env.SYSTEM_PASSWORD;
+    if (expectedSystemPassword) {
+      const given = systemPassword ?? '';
+      try {
+        const a = Buffer.from(given, 'utf8');
+        const b = Buffer.from(expectedSystemPassword, 'utf8');
+        if (a.length !== b.length || !timingSafeEqual(a, b)) {
+          return NextResponse.json(
+            { success: false, error: 'Invalid system password' },
+            { status: 400 }
+          );
+        }
+      } catch {
+        return NextResponse.json(
+          { success: false, error: 'Invalid system password' },
+          { status: 400 }
+        );
+      }
+    }
 
     // Check if user already exists
     const existingUser = await prisma.user.findUnique({

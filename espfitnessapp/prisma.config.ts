@@ -9,6 +9,8 @@ export default defineConfig({
     path: "prisma/migrations",
   },
   datasource: {
-    url: process.env["DATABASE_URL"],
+    // Use DIRECT_URL (port 5432) for CLI (migrate, db push); pooler (6543) hangs.
+    // App runtime uses DATABASE_URL from env. Set DIRECT_URL in .env to the Session/Direct URI.
+    url: process.env["DIRECT_URL"] || process.env["DATABASE_URL"],
   },
 });

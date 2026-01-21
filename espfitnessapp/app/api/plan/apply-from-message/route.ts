@@ -9,6 +9,7 @@ export async function POST(request: NextRequest) {
     if (error || !session?.user?.id) {
       return NextResponse.json({ success: false, error: error || 'Unauthorized' }, { status: 401 });
     }
+    const userId = session.user.id;
 
     const body = await request.json();
     const { messageId, action } = body;
@@ -25,7 +26,7 @@ export async function POST(request: NextRequest) {
       where: { id: messageId },
     });
 
-    if (!message || message.userId !== session.user.id) {
+    if (!message || message.userId !== userId) {
       return NextResponse.json(
         { success: false, error: 'Message not found or unauthorized' },
         { status: 404 }
@@ -55,7 +56,7 @@ export async function POST(request: NextRequest) {
       // Find the current active plan
       const currentActivePlan = await prisma.workoutPlan.findFirst({
         where: {
-          userId: session.user.id,
+          userId,
           status: 'active',
         },
       });
@@ -224,7 +225,7 @@ export async function POST(request: NextRequest) {
         // 1. Deactivate other active plans
         await tx.workoutPlan.updateMany({
           where: {
-            userId: session.user.id,
+            userId,
             status: 'active',
           },
           data: { status: 'archived' },
@@ -233,7 +234,7 @@ export async function POST(request: NextRequest) {
         // 2. Create the new plan
         const newPlan = await tx.workoutPlan.create({
           data: {
-            userId: session.user.id,
+            userId,
             goal: planData.goal,
             status: 'active',
             weeksDuration: planData.weeksDuration,

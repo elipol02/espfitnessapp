@@ -141,6 +141,11 @@ export async function applyAdaptiveAdjustments(
     const feedbackRating = (log.feedback as { rating?: number })?.rating;
 
     for (const exerciseLog of log.exerciseLogs) {
+      const weightArr = exerciseLog.weightUsed as number[] | null;
+      const actualWeight = Array.isArray(weightArr) && weightArr.length > 0
+        ? weightArr.reduce((a, b) => a + b, 0) / weightArr.length
+        : 0;
+
       const data: PerformanceData = {
         exerciseId: exerciseLog.exerciseId,
         targetSets: exerciseLog.exercise.sets,
@@ -148,7 +153,7 @@ export async function applyAdaptiveAdjustments(
         targetWeight: exerciseLog.exercise.weightValue,
         actualSets: exerciseLog.setsCompleted,
         actualReps: exerciseLog.repsPerSet as number[],
-        actualWeight: exerciseLog.weightUsed,
+        actualWeight,
         feedback: feedbackRating,
       };
 
@@ -224,8 +229,12 @@ export async function calculateGoalProgress(
     return 0;
   }
 
-  // Calculate progress percentage
-  const progress = (bestLog.weightUsed / targetWeight) * 100;
+  // Calculate progress percentage (weightUsed is JSON array of weights per set)
+  const weightArr = bestLog.weightUsed as number[] | null;
+  const bestWeight = Array.isArray(weightArr) && weightArr.length > 0
+    ? Math.max(...weightArr)
+    : 0;
+  const progress = (bestWeight / targetWeight) * 100;
   return Math.min(100, progress);
 }
 

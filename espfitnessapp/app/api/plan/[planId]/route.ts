@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 
@@ -136,7 +137,7 @@ export async function PATCH(
           data: {
             goal: newPlan.goal,
             weeksDuration: newPlan.weeksDuration,
-            aiContext: newPlan.aiContext,
+            aiContext: newPlan.aiContext === null ? Prisma.JsonNull : (newPlan.aiContext as Prisma.InputJsonValue),
           },
         });
 
@@ -190,16 +191,16 @@ export async function PATCH(
                   weightValue: exercise.weightValue,
                   restTime: exercise.restTime,
                   exerciseType: exercise.exerciseType,
-                  progression: exercise.progression,
-                  movementDetails: exercise.movementDetails,
+                  progression: exercise.progression === null ? Prisma.JsonNull : (exercise.progression as Prisma.InputJsonValue),
+                  movementDetails: exercise.movementDetails === null ? Prisma.JsonNull : (exercise.movementDetails as Prisma.InputJsonValue),
                   order: exercise.order,
                   duration: exercise.duration,
                   distance: exercise.distance,
                   distanceUnit: exercise.distanceUnit,
-                  intervals: exercise.intervals,
+                  intervals: exercise.intervals === null ? Prisma.JsonNull : (exercise.intervals as Prisma.InputJsonValue),
                   tempo: exercise.tempo,
                   timeCap: exercise.timeCap,
-                  movements: exercise.movements,
+                  movements: exercise.movements === null ? Prisma.JsonNull : (exercise.movements as Prisma.InputJsonValue),
                 },
               });
             }

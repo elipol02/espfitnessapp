@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import { z } from 'zod';
@@ -7,6 +8,7 @@ import { applyAdjustments, ensureWorkoutsGenerated, type AdjustmentSuggestion } 
 const applySchema = z.object({
   adjustmentId: z.string(),
   modifications: z.record(
+    z.string(),
     z.object({
       weight: z.number().optional(),
       sets: z.number().optional(),
@@ -71,7 +73,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Get the suggestions from the pending adjustment
-    const suggestions = pendingAdjustment.suggestions as AdjustmentSuggestion[];
+    const suggestions = pendingAdjustment.suggestions as unknown as AdjustmentSuggestion[];
 
     // Apply any user modifications to the suggestions
     const finalSuggestions = suggestions.map((suggestion) => {
@@ -114,7 +116,7 @@ export async function POST(request: NextRequest) {
       where: { id: adjustmentId },
       data: {
         status: 'approved',
-        suggestions: finalSuggestions,
+        suggestions: finalSuggestions as unknown as Prisma.InputJsonValue,
       },
     });
 

@@ -462,7 +462,7 @@ export async function POST(request: NextRequest) {
                 sessionId,
                 metadata: {
                   path: ['adjustmentId'],
-                  not: null,
+                  not: Prisma.JsonNull,
                 },
               },
               orderBy: { createdAt: 'desc' },

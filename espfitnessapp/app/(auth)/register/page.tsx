@@ -12,6 +12,7 @@ export default function RegisterPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [systemPassword, setSystemPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -31,7 +32,7 @@ export default function RegisterPage() {
       const response = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, name }),
+        body: JSON.stringify({ email, password, name, systemPassword }),
       });
 
       const data = await response.json();
@@ -165,6 +166,28 @@ export default function RegisterPage() {
                          focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent
                          transition-colors"
                 placeholder="••••••••"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="systemPassword"
+                className="block text-sm font-medium text-foreground mb-1.5"
+              >
+                System Password
+              </label>
+              <input
+                id="systemPassword"
+                type="password"
+                value={systemPassword}
+                onChange={(e) => setSystemPassword(e.target.value)}
+                required
+                autoComplete="off"
+                className="w-full px-4 py-3 rounded-lg bg-surface border border-border 
+                         text-foreground placeholder-muted
+                         focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent
+                         transition-colors"
+                placeholder="Enter system password"
               />
             </div>
           </div>

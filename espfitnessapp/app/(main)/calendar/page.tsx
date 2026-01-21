@@ -40,8 +40,9 @@ async function getCalendarData(userId: string) {
   let programStartDate = activePlan?.startDate?.toISOString() || null;
   let programEndDate = null;
   
-  if (generatedWorkoutDays.length > 0 && generatedWorkoutDays[generatedWorkoutDays.length - 1].scheduledDate) {
-    programEndDate = generatedWorkoutDays[generatedWorkoutDays.length - 1].scheduledDate.toISOString();
+  const lastGeneratedDay = generatedWorkoutDays[generatedWorkoutDays.length - 1];
+  if (lastGeneratedDay?.scheduledDate) {
+    programEndDate = lastGeneratedDay.scheduledDate.toISOString();
   }
 
   return {

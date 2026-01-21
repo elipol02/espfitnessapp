@@ -41,6 +41,8 @@ interface Exercise {
   exerciseType: string;
   progression: Progression | null | unknown;
   movementDetails: MovementDetails | null | unknown;
+  // Time-based (cardio_time, mobility_time) - duration in minutes
+  duration?: number;
   // Complex exercise type fields
   distance?: number;
   distanceUnit?: 'feet' | 'yards' | 'meters';

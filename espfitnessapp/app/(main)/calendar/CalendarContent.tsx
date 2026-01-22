@@ -73,7 +73,10 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     // First try to find by scheduledDate
     const workout = workoutDays.find((d) => {
       if (!d.scheduledDate) return false;
-      const scheduled = new Date(d.scheduledDate);
+      // Parse the ISO date as local date to avoid timezone issues
+      const scheduledDateOnly = d.scheduledDate.split('T')[0]; // Get YYYY-MM-DD part
+      const [year, month, day] = scheduledDateOnly.split('-').map(Number);
+      const scheduled = new Date(year, month - 1, day);
       return (
         scheduled.getFullYear() === date.getFullYear() &&
         scheduled.getMonth() === date.getMonth() &&

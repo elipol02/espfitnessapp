@@ -198,6 +198,7 @@ export function ChatContent({
   const postWorkoutProcessedRef = useRef<string | null>(null);
   const [sessions, setSessions] = useState<Array<{ id: string; title: string | null; createdAt: string; messageCount: number }>>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [switchingSession, setSwitchingSession] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -544,8 +545,9 @@ export function ChatContent({
       streamingMessageIdRef.current = null;
       streamingContentRef.current = '';
       
-      // Refresh to get server-side data
-      router.refresh();
+      // Skip syncing with server to prevent overwriting our complete local state
+      // The server has saved the messages, they'll sync on next navigation
+      skipNextSyncRef.current = true;
 
     } catch (error) {
       if ((error as Error).name === 'AbortError') {
@@ -581,6 +583,7 @@ export function ChatContent({
       setStreamProgress(null);
       setSelectedAction(null);
       setShowHistory(false);
+      setSwitchingSession(false); // Clear switching state after session loads
       sessionStorage.removeItem(`chat-loading-${prevSessionIdRef.current}`);
       sessionStorage.removeItem(`chat-streaming-${prevSessionIdRef.current}`);
       streamStateRestoredRef.current = false; // Allow restore for new session
@@ -588,7 +591,7 @@ export function ChatContent({
       lastMessageCountRef.current = data.messages.length;
       return;
     }
-  }, [data.sessionId, data.messages]);
+  }, [data.sessionId]); // Only depend on sessionId, not messages
 
   // Sync messages when session changes (e.g., new session created or data refreshed)
   useEffect(() => {
@@ -629,8 +632,12 @@ export function ChatContent({
         // We have saved state to restore, don't sync yet
         return;
       }
-      // Not loading - normal case: sync from server
-      setMessages(data.messages);
+      // Not loading and not skipping - normal case: sync from server
+      // But never clear local messages with empty server data (defensive check)
+      if (newCount >= messages.length || messages.length === 0) {
+        setMessages(data.messages);
+      }
+      // Otherwise keep local messages until server catches up
     }
     
     if (data.messages.length === 0) {
@@ -854,7 +861,9 @@ export function ChatContent({
           streamingMessageIdRef.current = null;
           streamingContentRef.current = '';
           
-          router.refresh();
+          // Skip syncing with server to prevent overwriting our complete local state
+          // The server has saved the messages, they'll sync on next navigation
+          skipNextSyncRef.current = true;
 
         } catch (error) {
           console.error('Streaming error:', error);
@@ -1084,6 +1093,7 @@ export function ChatContent({
 
   const handleSelectSession = (sessionIdToOpen: string) => {
     setShowHistory(false);
+    setSwitchingSession(true);
     // Determine the path based on current mode
     const basePath = mode && mode !== 'general' ? `/chat/${mode}` : '/chat';
     router.push(`${basePath}?session=${sessionIdToOpen}`);
@@ -1091,6 +1101,20 @@ export function ChatContent({
 
   return (
     <div className="fixed inset-0 flex flex-col">
+      {/* Loading overlay when switching sessions */}
+      {switchingSession && (
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 pb-16">
+          <div className="flex flex-col items-center gap-4">
+            <div className="flex gap-1">
+              <span className="w-3 h-3 bg-primary rounded-full animate-pulse" />
+              <span className="w-3 h-3 bg-primary rounded-full animate-pulse" style={{ animationDelay: '150ms' }} />
+              <span className="w-3 h-3 bg-primary rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
+            </div>
+            <p className="text-muted-foreground">Loading chat...</p>
+          </div>
+        </div>
+      )}
+      
       {/* Header */}
       <div className="flex-shrink-0 bg-background border-b border-border">
         <div className="px-4 py-3 flex items-center justify-between">

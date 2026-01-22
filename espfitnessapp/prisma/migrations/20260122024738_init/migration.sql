@@ -73,6 +73,7 @@ CREATE TABLE "WorkoutPlan" (
     "weeksDuration" INTEGER NOT NULL DEFAULT 1,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "startDate" TIMESTAMP(3),
 
     CONSTRAINT "WorkoutPlan_pkey" PRIMARY KEY ("id")
 );
@@ -86,6 +87,8 @@ CREATE TABLE "WorkoutDay" (
     "workoutType" TEXT NOT NULL,
     "workoutColor" TEXT NOT NULL DEFAULT '#404040',
     "metadata" JSONB,
+    "isGenerated" BOOLEAN NOT NULL DEFAULT false,
+    "scheduledDate" TIMESTAMP(3),
 
     CONSTRAINT "WorkoutDay_pkey" PRIMARY KEY ("id")
 );
@@ -102,6 +105,17 @@ CREATE TABLE "Exercise" (
     "progression" JSONB,
     "movementDetails" JSONB,
     "order" INTEGER NOT NULL DEFAULT 0,
+    "restTime" INTEGER NOT NULL DEFAULT 90,
+    "exerciseType" TEXT NOT NULL DEFAULT 'strength',
+    "distance" DOUBLE PRECISION,
+    "distanceUnit" TEXT DEFAULT 'feet',
+    "intervals" JSONB,
+    "tempo" TEXT,
+    "timeCap" INTEGER,
+    "repsMin" INTEGER,
+    "setsMin" INTEGER,
+    "duration" INTEGER,
+    "movements" JSONB,
 
     CONSTRAINT "Exercise_pkey" PRIMARY KEY ("id")
 );
@@ -129,11 +143,27 @@ CREATE TABLE "ExerciseLog" (
     "exerciseId" TEXT NOT NULL,
     "setsCompleted" INTEGER NOT NULL,
     "repsPerSet" JSONB NOT NULL,
-    "weightUsed" DOUBLE PRECISION NOT NULL,
+    "weightUsed" JSONB NOT NULL,
     "isPR" BOOLEAN NOT NULL DEFAULT false,
     "notes" TEXT,
+    "duration" INTEGER,
+    "distance" DOUBLE PRECISION,
+    "roundsCompleted" INTEGER,
+    "timeElapsed" INTEGER,
+    "performanceData" JSONB,
 
     CONSTRAINT "ExerciseLog_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "ChatSession" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "title" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "ChatSession_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -145,8 +175,23 @@ CREATE TABLE "ChatMessage" (
     "content" TEXT NOT NULL,
     "metadata" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "sessionId" TEXT NOT NULL,
 
     CONSTRAINT "ChatMessage_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "PendingAdjustment" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "planId" TEXT NOT NULL,
+    "workoutLogId" TEXT NOT NULL,
+    "suggestions" JSONB NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'pending',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "PendingAdjustment_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
@@ -180,6 +225,15 @@ CREATE INDEX "WorkoutDay_planId_idx" ON "WorkoutDay"("planId");
 CREATE INDEX "WorkoutDay_dayNumber_idx" ON "WorkoutDay"("dayNumber");
 
 -- CreateIndex
+CREATE INDEX "WorkoutDay_scheduledDate_idx" ON "WorkoutDay"("scheduledDate");
+
+-- CreateIndex
+CREATE INDEX "WorkoutDay_workoutType_idx" ON "WorkoutDay"("workoutType");
+
+-- CreateIndex
+CREATE INDEX "WorkoutDay_planId_workoutType_scheduledDate_idx" ON "WorkoutDay"("planId", "workoutType", "scheduledDate");
+
+-- CreateIndex
 CREATE INDEX "Exercise_dayId_idx" ON "Exercise"("dayId");
 
 -- CreateIndex
@@ -204,6 +258,15 @@ CREATE INDEX "ExerciseLog_logId_idx" ON "ExerciseLog"("logId");
 CREATE INDEX "ExerciseLog_exerciseId_idx" ON "ExerciseLog"("exerciseId");
 
 -- CreateIndex
+CREATE INDEX "ChatSession_userId_idx" ON "ChatSession"("userId");
+
+-- CreateIndex
+CREATE INDEX "ChatSession_createdAt_idx" ON "ChatSession"("createdAt");
+
+-- CreateIndex
+CREATE INDEX "ChatMessage_sessionId_idx" ON "ChatMessage"("sessionId");
+
+-- CreateIndex
 CREATE INDEX "ChatMessage_userId_idx" ON "ChatMessage"("userId");
 
 -- CreateIndex
@@ -211,6 +274,18 @@ CREATE INDEX "ChatMessage_planId_idx" ON "ChatMessage"("planId");
 
 -- CreateIndex
 CREATE INDEX "ChatMessage_createdAt_idx" ON "ChatMessage"("createdAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "PendingAdjustment_workoutLogId_key" ON "PendingAdjustment"("workoutLogId");
+
+-- CreateIndex
+CREATE INDEX "PendingAdjustment_userId_idx" ON "PendingAdjustment"("userId");
+
+-- CreateIndex
+CREATE INDEX "PendingAdjustment_workoutLogId_idx" ON "PendingAdjustment"("workoutLogId");
+
+-- CreateIndex
+CREATE INDEX "PendingAdjustment_status_idx" ON "PendingAdjustment"("status");
 
 -- AddForeignKey
 ALTER TABLE "Account" ADD CONSTRAINT "Account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -231,22 +306,34 @@ ALTER TABLE "WorkoutDay" ADD CONSTRAINT "WorkoutDay_planId_fkey" FOREIGN KEY ("p
 ALTER TABLE "Exercise" ADD CONSTRAINT "Exercise_dayId_fkey" FOREIGN KEY ("dayId") REFERENCES "WorkoutDay"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "WorkoutLog" ADD CONSTRAINT "WorkoutLog_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "WorkoutLog" ADD CONSTRAINT "WorkoutLog_dayId_fkey" FOREIGN KEY ("dayId") REFERENCES "WorkoutDay"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "WorkoutLog" ADD CONSTRAINT "WorkoutLog_planId_fkey" FOREIGN KEY ("planId") REFERENCES "WorkoutPlan"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "WorkoutLog" ADD CONSTRAINT "WorkoutLog_dayId_fkey" FOREIGN KEY ("dayId") REFERENCES "WorkoutDay"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "ExerciseLog" ADD CONSTRAINT "ExerciseLog_logId_fkey" FOREIGN KEY ("logId") REFERENCES "WorkoutLog"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "WorkoutLog" ADD CONSTRAINT "WorkoutLog_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ExerciseLog" ADD CONSTRAINT "ExerciseLog_exerciseId_fkey" FOREIGN KEY ("exerciseId") REFERENCES "Exercise"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ChatMessage" ADD CONSTRAINT "ChatMessage_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ExerciseLog" ADD CONSTRAINT "ExerciseLog_logId_fkey" FOREIGN KEY ("logId") REFERENCES "WorkoutLog"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ChatSession" ADD CONSTRAINT "ChatSession_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ChatMessage" ADD CONSTRAINT "ChatMessage_planId_fkey" FOREIGN KEY ("planId") REFERENCES "WorkoutPlan"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ChatMessage" ADD CONSTRAINT "ChatMessage_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "ChatSession"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ChatMessage" ADD CONSTRAINT "ChatMessage_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "PendingAdjustment" ADD CONSTRAINT "PendingAdjustment_planId_fkey" FOREIGN KEY ("planId") REFERENCES "WorkoutPlan"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "PendingAdjustment" ADD CONSTRAINT "PendingAdjustment_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;

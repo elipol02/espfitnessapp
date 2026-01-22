@@ -286,6 +286,15 @@ async function getHomeData(userId: string) {
     };
   };
 
+  // Calculate current week
+  let currentWeek = 1;
+  if (activePlan && planHasStarted && activePlan.startDate) {
+    const startDate = new Date(activePlan.startDate);
+    startDate.setHours(0, 0, 0, 0);
+    const daysPassed = Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+    currentWeek = Math.floor(daysPassed / 7) + 1;
+  }
+
   return {
     user,
     userStats,
@@ -294,6 +303,7 @@ async function getHomeData(userId: string) {
       goal: activePlan.goal,
       status: activePlan.status,
       startDate: activePlan.startDate?.toISOString() || null,
+      durationWeeks: activePlan.weeksDuration,
     } : null,
     // Send current, previous, and next workouts so frontend can decide based on local time
     currentWorkout: formatWorkout(currentWorkout),
@@ -306,6 +316,7 @@ async function getHomeData(userId: string) {
     daysMissed,
     completedWorkouts,
     weeksRemaining,
+    currentWeek,
   };
 }
 

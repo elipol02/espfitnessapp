@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
 import { Target, ChevronRight, CalendarX, CheckCircle2, Calendar } from 'lucide-react';
+import { getMotivationalMessage, calculateProgressPercentage, calculateCompletionRate } from '@/app/lib/motivationalMessages';
 
 interface WorkoutData {
   id: string;
@@ -40,6 +41,7 @@ interface HomeData {
     goal: string;
     status: string;
     startDate: string | null;
+    durationWeeks: number;
   } | null;
   currentWorkout: WorkoutData | null;
   previousWorkout: WorkoutData | null;
@@ -63,6 +65,7 @@ interface HomeData {
   daysMissed: number;
   completedWorkouts: number;
   weeksRemaining: number;
+  currentWeek: number;
 }
 
 export function HomeContent({ data }: { data: HomeData }) {
@@ -78,6 +81,45 @@ export function HomeContent({ data }: { data: HomeData }) {
 
   const greeting = getGreeting();
   const userName = user?.name?.split(' ')[0] || 'there';
+
+  // Calculate motivational message using LOCAL date
+  let motivationalMessage = '';
+  if (activePlan && activePlan.startDate) {
+    const progressPercentage = calculateProgressPercentage(activePlan.startDate, activePlan.durationWeeks);
+    
+    // Calculate completion rate based on actual data
+    // Count scheduled workouts that should have been done by today (local time)
+    const localToday = new Date();
+    localToday.setHours(0, 0, 0, 0);
+    
+    const startDate = new Date(activePlan.startDate);
+    startDate.setHours(0, 0, 0, 0);
+    
+    // Count scheduled workouts from weekPreview that are in the past or today
+    let scheduledWorkoutsSoFar = 0;
+    weekPreview.forEach(day => {
+      if (day.scheduledDate && day.workoutType !== 'rest') {
+        const scheduledDate = new Date(day.scheduledDate);
+        scheduledDate.setHours(0, 0, 0, 0);
+        if (scheduledDate <= localToday) {
+          scheduledWorkoutsSoFar++;
+        }
+      }
+    });
+    
+    // If we don't have enough data from weekPreview, estimate based on days passed
+    if (scheduledWorkoutsSoFar === 0) {
+      const daysPassed = Math.max(0, Math.floor((localToday.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
+      const weeksPassed = Math.floor(daysPassed / 7) + 1;
+      scheduledWorkoutsSoFar = Math.max(1, Math.floor(weeksPassed * 5));
+    }
+    
+    // Add daysMissed to get total scheduled (completed + missed = total scheduled)
+    const totalScheduledSoFar = completedWorkouts + daysMissed;
+    
+    const completionRate = calculateCompletionRate(completedWorkouts, totalScheduledSoFar);
+    motivationalMessage = getMotivationalMessage(progressPercentage, completionRate);
+  }
 
   // Determine which workout is "today's workout" based on local time
   // Compare the scheduled dates with the client's local date
@@ -159,6 +201,11 @@ export function HomeContent({ data }: { data: HomeData }) {
           <h1 className="text-2xl font-bold text-foreground mt-1">
             {greeting}, {userName}!
           </h1>
+          {motivationalMessage && (
+            <p className="text-lg font-medium text-foreground/80 mt-2 italic">
+              {motivationalMessage}
+            </p>
+          )}
         </div>
 
         {/* Progress toward goal */}

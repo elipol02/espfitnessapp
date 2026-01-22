@@ -1161,19 +1161,21 @@ export function ChatContent({
         <div className="px-4 py-3 flex items-center justify-between">
           <div>
             <h1 className="text-lg font-bold text-foreground">ESP Fitness Planner</h1>
-            <p className="text-sm text-muted-foreground">
-              {mode === 'create'
-                ? 'Creating a new plan'
-                : mode === 'edit'
-                ? 'Editing your plan'
-                : mode === 'submit'
-                ? 'Logging workout'
-                : mode === 'post_workout'
-                ? 'Workout Analysis'
-                : mode === 'ask'
-                ? 'Ask me anything'
-                : 'Ask me anything'}
-            </p>
+            {mode && (
+              <p className="text-sm text-muted-foreground">
+                {mode === 'create'
+                  ? 'Creating a new plan'
+                  : mode === 'edit'
+                  ? 'Editing your plan'
+                  : mode === 'submit'
+                  ? 'Logging workout'
+                  : mode === 'post_workout'
+                  ? 'Workout Analysis'
+                  : mode === 'ask'
+                  ? 'Ask me anything'
+                  : 'Ask me anything'}
+              </p>
+            )}
           </div>
           <div className="flex gap-2">
             {!showHistory && !showNewChatMenu && (

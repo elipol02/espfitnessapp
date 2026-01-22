@@ -305,7 +305,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                     }
                     className={`
                       aspect-square flex flex-col items-center justify-center rounded-lg
-                      transition-colors relative
+                      transition-colors relative gap-0.5 p-1
                       ${isTodayDate ? 'ring-2 ring-primary' : ''}
                       ${isClickable ? 'hover:bg-surface-elevated cursor-pointer' : 'cursor-default'}
                       ${beforeStart || afterEnd ? 'opacity-30' : ''}
@@ -327,7 +327,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                     {workout && workout.workoutType !== 'rest' && workout.workoutType !== 'Rest' && !beforeStart && !afterEnd && (
                       <div
                         className={`
-                          w-6 h-6 rounded-full flex items-center justify-center mt-0.5
+                          w-6 h-6 rounded-full flex items-center justify-center
                           ${isCompleted ? '' : 'border-2'}
                           ${!isGenerated ? 'opacity-40' : ''}
                         `}

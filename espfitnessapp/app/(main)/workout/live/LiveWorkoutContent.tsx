@@ -71,6 +71,7 @@ export function LiveWorkoutContent({
   hasAnalysis,
   chatSessionId,
   isPreview = false,
+  workoutDate,
 }: {
   workoutLogId: string;
   workoutDay: WorkoutDay;
@@ -82,6 +83,7 @@ export function LiveWorkoutContent({
   hasAnalysis?: boolean;
   chatSessionId?: string | null;
   isPreview?: boolean;
+  workoutDate?: Date | string;
 }) {
   const router = useRouter();
   
@@ -751,7 +753,10 @@ export function LiveWorkoutContent({
 
           <div className="text-center">
             <p className="text-xs text-muted-foreground">
-              {new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+              {workoutDate 
+                ? new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+                : new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+              }
             </p>
             <h1
               className="font-bold capitalize"

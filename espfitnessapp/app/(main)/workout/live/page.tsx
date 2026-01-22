@@ -98,6 +98,7 @@ async function getWorkoutData(
         hasAnalysis,
         chatSessionId,
         isPreview: false,
+        workoutDate: existingLog.workoutDate,
       };
     }
   }
@@ -223,6 +224,7 @@ async function getWorkoutData(
         hasAnalysis: false,
         chatSessionId: null,
         isPreview: false,
+        workoutDate: existingWorkout.workoutDate,
       };
     }
     
@@ -237,6 +239,7 @@ async function getWorkoutData(
         hasAnalysis: false,
         chatSessionId: null,
         isPreview: true,
+        workoutDate: workoutDay.scheduledDate || targetDate,
       };
     }
     
@@ -261,6 +264,7 @@ async function getWorkoutData(
       hasAnalysis: false,
       chatSessionId: null,
       isPreview: false,
+      workoutDate: targetDate,
     };
   }
 
@@ -330,6 +334,7 @@ export default async function LiveWorkoutPage({
       hasAnalysis={data.hasAnalysis}
       chatSessionId={data.chatSessionId}
       isPreview={data.isPreview}
+      workoutDate={data.workoutDate}
     />
   );
 }

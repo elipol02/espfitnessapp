@@ -219,7 +219,7 @@ export function HomeContent({ data }: { data: HomeData }) {
               </Link>
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 overflow-x-auto pb-2 pt-1">
               {weekPreview.map((day, index) => {
                 const isToday = index === new Date().getDay();
                 const dayAbbr = day.dayName.slice(0, 3);
@@ -238,7 +238,7 @@ export function HomeContent({ data }: { data: HomeData }) {
                 const content = (
                   <div
                     className={`
-                      flex-1 flex flex-col items-center gap-2 py-3 rounded-lg h-[110px]
+                      flex flex-col items-center gap-2 py-3 rounded-lg min-h-[110px] w-[75px] flex-shrink-0
                       ${isToday ? 'bg-surface ring-2 ring-primary' : 'bg-surface/50'}
                       ${hasWorkout && !isCompleted ? 'cursor-pointer hover:bg-surface transition-colors' : ''}
                     `}
@@ -255,7 +255,7 @@ export function HomeContent({ data }: { data: HomeData }) {
                           ? day.workoutColor
                           : day.workoutColor + '30',
                         border: day.workoutType === 'rest' 
-                          ? '2px dashed var(--border)' 
+                          ? '2px solid var(--border)' 
                           : isCompleted
                           ? 'none'
                           : `2px solid ${day.workoutColor}`,
@@ -269,7 +269,7 @@ export function HomeContent({ data }: { data: HomeData }) {
                         </span>
                       )}
                     </div>
-                    <span className="text-xs capitalize text-muted-foreground text-center leading-tight">
+                    <span className="text-xs capitalize text-muted-foreground text-center leading-tight w-full px-1">
                       {day.workoutType}
                     </span>
                   </div>
@@ -281,7 +281,6 @@ export function HomeContent({ data }: { data: HomeData }) {
                     <Link
                       key={day.dayNumber}
                       href={`/workout/live?logId=${day.logId}`}
-                      className="flex-1"
                     >
                       {content}
                     </Link>
@@ -294,7 +293,6 @@ export function HomeContent({ data }: { data: HomeData }) {
                     <Link
                       key={day.dayNumber}
                       href={`/workout/live?logId=${day.logId}`}
-                      className="flex-1"
                     >
                       {content}
                     </Link>
@@ -312,7 +310,6 @@ export function HomeContent({ data }: { data: HomeData }) {
                     <Link
                       key={day.dayNumber}
                       href={url}
-                      className="flex-1"
                     >
                       {content}
                     </Link>
@@ -321,7 +318,7 @@ export function HomeContent({ data }: { data: HomeData }) {
 
                 // Rest day or no workout generated yet
                 return (
-                  <div key={day.dayNumber} className="flex-1">
+                  <div key={day.dayNumber}>
                     {content}
                   </div>
                 );

@@ -35,14 +35,40 @@ async function getHomeData(userId: string) {
     planHasStarted = startDate <= today;
   }
 
-  // Get today's workout day by matching scheduledDate - only if plan has started
-  const todayWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
+  // Get current, previous, and next workout days - only if plan has started
+  // This allows the frontend to decide which one is "today" based on local time
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+
+  const currentWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
     if (!day.scheduledDate) return false;
     const scheduledDate = new Date(day.scheduledDate);
     return (
       scheduledDate.getFullYear() === today.getFullYear() &&
       scheduledDate.getMonth() === today.getMonth() &&
       scheduledDate.getDate() === today.getDate()
+    );
+  });
+
+  const previousWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
+    if (!day.scheduledDate) return false;
+    const scheduledDate = new Date(day.scheduledDate);
+    return (
+      scheduledDate.getFullYear() === yesterday.getFullYear() &&
+      scheduledDate.getMonth() === yesterday.getMonth() &&
+      scheduledDate.getDate() === yesterday.getDate()
+    );
+  });
+
+  const nextWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
+    if (!day.scheduledDate) return false;
+    const scheduledDate = new Date(day.scheduledDate);
+    return (
+      scheduledDate.getFullYear() === tomorrow.getFullYear() &&
+      scheduledDate.getMonth() === tomorrow.getMonth() &&
+      scheduledDate.getDate() === tomorrow.getDate()
     );
   });
 
@@ -61,17 +87,26 @@ async function getHomeData(userId: string) {
     },
   });
 
-  // Get today's workout log if exists (must match today's workout)
-  const todayLog = todayWorkout ? await prisma.workoutLog.findFirst({
-    where: {
-      userId,
-      dayId: todayWorkout.id,
-      workoutDate: {
-        gte: today,
-        lt: new Date(today.getTime() + 24 * 60 * 60 * 1000),
+  // Get workout logs for current, previous, and next days
+  const getWorkoutLog = async (workout: any, date: Date) => {
+    if (!workout) return null;
+    return await prisma.workoutLog.findFirst({
+      where: {
+        userId,
+        dayId: workout.id,
+        workoutDate: {
+          gte: date,
+          lt: new Date(date.getTime() + 24 * 60 * 60 * 1000),
+        },
       },
-    },
-  }) : null;
+    });
+  };
+
+  const [currentLog, previousLog, nextLog] = await Promise.all([
+    getWorkoutLog(currentWorkout, today),
+    getWorkoutLog(previousWorkout, yesterday),
+    getWorkoutLog(nextWorkout, tomorrow),
+  ]);
 
   // Get workout logs for the current week
   const startOfWeek = new Date(today);
@@ -224,6 +259,33 @@ async function getHomeData(userId: string) {
     weeksRemaining = Math.max(0, activePlan.weeksDuration - weeksPassed);
   }
 
+  const formatWorkout = (workout: any) => {
+    if (!workout) return null;
+    return {
+      id: workout.id,
+      dayName: workout.dayName,
+      workoutType: workout.workoutType,
+      workoutColor: workout.workoutColor,
+      scheduledDate: workout.scheduledDate?.toISOString() || null,
+      exercises: workout.exercises.map((e: any) => ({
+        id: e.id,
+        name: e.name,
+        sets: e.sets,
+        reps: e.reps,
+        restTime: e.restTime,
+        exerciseType: e.exerciseType,
+      })),
+    };
+  };
+
+  const formatLog = (log: any) => {
+    if (!log) return null;
+    return {
+      id: log.id,
+      status: log.status,
+    };
+  };
+
   return {
     user,
     userStats,
@@ -233,24 +295,13 @@ async function getHomeData(userId: string) {
       status: activePlan.status,
       startDate: activePlan.startDate?.toISOString() || null,
     } : null,
-    todayWorkout: todayWorkout ? {
-      id: todayWorkout.id,
-      dayName: todayWorkout.dayName,
-      workoutType: todayWorkout.workoutType,
-      workoutColor: todayWorkout.workoutColor,
-      exercises: todayWorkout.exercises.map((e: any) => ({
-        id: e.id,
-        name: e.name,
-        sets: e.sets,
-        reps: e.reps,
-        restTime: e.restTime,
-        exerciseType: e.exerciseType,
-      })),
-    } : null,
-    todayLog: todayLog ? {
-      id: todayLog.id,
-      status: todayLog.status,
-    } : null,
+    // Send current, previous, and next workouts so frontend can decide based on local time
+    currentWorkout: formatWorkout(currentWorkout),
+    previousWorkout: formatWorkout(previousWorkout),
+    nextWorkout: formatWorkout(nextWorkout),
+    currentLog: formatLog(currentLog),
+    previousLog: formatLog(previousLog),
+    nextLog: formatLog(nextLog),
     weekPreview,
     daysMissed,
     completedWorkouts,

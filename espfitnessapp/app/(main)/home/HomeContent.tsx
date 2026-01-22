@@ -4,6 +4,27 @@ import Link from 'next/link';
 import { Button } from '@/app/components/Button';
 import { Target, ChevronRight, CalendarX, CheckCircle2, Calendar } from 'lucide-react';
 
+interface WorkoutData {
+  id: string;
+  dayName: string;
+  workoutType: string;
+  workoutColor: string;
+  scheduledDate: string | null;
+  exercises: {
+    id: string;
+    name: string;
+    sets: number;
+    reps: number;
+    restTime: number;
+    exerciseType: string;
+  }[];
+}
+
+interface WorkoutLogData {
+  id: string;
+  status: string;
+}
+
 interface HomeData {
   user: {
     name: string | null;
@@ -20,24 +41,12 @@ interface HomeData {
     status: string;
     startDate: string | null;
   } | null;
-  todayWorkout: {
-    id: string;
-    dayName: string;
-    workoutType: string;
-    workoutColor: string;
-    exercises: {
-      id: string;
-      name: string;
-      sets: number;
-      reps: number;
-      restTime: number;
-      exerciseType: string;
-    }[];
-  } | null;
-  todayLog: {
-    id: string;
-    status: string;
-  } | null;
+  currentWorkout: WorkoutData | null;
+  previousWorkout: WorkoutData | null;
+  nextWorkout: WorkoutData | null;
+  currentLog: WorkoutLogData | null;
+  previousLog: WorkoutLogData | null;
+  nextLog: WorkoutLogData | null;
   weekPreview: {
     id: string | null;
     dayNumber: number;
@@ -57,7 +66,7 @@ interface HomeData {
 }
 
 export function HomeContent({ data }: { data: HomeData }) {
-  const { user, userStats, activePlan, todayWorkout, todayLog, weekPreview, daysMissed, completedWorkouts, weeksRemaining } = data;
+  const { user, userStats, activePlan, currentWorkout, previousWorkout, nextWorkout, currentLog, previousLog, nextLog, weekPreview, daysMissed, completedWorkouts, weeksRemaining } = data;
 
   const today = new Date();
   const todayISO = today.toISOString();
@@ -69,6 +78,42 @@ export function HomeContent({ data }: { data: HomeData }) {
 
   const greeting = getGreeting();
   const userName = user?.name?.split(' ')[0] || 'there';
+
+  // Determine which workout is "today's workout" based on local time
+  // Compare the scheduled dates with the client's local date
+  const localToday = new Date();
+  localToday.setHours(0, 0, 0, 0);
+  
+  let todayWorkout: WorkoutData | null = null;
+  let todayLog: WorkoutLogData | null = null;
+
+  // Check each workout to see which one matches today's local date
+  if (currentWorkout?.scheduledDate) {
+    const scheduledDate = new Date(currentWorkout.scheduledDate);
+    scheduledDate.setHours(0, 0, 0, 0);
+    if (scheduledDate.getTime() === localToday.getTime()) {
+      todayWorkout = currentWorkout;
+      todayLog = currentLog;
+    }
+  }
+
+  if (!todayWorkout && previousWorkout?.scheduledDate) {
+    const scheduledDate = new Date(previousWorkout.scheduledDate);
+    scheduledDate.setHours(0, 0, 0, 0);
+    if (scheduledDate.getTime() === localToday.getTime()) {
+      todayWorkout = previousWorkout;
+      todayLog = previousLog;
+    }
+  }
+
+  if (!todayWorkout && nextWorkout?.scheduledDate) {
+    const scheduledDate = new Date(nextWorkout.scheduledDate);
+    scheduledDate.setHours(0, 0, 0, 0);
+    if (scheduledDate.getTime() === localToday.getTime()) {
+      todayWorkout = nextWorkout;
+      todayLog = nextLog;
+    }
+  }
 
   // No active plan - show empty state
   if (!activePlan) {
@@ -247,7 +292,7 @@ export function HomeContent({ data }: { data: HomeData }) {
                     <div
                       className="rounded-full flex items-center justify-center flex-shrink-0"
                       style={{ 
-                        width: '40px',
+                        width: '28px',
                         height: '28px',
                         backgroundColor: day.workoutType === 'rest' 
                           ? 'transparent' 

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Plus, Minus, Check, Timer, ChevronRight, Play } from 'lucide-react';
 import { Button } from '@/app/components/Button';
+import { LoadingSpinner } from '@/app/components/LoadingSpinner';
 import { haptic } from '@/app/lib/utils';
 
 interface IntervalPhase {
@@ -99,7 +100,6 @@ export function LiveWorkoutContent({
   const [distance, setDistance] = useState(0);
   const [restTimer, setRestTimer] = useState<number | null>(null);
   const [cardioTimer, setCardioTimer] = useState<number | null>(null);
-  const [cardioStartTime, setCardioStartTime] = useState<Date | null>(null);
   const [startTime] = useState(new Date());
   const [saving, setSaving] = useState(false);
   
@@ -179,6 +179,8 @@ export function LiveWorkoutContent({
         setWorkoutCompleted(true);
         setAdjustmentIdForChat(result.pendingAdjustmentId);
         setSaving(false);
+        // Refresh router cache so calendar shows updated completion status
+        router.refresh();
       } else {
         // No analysis available, just go home
         router.push('/home');
@@ -264,7 +266,6 @@ export function LiveWorkoutContent({
 
     if (cardioTimer <= 0) {
       setCardioTimer(null);
-      setCardioStartTime(null);
       haptic('medium');
       return;
     }
@@ -471,7 +472,6 @@ export function LiveWorkoutContent({
     const durationMinutes = currentExercise.duration || currentExercise.reps; // Use duration field, fall back to reps
     const durationSeconds = durationMinutes * 60;
     setCardioTimer(durationSeconds);
-    setCardioStartTime(new Date());
   };
 
   const completeTimeBasedExercise = async () => {
@@ -479,13 +479,11 @@ export function LiveWorkoutContent({
 
     haptic('light');
 
-    // Log as a single "set" with the time completed
-    const actualMinutes = cardioStartTime 
-      ? Math.round((Date.now() - cardioStartTime.getTime()) / 60000)
-      : (currentExercise.duration || currentExercise.reps);
+    // Always log the full duration (whether timer completed naturally or was skipped)
+    const fullDurationMinutes = currentExercise.duration || currentExercise.reps;
+    const fullDurationSeconds = fullDurationMinutes * 60;
     
-    const actualSeconds = actualMinutes * 60;
-    const newSets = [{ reps: actualMinutes, weight: 0 }];
+    const newSets = [{ reps: fullDurationMinutes, weight: 0 }];
     const newMap = new Map(completedSets);
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
@@ -499,7 +497,7 @@ export function LiveWorkoutContent({
           workoutLogId,
           exerciseId: currentExercise.id,
           sets: newSets,
-          duration: actualSeconds, // Store duration in seconds
+          duration: fullDurationSeconds, // Store full duration in seconds
         }),
       });
     } catch (error) {
@@ -508,7 +506,6 @@ export function LiveWorkoutContent({
 
     // Reset timer
     setCardioTimer(null);
-    setCardioStartTime(null);
   };
 
   // Distance-based exercise completion
@@ -732,6 +729,16 @@ export function LiveWorkoutContent({
 
   return (
     <div className="fixed inset-0 flex flex-col bg-background">
+      {/* Loading overlay when finishing workout */}
+      {saving && (
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 pb-16">
+          <div className="flex flex-col items-center gap-4">
+            <LoadingSpinner size="lg" className="text-primary" />
+            <p className="text-muted-foreground">Finishing workout...</p>
+          </div>
+        </div>
+      )}
+      
       {/* Header */}
       <div className="flex-shrink-0 bg-background border-b border-border px-4 py-3">
         <div className="flex items-center justify-between">

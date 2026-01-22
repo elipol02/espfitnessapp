@@ -2,9 +2,10 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { SendHorizontal, Plus, Edit3, MessageSquare, History, FileText, Square } from 'lucide-react';
+import { SendHorizontal, Plus, Edit3, MessageSquare, History, FileText, Square, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Button } from '@/app/components/Button';
+import { LoadingSpinner } from '@/app/components/LoadingSpinner';
 
 // SSE Event types matching backend
 interface SSEEvent {
@@ -154,9 +155,17 @@ export function ChatContent({
 }) {
   const searchParams = useSearchParams();
   const router = useRouter();
-  // Mode comes from the URL path prop
-  const mode = urlMode || data.detectedMode || null;
+  // Track mode in state - starts with URL mode or detected mode, can be updated by action selection
+  const [currentMode, setCurrentMode] = useState<string | null>(urlMode || data.detectedMode || null);
+  const mode = currentMode;
   const autoSend = searchParams.get('autoSend');
+
+  // Sync currentMode when urlMode changes (URL navigation)
+  useEffect(() => {
+    if (urlMode && urlMode !== currentMode) {
+      setCurrentMode(urlMode);
+    }
+  }, [urlMode, currentMode]);
 
   // Initialize messages - check for saved streaming state first
   const [messages, setMessages] = useState<Message[]>(() => {
@@ -199,6 +208,8 @@ export function ChatContent({
   const [sessions, setSessions] = useState<Array<{ id: string; title: string | null; createdAt: string; messageCount: number }>>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [switchingSession, setSwitchingSession] = useState(false);
+  const [showNewChatMenu, setShowNewChatMenu] = useState(false);
+  const [startingNewChat, setStartingNewChat] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -584,6 +595,8 @@ export function ChatContent({
       setSelectedAction(null);
       setShowHistory(false);
       setSwitchingSession(false); // Clear switching state after session loads
+      setStartingNewChat(false); // Clear new chat transition state
+      setCurrentMode(urlMode || data.detectedMode || null); // Reset mode for new session
       sessionStorage.removeItem(`chat-loading-${prevSessionIdRef.current}`);
       sessionStorage.removeItem(`chat-streaming-${prevSessionIdRef.current}`);
       streamStateRestoredRef.current = false; // Allow restore for new session
@@ -591,7 +604,7 @@ export function ChatContent({
       lastMessageCountRef.current = data.messages.length;
       return;
     }
-  }, [data.sessionId]); // Only depend on sessionId, not messages
+  }, [data.sessionId, urlMode, data.detectedMode]); // Only depend on sessionId, not messages
 
   // Sync messages when session changes (e.g., new session created or data refreshed)
   useEffect(() => {
@@ -721,12 +734,15 @@ export function ChatContent({
         setInput(initialGoal);
       }
       setSelectedAction('create');
+      setCurrentMode('create');
       initialModeSet.current = true;
     } else if (mode === 'edit' && messages.length === 0) {
       setSelectedAction('edit');
+      setCurrentMode('edit');
       initialModeSet.current = true;
     } else if (mode === 'ask' && messages.length === 0) {
       setSelectedAction('ask');
+      setCurrentMode('ask');
       initialModeSet.current = true;
     }
   }, [mode, messages.length]);
@@ -899,7 +915,11 @@ export function ChatContent({
   const handleSend = async () => {
     if (!input.trim() || isLoading || isStreaming) return;
     // If we have an adjustmentId, we're in post_workout mode
-    const effectiveMode = adjustmentId ? 'post_workout' : (mode || 'general');
+    // Map 'edit' and 'ask' modes to their backend equivalents
+    let effectiveMode = mode || 'general';
+    if (effectiveMode === 'edit') effectiveMode = 'create';
+    if (effectiveMode === 'ask') effectiveMode = 'general';
+    if (adjustmentId) effectiveMode = 'post_workout';
     await handleStreamingSend(input.trim(), effectiveMode);
   };
 
@@ -968,6 +988,11 @@ export function ChatContent({
 
   // Handle plan approval
   const handleApprove = async (messageId: string, action: 'activate' | 'replace' = 'activate') => {
+    // Prevent double-clicks
+    if (approvingPlan === `${messageId}-${action}`) return;
+    
+    setApprovingPlan(`${messageId}-${action}`);
+    
     try {
       console.log(`[handleApprove] Starting with messageId: ${messageId}, action: ${action}`);
       
@@ -1022,9 +1047,14 @@ export function ChatContent({
     } catch (error) {
       console.error('Approval error:', error);
       alert(`Failed to ${action} plan. Please try again.`);
+    } finally {
+      setApprovingPlan(null);
     }
   };
 
+  // Handle plan approval loading state
+  const [approvingPlan, setApprovingPlan] = useState<string | null>(null);
+  
   // Handle adjustment approval
   const [approvingAdjustment, setApprovingAdjustment] = useState<string | null>(null);
 
@@ -1070,10 +1100,21 @@ export function ChatContent({
     }
   };
 
-  // Start new chat (shows menu without loading existing session)
+  // Show new chat menu
   const handleNewChat = () => {
-    // Navigate to chat menu with new=true to show action selection
-    router.push('/chat?new=true');
+    setShowNewChatMenu(true);
+    setShowHistory(false);
+  };
+  
+  // Actually create a new chat when user selects an action
+  const handleSelectNewChatAction = (action: 'create' | 'addCurrent' | 'edit' | 'ask') => {
+    // Set transition state to hide old content while navigating
+    setStartingNewChat(true);
+    setMessages([]);
+    setShowNewChatMenu(false);
+    // Navigate to new chat with the selected mode
+    const modePath = action === 'addCurrent' ? 'create' : action;
+    router.push(`/chat/${modePath}?new=true`);
   };
 
   const fetchSessions = async () => {
@@ -1135,7 +1176,7 @@ export function ChatContent({
             </p>
           </div>
           <div className="flex gap-2">
-            {!showHistory && (
+            {!showHistory && !showNewChatMenu && (
               <button
                 onClick={() => {
                   setShowHistory(true);
@@ -1147,32 +1188,110 @@ export function ChatContent({
                 <History size={18} className="text-muted-foreground" />
               </button>
             )}
-            {(messages.length > 0 || showHistory || selectedAction || mode) && (
+            {(messages.length > 0 || showHistory || showNewChatMenu || selectedAction || mode) && (
               <button
                 onClick={() => {
                   if (showHistory) {
                     setShowHistory(false);
+                  } else if (showNewChatMenu) {
+                    setShowNewChatMenu(false);
                   } else if ((selectedAction || mode) && messages.length === 0) {
                     setSelectedAction(null);
-                    // Update URL in background without causing navigation
-                    const sessionParam = data.sessionId ? `?session=${data.sessionId}` : '';
-                    window.history.replaceState({}, '', `/chat${sessionParam}`);
+                    setCurrentMode(null);
+                    // Clear URL completely when going back to menu
+                    window.history.replaceState({}, '', '/chat');
                   } else {
                     handleNewChat();
                   }
                 }}
                 className="p-2 rounded-lg hover:bg-surface transition-colors"
-                title={showHistory ? "Back to menu" : ((selectedAction || mode) && messages.length === 0) ? "Back to menu" : "New chat"}
+                title={showHistory ? "Back to chat" : showNewChatMenu ? "Back to chat" : ((selectedAction || mode) && messages.length === 0) ? "Back to menu" : "New chat"}
               >
-                <Plus size={18} className="text-muted-foreground" />
+                {showHistory || showNewChatMenu ? (
+                  <X size={18} className="text-muted-foreground" />
+                ) : (
+                  <Plus size={18} className="text-muted-foreground" />
+                )}
               </button>
             )}
           </div>
         </div>
       </div>
 
+      {/* New Chat Menu */}
+      {showNewChatMenu && (
+        <div className="flex-1 flex flex-col items-center justify-center px-4 pb-20">
+          <p className="text-center text-muted-foreground mb-6">
+            What would you like to do?
+          </p>
+          <div className="flex flex-col gap-3 w-full max-w-sm">
+            <button
+              onClick={() => handleSelectNewChatAction('create')}
+              className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
+            >
+              <div className="w-10 h-10 rounded-full bg-success/20 flex items-center justify-center flex-shrink-0">
+                <Plus className="w-5 h-5 text-success" />
+              </div>
+              <div>
+                <p className="font-medium text-foreground">Create a New Plan</p>
+                <p className="text-sm text-muted-foreground">
+                  Design a personalized workout schedule
+                </p>
+              </div>
+            </button>
+
+            <button
+              onClick={() => handleSelectNewChatAction('addCurrent')}
+              className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
+            >
+              <div className="w-10 h-10 rounded-full bg-orange-500/20 flex items-center justify-center flex-shrink-0">
+                <FileText className="w-5 h-5 text-orange-500" />
+              </div>
+              <div>
+                <p className="font-medium text-foreground">Add Your Current Plan</p>
+                <p className="text-sm text-muted-foreground">
+                  Tell me about the plan you're already following
+                </p>
+              </div>
+            </button>
+
+            {activePlan && (
+              <button
+                onClick={() => handleSelectNewChatAction('edit')}
+                className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
+              >
+                <div className="w-10 h-10 rounded-full bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
+                  <Edit3 className="w-5 h-5 text-yellow-500" />
+                </div>
+                <div>
+                  <p className="font-medium text-foreground">Edit Existing Plan</p>
+                  <p className="text-sm text-muted-foreground">
+                    Modify your current workout plan
+                  </p>
+                </div>
+              </button>
+            )}
+
+            <button
+              onClick={() => handleSelectNewChatAction('ask')}
+              className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
+            >
+              <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+                <MessageSquare className="w-5 h-5 text-primary" />
+              </div>
+              <div>
+                <p className="font-medium text-foreground">Ask a Question</p>
+                <p className="text-sm text-muted-foreground">
+                  Get help or advice
+                </p>
+              </div>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* History View */}
-      {showHistory && (
+      {showHistory && !showNewChatMenu && (
         <div className="flex-1 overflow-y-auto px-4 py-4 pb-20">
           <h2 className="text-lg font-semibold text-foreground mb-4">Conversation History</h2>
           {loadingSessions ? (
@@ -1213,7 +1332,7 @@ export function ChatContent({
       )}
 
       {/* Quick Actions - only shown when NO mode from URL */}
-      {!showHistory && messages.length === 0 && !isLoading && !selectedAction && !mode && (
+      {!showHistory && !showNewChatMenu && !startingNewChat && messages.length === 0 && !isLoading && !selectedAction && !mode && (
         <div className="flex-1 flex flex-col items-center justify-center px-4 pb-20">
           <p className="text-center text-muted-foreground mb-6">
             What would you like to do?
@@ -1222,6 +1341,7 @@ export function ChatContent({
             <button
               onClick={() => {
                 setSelectedAction('create');
+                setCurrentMode('create');
                 // Update URL in background without causing navigation
                 const sessionParam = data.sessionId ? `?session=${data.sessionId}` : '';
                 window.history.replaceState({}, '', `/chat/create${sessionParam}`);
@@ -1242,6 +1362,7 @@ export function ChatContent({
             <button
               onClick={() => {
                 setSelectedAction('addCurrent');
+                setCurrentMode('create');
                 // Update URL in background without causing navigation
                 const sessionParam = data.sessionId ? `?session=${data.sessionId}` : '';
                 window.history.replaceState({}, '', `/chat/create${sessionParam}`);
@@ -1263,6 +1384,7 @@ export function ChatContent({
               <button
                 onClick={() => {
                   setSelectedAction('edit');
+                  setCurrentMode('edit');
                   // Update URL in background without causing navigation
                   const sessionParam = data.sessionId ? `?session=${data.sessionId}` : '';
                   window.history.replaceState({}, '', `/chat/edit${sessionParam}`);
@@ -1284,6 +1406,7 @@ export function ChatContent({
             <button
               onClick={() => {
                 setSelectedAction('ask');
+                setCurrentMode('ask');
                 // Update URL in background without causing navigation
                 const sessionParam = data.sessionId ? `?session=${data.sessionId}` : '';
                 window.history.replaceState({}, '', `/chat/ask${sessionParam}`);
@@ -1305,7 +1428,7 @@ export function ChatContent({
       )}
 
       {/* Action Card - shown when an action is selected OR mode is set from URL */}
-      {!showHistory && messages.length === 0 && !isLoading && (selectedAction || mode) && (
+      {!showHistory && !showNewChatMenu && !startingNewChat && messages.length === 0 && !isLoading && (selectedAction || mode) && (
         <div className="flex-1 flex flex-col items-center justify-center px-4 pb-32">
           <div className="w-full max-w-md bg-surface rounded-xl p-6 space-y-3">
             {(selectedAction === 'create' || mode === 'create') && (
@@ -1344,7 +1467,7 @@ export function ChatContent({
       )}
 
       {/* Messages */}
-      {!showHistory && (messages.length > 0 || isLoading) && (
+      {!showHistory && !showNewChatMenu && !startingNewChat && (messages.length > 0 || isLoading) && (
         <div ref={messagesContainerRef} className="flex-1 overflow-y-auto pb-32">
           <div className="px-4 py-4 space-y-3">
           {messages.map((message) => {
@@ -1553,38 +1676,53 @@ export function ChatContent({
                       }
                       
                       // Show approval buttons for any plan (user can revert to older versions)
+                      const isApprovingReplace = approvingPlan === `${message.id}-replace`;
+                      const isApprovingActivate = approvingPlan === `${message.id}-activate`;
+                      const isApproving = isApprovingReplace || isApprovingActivate;
+                      
                       return (
                         <div className="flex gap-2">
                           {activePlan ? (
                             <>
                               <button
                                 onClick={() => handleApprove(message.id, 'replace')}
+                                disabled={isApproving}
                                 className="flex-1 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-lg
-                                         hover:bg-primary/90 active:bg-primary/80 transition-colors"
+                                         hover:bg-primary/90 active:bg-primary/80 transition-colors
+                                         disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                               >
+                                {isApprovingReplace && <LoadingSpinner size="sm" />}
                                 Replace Current
                               </button>
                               <button
                                 onClick={() => handleApprove(message.id, 'activate')}
+                                disabled={isApproving}
                                 className="flex-1 px-4 py-2.5 bg-surface-elevated text-foreground text-sm font-medium rounded-lg
-                                         hover:bg-white/10 active:bg-white/5 transition-colors border border-border"
+                                         hover:bg-white/10 active:bg-white/5 transition-colors border border-border
+                                         disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                               >
+                                {isApprovingActivate && <LoadingSpinner size="sm" />}
                                 Save as New
                               </button>
                             </>
                           ) : (
                             <button
                               onClick={() => handleApprove(message.id, 'activate')}
+                              disabled={isApproving}
                               className="flex-1 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-lg
-                                       hover:bg-primary/90 active:bg-primary/80 transition-colors"
+                                       hover:bg-primary/90 active:bg-primary/80 transition-colors
+                                       disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                             >
+                              {isApprovingActivate && <LoadingSpinner size="sm" />}
                               Activate Plan
                             </button>
                           )}
                           <button
                             onClick={() => setInput("I'd like to make some changes...")}
+                            disabled={isApproving}
                             className="flex-1 px-4 py-2.5 bg-transparent text-muted-foreground text-sm font-medium rounded-lg
-                                     hover:bg-white/5 hover:text-foreground active:bg-white/10 transition-colors border border-border/50"
+                                     hover:bg-white/5 hover:text-foreground active:bg-white/10 transition-colors border border-border/50
+                                     disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             Request Changes
                           </button>
@@ -1783,14 +1921,16 @@ export function ChatContent({
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          <Button
-                            size="sm"
+                          <button
                             onClick={() => handleApproveAdjustments(adjId, message.id)}
-                            fullWidth
                             disabled={isApproving}
+                            className="w-full px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg
+                                     hover:bg-primary/90 active:bg-primary/80 transition-colors
+                                     disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                           >
+                            {isApproving && <LoadingSpinner size="sm" />}
                             {isApproving ? 'Applying...' : 'Approve All'}
-                          </Button>
+                          </button>
                           <Button
                             size="sm"
                             variant="secondary"
@@ -1840,7 +1980,7 @@ export function ChatContent({
       )}
 
       {/* Input - Fixed at bottom above nav */}
-      {!showHistory && (messages.length > 0 || isLoading || selectedAction || mode) && (
+      {!showHistory && !showNewChatMenu && !startingNewChat && (messages.length > 0 || isLoading || selectedAction || mode) && (
         <div className="fixed bottom-16 left-0 right-0 bg-background border-t border-border z-20">
           <div className="px-4 py-3">
           <div className="flex gap-3 items-end max-w-2xl mx-auto">

@@ -92,3 +92,32 @@ export function haptic(type: 'light' | 'medium' | 'heavy' = 'light'): void {
     navigator.vibrate(duration);
   }
 }
+
+/**
+ * Compare two dates by their UTC date components (year, month, day) only.
+ * This avoids timezone issues when comparing dates across different timezones.
+ * 
+ * @param date1 First date to compare
+ * @param date2 Second date to compare
+ * @returns true if the dates represent the same day in UTC
+ */
+export function isSameUTCDate(date1: Date, date2: Date): boolean {
+  return (
+    date1.getUTCFullYear() === date2.getUTCFullYear() &&
+    date1.getUTCMonth() === date2.getUTCMonth() &&
+    date1.getUTCDate() === date2.getUTCDate()
+  );
+}
+
+/**
+ * Get a UTC date string in YYYY-MM-DD format from a Date object.
+ * 
+ * @param date The date to format
+ * @returns Date string in YYYY-MM-DD format
+ */
+export function getUTCDateString(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}

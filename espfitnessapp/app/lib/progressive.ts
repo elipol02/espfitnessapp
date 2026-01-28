@@ -415,9 +415,14 @@ export async function applyAdjustments(
 
   // Use transaction for atomicity and better performance
   await prisma.$transaction(async (tx: any) => {
+    // Collect all exercises to update for bulk operations
+    const exerciseUpdates: Array<{ id: string; suggestion: AdjustmentSuggestion }> = [];
+    const workoutsToGenerate: Array<{ id: string }> = [];
+
+    // First pass: identify what needs to be updated
     for (const workout of futureWorkouts) {
       if (workout.isGenerated && workout.exercises.length > 0) {
-        console.log(`Updating workout ${workout.id} (scheduled ${workout.scheduledDate?.toISOString()}) with suggestions`);
+        console.log(`Preparing updates for workout ${workout.id} (scheduled ${workout.scheduledDate?.toISOString()})`);
         
         for (const suggestion of suggestions) {
           const exercise = workout.exercises.find(
@@ -425,34 +430,8 @@ export async function applyAdjustments(
           );
 
           if (exercise) {
-            console.log(`  - Updating exercise "${exercise.name}": ${exercise.sets}×${exercise.reps} @ ${exercise.weightValue} lbs → ${suggestion.nextSets}×${suggestion.nextReps} @ ${suggestion.nextWeight} lbs`);
-            
-            // Build update data object with only defined fields
-            const updateData: any = {
-              sets: suggestion.nextSets,
-              reps: suggestion.nextReps,
-              weightValue: suggestion.nextWeight,
-              weightType: 'ABSOLUTE',
-            };
-            
-            if (suggestion.nextDuration !== undefined) {
-              updateData.duration = suggestion.nextDuration;
-            }
-            if (suggestion.nextDistance !== undefined) {
-              updateData.distance = suggestion.nextDistance;
-            }
-            if (suggestion.nextTimeCap !== undefined) {
-              updateData.timeCap = suggestion.nextTimeCap;
-            }
-            if (suggestion.nextIntervals !== undefined) {
-              updateData.intervals = suggestion.nextIntervals;
-            }
-            
-            // Update within transaction
-            await tx.exercise.update({
-              where: { id: exercise.id },
-              data: updateData,
-            });
+            console.log(`  - Will update exercise "${exercise.name}": ${exercise.sets}×${exercise.reps} @ ${exercise.weightValue} lbs → ${suggestion.nextSets}×${suggestion.nextReps} @ ${suggestion.nextWeight} lbs`);
+            exerciseUpdates.push({ id: exercise.id, suggestion });
           } else {
             console.log(`  - Warning: Exercise "${suggestion.name}" not found in workout. Available exercises:`, workout.exercises.map((e: { name: string }) => e.name));
           }
@@ -460,16 +439,57 @@ export async function applyAdjustments(
         
         updatedWorkoutIds.push(workout.id);
       } else {
-        // Generate the workout with the suggestions
-        console.log(`Generating workout ${workout.id} with suggestions`);
-        await generateWorkoutExercises(
-          workout.id,
-          workoutType,
-          planId,
-          suggestions
-        );
+        // Mark for generation
+        console.log(`Will generate workout ${workout.id} with suggestions`);
+        workoutsToGenerate.push({ id: workout.id });
         updatedWorkoutIds.push(workout.id);
       }
+    }
+
+    // Bulk update all exercises using Prisma transaction for efficiency
+    if (exerciseUpdates.length > 0) {
+      console.log(`Performing bulk update of ${exerciseUpdates.length} exercises in transaction`);
+      
+      // Create update operations for all exercises
+      const updateOperations = exerciseUpdates.map(({ id, suggestion }) => {
+        const updateData: any = {
+          sets: suggestion.nextSets,
+          reps: suggestion.nextReps,
+          weightValue: suggestion.nextWeight,
+          weightType: 'ABSOLUTE',
+        };
+        
+        if (suggestion.nextDuration !== undefined) {
+          updateData.duration = suggestion.nextDuration;
+        }
+        if (suggestion.nextDistance !== undefined) {
+          updateData.distance = suggestion.nextDistance;
+        }
+        if (suggestion.nextTimeCap !== undefined) {
+          updateData.timeCap = suggestion.nextTimeCap;
+        }
+        if (suggestion.nextIntervals !== undefined) {
+          updateData.intervals = suggestion.nextIntervals;
+        }
+        
+        return tx.exercise.update({
+          where: { id },
+          data: updateData,
+        });
+      });
+      
+      // Execute all updates in parallel within the transaction
+      await Promise.all(updateOperations);
+    }
+
+    // Generate workouts that need generation
+    for (const workout of workoutsToGenerate) {
+      await generateWorkoutExercises(
+        workout.id,
+        workoutType,
+        planId,
+        suggestions
+      );
     }
   });
   

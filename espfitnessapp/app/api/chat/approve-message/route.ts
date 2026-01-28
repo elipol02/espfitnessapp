@@ -46,28 +46,40 @@ export async function POST(request: NextRequest) {
 
     // Handle plan approval
     if (messageMetadata?.type === 'plan_preview') {
-      // Find all other messages with plan_preview and mark them as not approved
-      const sessionMessages = await prisma.chatMessage.findMany({
+      // Find all other plan_preview messages to unapprove (bulk query)
+      const otherPlanMessages = await prisma.chatMessage.findMany({
         where: {
           sessionId: message.sessionId,
           userId: session.user.id,
           id: { not: messageId },
         },
+        select: {
+          id: true,
+          metadata: true,
+        },
       });
 
-      for (const msg of sessionMessages) {
-        const metadata = msg.metadata as { type?: string; approved?: boolean } | null;
-        if (metadata?.type === 'plan_preview') {
-          await prisma.chatMessage.update({
-            where: { id: msg.id },
-            data: {
-              metadata: {
-                ...metadata,
-                approved: false,
+      // Filter for plan_preview messages and bulk update them
+      const planPreviewMessages = otherPlanMessages.filter((msg) => {
+        const metadata = msg.metadata as { type?: string } | null;
+        return metadata?.type === 'plan_preview';
+      });
+
+      // Update all plan_preview messages in a transaction for efficiency
+      if (planPreviewMessages.length > 0) {
+        await prisma.$transaction(
+          planPreviewMessages.map((msg) =>
+            prisma.chatMessage.update({
+              where: { id: msg.id },
+              data: {
+                metadata: {
+                  ...(msg.metadata as object || {}),
+                  approved: false,
+                },
               },
-            },
-          });
-        }
+            })
+          )
+        );
       }
 
       return NextResponse.json({ success: true });
@@ -88,28 +100,40 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // Find all other messages with the same adjustmentId and mark them as not approved
-      const sessionMessages = await prisma.chatMessage.findMany({
+      // Find all other messages with the same adjustmentId
+      const otherAdjustmentMessages = await prisma.chatMessage.findMany({
         where: {
           sessionId: message.sessionId,
           userId: session.user.id,
           id: { not: messageId },
         },
+        select: {
+          id: true,
+          metadata: true,
+        },
       });
 
-      for (const msg of sessionMessages) {
-        const metadata = msg.metadata as { adjustmentId?: string; approved?: boolean } | null;
-        if (metadata?.adjustmentId === adjustmentId) {
-          await prisma.chatMessage.update({
-            where: { id: msg.id },
-            data: {
-              metadata: {
-                ...metadata,
-                approved: false,
+      // Filter for messages with the same adjustmentId and bulk update them
+      const adjustmentMessages = otherAdjustmentMessages.filter((msg) => {
+        const metadata = msg.metadata as { adjustmentId?: string } | null;
+        return metadata?.adjustmentId === adjustmentId;
+      });
+
+      // Update all adjustment messages in a transaction for efficiency
+      if (adjustmentMessages.length > 0) {
+        await prisma.$transaction(
+          adjustmentMessages.map((msg) =>
+            prisma.chatMessage.update({
+              where: { id: msg.id },
+              data: {
+                metadata: {
+                  ...(msg.metadata as object || {}),
+                  approved: false,
+                },
               },
-            },
-          });
-        }
+            })
+          )
+        );
       }
 
       return NextResponse.json({ success: true });

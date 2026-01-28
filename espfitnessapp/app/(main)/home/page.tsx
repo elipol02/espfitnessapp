@@ -1,5 +1,6 @@
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
+import { getUTCDateString } from '@/app/lib/utils';
 import { HomeContent } from './HomeContent';
 import { redirect } from 'next/navigation';
 
@@ -139,26 +140,19 @@ async function getHomeData(userId: string) {
     // Calculate the date for this day of the week
     const dayDate = new Date(startOfWeek);
     dayDate.setDate(startOfWeek.getDate() + index);
+    const dayDateStr = getUTCDateString(dayDate);
     
     // Find the workout scheduled for this specific date
     const workoutDay = activePlan?.workoutDays.find((d: any) => {
       if (!d.scheduledDate) return false;
-      const scheduledDate = new Date(d.scheduledDate);
-      return (
-        scheduledDate.getFullYear() === dayDate.getFullYear() &&
-        scheduledDate.getMonth() === dayDate.getMonth() &&
-        scheduledDate.getDate() === dayDate.getDate()
-      );
+      const scheduledDateStr = getUTCDateString(new Date(d.scheduledDate));
+      return scheduledDateStr === dayDateStr;
     });
     
     // Find if there's a log for this workout day on this date
     const log = workoutDay ? weekLogs.find((l: { id: string; dayId: string; workoutDate: Date; status: string }) => {
-      const logDate = new Date(l.workoutDate);
-      const dateMatches =
-        logDate.getFullYear() === dayDate.getFullYear() &&
-        logDate.getMonth() === dayDate.getMonth() &&
-        logDate.getDate() === dayDate.getDate();
-      return dateMatches && l.dayId === workoutDay.id;
+      const logDateStr = getUTCDateString(new Date(l.workoutDate));
+      return logDateStr === dayDateStr && l.dayId === workoutDay.id;
     }) : null;
     
     if (workoutDay) {
@@ -231,13 +225,9 @@ async function getHomeData(userId: string) {
         // Check if there's a completed log for this workout day on this date
         const hasCompletedLog = allCompletedLogs.some((log: { dayId: string; workoutDate: Date }) => {
           const logDate = new Date(log.workoutDate);
-          logDate.setHours(0, 0, 0, 0);
-          return (
-            log.dayId === workoutDay.id &&
-            logDate.getFullYear() === scheduledDate.getFullYear() &&
-            logDate.getMonth() === scheduledDate.getMonth() &&
-            logDate.getDate() === scheduledDate.getDate()
-          );
+          // Use UTC date strings to avoid timezone issues
+          return log.dayId === workoutDay.id && 
+                 getUTCDateString(logDate) === getUTCDateString(scheduledDate);
         });
 
         if (!hasCompletedLog) {

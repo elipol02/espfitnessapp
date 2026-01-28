@@ -1,5 +1,6 @@
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
+import { getUTCDateString } from '@/app/lib/utils';
 import { redirect } from 'next/navigation';
 import { LiveWorkoutContent } from './LiveWorkoutContent';
 
@@ -145,13 +146,11 @@ async function getWorkoutData(
 
     // Check if the plan has started
     if (workoutDay.plan.startDate) {
-      const startDate = new Date(workoutDay.plan.startDate);
-      startDate.setHours(0, 0, 0, 0);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      const startDateStr = getUTCDateString(new Date(workoutDay.plan.startDate));
+      const todayStr = getUTCDateString(new Date());
       
-      if (today < startDate) {
-        console.error('Plan has not started yet:', startDate);
+      if (todayStr < startDateStr) {
+        console.error('Plan has not started yet:', startDateStr);
         return null; // Plan hasn't started yet
       }
     }
@@ -164,42 +163,32 @@ async function getWorkoutData(
 
     // Check if the workout is scheduled for a future date
     // Only allow starting workouts for today or past dates (unless in preview mode)
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const targetDateOnly = new Date(targetDate);
-    targetDateOnly.setHours(0, 0, 0, 0);
+    const todayStr = getUTCDateString(new Date());
+    const targetDateStr = getUTCDateString(targetDate);
     
     // Prevent starting workouts for future dates (unless in preview mode)
-    if (!isPreview && targetDateOnly > today) {
-      console.error('Cannot start workout for future date:', targetDateOnly);
+    if (!isPreview && targetDateStr > todayStr) {
+      console.error('Cannot start workout for future date:', targetDateStr);
       return null; // Cannot start future workouts
     }
 
     // Also check if the workout day itself is scheduled for a future date
     if (!isPreview && workoutDay.scheduledDate) {
-      const scheduledDate = new Date(workoutDay.scheduledDate);
-      scheduledDate.setHours(0, 0, 0, 0);
+      const scheduledDateStr = getUTCDateString(new Date(workoutDay.scheduledDate));
       
-      if (scheduledDate > today) {
-        console.error('Cannot start workout scheduled for future date:', scheduledDate);
+      if (scheduledDateStr > todayStr) {
+        console.error('Cannot start workout scheduled for future date:', scheduledDateStr);
         return null; // Cannot start future workouts
       }
     }
 
-    // Check if there's already an in-progress workout for this day and date
-    // (targetDateOnly was already set above)
-    const nextDay = new Date(targetDateOnly);
-    nextDay.setDate(nextDay.getDate() + 1);
-
-    const existingWorkout = await prisma.workoutLog.findFirst({
+    // Check if there's already ANY workout for this day and date
+    // This prevents creating duplicates when starting from different places
+    // Query by exact date match using UTC date string
+    const allWorkouts = await prisma.workoutLog.findMany({
       where: {
         userId,
         dayId,
-        status: 'in_progress',
-        workoutDate: {
-          gte: targetDateOnly,
-          lt: nextDay,
-        },
       },
       include: {
         day: {
@@ -213,16 +202,60 @@ async function getWorkoutData(
       },
     });
 
-    // If there's an existing in-progress workout for this date, resume it
+    // Find if there's a workout for this specific date
+    const existingWorkout = allWorkouts.find((log) => {
+      return getUTCDateString(new Date(log.workoutDate)) === targetDateStr;
+    });
+
+    // If there's an existing workout for this date, return it (regardless of status)
     if (existingWorkout) {
+      // Check if analysis has been done for completed workouts
+      let pendingAdjustment = existingWorkout.status === 'completed' 
+        ? await prisma.pendingAdjustment.findFirst({
+            where: {
+              workoutLogId: existingWorkout.id,
+              userId,
+            },
+            select: { 
+              id: true,
+              suggestions: true,
+            },
+          })
+        : null;
+
+      // Check if there's a chat message with this adjustment
+      let chatSessionId: string | null = null;
+      if (pendingAdjustment?.id) {
+        const chatMessage = await prisma.chatMessage.findFirst({
+          where: {
+            userId,
+            metadata: {
+              path: ['adjustmentId'],
+              equals: pendingAdjustment.id,
+            },
+          },
+          select: {
+            sessionId: true,
+          },
+          orderBy: {
+            createdAt: 'desc',
+          },
+        });
+        chatSessionId = chatMessage?.sessionId || null;
+      }
+
+      const hasAnalysis = pendingAdjustment?.suggestions 
+        ? Array.isArray(pendingAdjustment.suggestions) && pendingAdjustment.suggestions.length > 0
+        : false;
+
       return {
         workoutLog: existingWorkout,
         workoutDay: existingWorkout.day,
         exercises: existingWorkout.day.exercises,
         existingLogs: existingWorkout.exerciseLogs,
-        pendingAdjustmentId: null,
-        hasAnalysis: false,
-        chatSessionId: null,
+        pendingAdjustmentId: pendingAdjustment?.id || null,
+        hasAnalysis,
+        chatSessionId,
         isPreview: false,
         workoutDate: existingWorkout.workoutDate,
       };

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
+import { getUTCDateString } from '@/app/lib/utils';
 import { z } from 'zod';
 
 const finishSchema = z.object({
@@ -64,12 +65,10 @@ export async function POST(request: NextRequest) {
 
     // Check if the plan has started
     if (workoutLog.plan.startDate) {
-      const startDate = new Date(workoutLog.plan.startDate);
-      startDate.setHours(0, 0, 0, 0);
-      const workoutDate = new Date(workoutLog.workoutDate);
-      workoutDate.setHours(0, 0, 0, 0);
+      const startDateStr = getUTCDateString(new Date(workoutLog.plan.startDate));
+      const workoutDateStr = getUTCDateString(new Date(workoutLog.workoutDate));
       
-      if (workoutDate < startDate) {
+      if (workoutDateStr < startDateStr) {
         return NextResponse.json(
           { success: false, error: 'Cannot complete workout before plan start date' },
           { status: 400 }

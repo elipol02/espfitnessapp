@@ -169,13 +169,13 @@ export async function POST(request: NextRequest) {
 
         console.log(`Creating ${workoutDaysToCreate.length} workout days in bulk`);
 
-        // 5. Create all workout days and collect their IDs
-        const createdDays = [];
-        for (const dayToCreate of workoutDaysToCreate) {
-          const { tempId, ...dayData } = dayToCreate;
-          const createdDay = await tx.workoutDay.create({ data: dayData });
-          createdDays.push({ id: createdDay.id, tempId });
-        }
+        // 5. Create all workout days in parallel within the transaction
+        const createdDays = await Promise.all(
+          workoutDaysToCreate.map(async ({ tempId, ...dayData }) => {
+            const createdDay = await tx.workoutDay.create({ data: dayData });
+            return { id: createdDay.id, tempId };
+          })
+        );
 
         // 6. Prepare all exercises for bulk insert
         const allExercises: any[] = [];
@@ -273,13 +273,13 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // 4. Create all workout days
-        const createdDays = [];
-        for (const dayToCreate of workoutDaysToCreate) {
-          const { tempId, ...dayData } = dayToCreate;
-          const createdDay = await tx.workoutDay.create({ data: dayData });
-          createdDays.push({ id: createdDay.id, tempId });
-        }
+        // 4. Create all workout days in parallel within the transaction
+        const createdDays = await Promise.all(
+          workoutDaysToCreate.map(async ({ tempId, ...dayData }) => {
+            const createdDay = await tx.workoutDay.create({ data: dayData });
+            return { id: createdDay.id, tempId };
+          })
+        );
 
         // 5. Prepare all exercises for bulk insert
         const allExercises: any[] = [];

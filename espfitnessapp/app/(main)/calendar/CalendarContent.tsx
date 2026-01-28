@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
+import { getUTCDateString } from '@/app/lib/utils';
 
 interface CalendarData {
   workoutDays: {
@@ -70,18 +71,14 @@ export function CalendarContent({ data }: { data: CalendarData }) {
 
   // Get workout for a specific date by matching scheduledDate
   const getWorkoutForDate = (date: Date) => {
+    const dateStr = getUTCDateString(date);
+    
     // First try to find by scheduledDate
     const workout = workoutDays.find((d) => {
       if (!d.scheduledDate) return false;
-      // Parse the ISO date as local date to avoid timezone issues
-      const scheduledDateOnly = d.scheduledDate.split('T')[0]; // Get YYYY-MM-DD part
-      const [year, month, day] = scheduledDateOnly.split('-').map(Number);
-      const scheduled = new Date(year, month - 1, day);
-      return (
-        scheduled.getFullYear() === date.getFullYear() &&
-        scheduled.getMonth() === date.getMonth() &&
-        scheduled.getDate() === date.getDate()
-      );
+      // Compare UTC date strings to avoid timezone issues
+      const scheduledDateStr = d.scheduledDate.split('T')[0]; // Get YYYY-MM-DD part
+      return scheduledDateStr === dateStr;
     });
     
     // If no scheduled workout found, fall back to day of week matching (for legacy plans)
@@ -94,12 +91,11 @@ export function CalendarContent({ data }: { data: CalendarData }) {
 
   // Check if a date has a workout log that matches the scheduled workout for that day
   const getLogForDate = (date: Date, dayId?: string) => {
+    const dateStr = getUTCDateString(date);
+    
     return workoutLogs.find((log) => {
-      const logDate = new Date(log.workoutDate);
-      const dateMatches = 
-        logDate.getFullYear() === date.getFullYear() &&
-        logDate.getMonth() === date.getMonth() &&
-        logDate.getDate() === date.getDate();
+      const logDateStr = log.workoutDate.split('T')[0]; // Get YYYY-MM-DD part from ISO string
+      const dateMatches = logDateStr === dateStr;
       
       // Must match both the date AND the scheduled workout (dayId)
       return dateMatches && (!dayId || log.dayId === dayId);

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
-import { Target, ChevronRight, CalendarX, CheckCircle2, Calendar } from 'lucide-react';
+import { Target, ChevronRight, CalendarX, CheckCircle2, Calendar, Check } from 'lucide-react';
 import { getMotivationalMessage, calculateProgressPercentage, calculateCompletionRate } from '@/app/lib/motivationalMessages';
 
 interface WorkoutData {
@@ -18,6 +18,9 @@ interface WorkoutData {
     reps: number;
     restTime: number;
     exerciseType: string;
+    duration: number | null;
+    weightValue: number;
+    weightType: string;
   }[];
 }
 
@@ -49,18 +52,21 @@ interface HomeData {
   currentLog: WorkoutLogData | null;
   previousLog: WorkoutLogData | null;
   nextLog: WorkoutLogData | null;
-  weekPreview: {
-    id: string | null;
-    dayNumber: number;
+  allWorkoutDays: {
+    id: string;
     dayName: string;
+    dayNumber: number;
     workoutType: string;
     workoutColor: string;
     exerciseCount: number;
     isGenerated: boolean;
-    logId: string | null;
-    logStatus: string | null;
     scheduledDate: string | null;
-    calculatedDate: string;
+  }[];
+  recentLogs: {
+    id: string;
+    dayId: string;
+    workoutDate: string;
+    status: string;
   }[];
   daysMissed: number;
   completedWorkouts: number;
@@ -69,7 +75,7 @@ interface HomeData {
 }
 
 export function HomeContent({ data }: { data: HomeData }) {
-  const { user, userStats, activePlan, currentWorkout, previousWorkout, nextWorkout, currentLog, previousLog, nextLog, weekPreview, daysMissed, completedWorkouts, weeksRemaining } = data;
+  const { user, userStats, activePlan, currentWorkout, previousWorkout, nextWorkout, currentLog, previousLog, nextLog, allWorkoutDays, recentLogs, daysMissed, completedWorkouts, weeksRemaining } = data;
 
   const today = new Date();
   const todayISO = today.toISOString();
@@ -79,10 +85,69 @@ export function HomeContent({ data }: { data: HomeData }) {
     day: 'numeric',
   });
 
+  // Build week preview based on CLIENT's local timezone
+  const clientToday = new Date();
+  clientToday.setHours(0, 0, 0, 0);
+  
+  const startOfWeek = new Date(clientToday);
+  startOfWeek.setDate(clientToday.getDate() - clientToday.getDay());
+  
+  const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const weekPreview = daysOfWeek.map((dayName, index) => {
+    const dayDate = new Date(startOfWeek);
+    dayDate.setDate(startOfWeek.getDate() + index);
+    const dayDateStr = dayDate.toISOString().split('T')[0]; // YYYY-MM-DD in local timezone
+    
+    // Find the workout scheduled for this specific date
+    const workoutDay = allWorkoutDays.find((d) => {
+      if (!d.scheduledDate) return false;
+      const scheduledDate = new Date(d.scheduledDate);
+      const scheduledDateStr = scheduledDate.toISOString().split('T')[0];
+      return scheduledDateStr === dayDateStr;
+    });
+    
+    // Find if there's a log for this workout day on this date
+    const log = workoutDay ? recentLogs.find((l) => {
+      const logDate = new Date(l.workoutDate);
+      const logDateStr = logDate.toISOString().split('T')[0];
+      return logDateStr === dayDateStr && l.dayId === workoutDay.id;
+    }) : null;
+    
+    if (workoutDay) {
+      return {
+        id: workoutDay.id,
+        dayNumber: index,
+        dayName: workoutDay.dayName,
+        workoutType: workoutDay.workoutType,
+        workoutColor: workoutDay.workoutColor,
+        exerciseCount: workoutDay.exerciseCount,
+        isGenerated: workoutDay.isGenerated,
+        logId: log?.id || null,
+        logStatus: log?.status || null,
+        scheduledDate: workoutDay.scheduledDate,
+        calculatedDate: dayDate.toISOString(),
+      };
+    } else {
+      return {
+        id: null,
+        dayNumber: index,
+        dayName: dayName,
+        workoutType: 'rest',
+        workoutColor: '#404040',
+        exerciseCount: 0,
+        isGenerated: false,
+        logId: null,
+        logStatus: null,
+        scheduledDate: null,
+        calculatedDate: dayDate.toISOString(),
+      };
+    }
+  });
+
   const greeting = getGreeting();
   const userName = user?.name?.split(' ')[0] || 'there';
 
-  // Calculate motivational message using LOCAL date
+  // Calculate motivational message using LOCAL date and client-side week preview
   let motivationalMessage = '';
   if (activePlan && activePlan.startDate) {
     const progressPercentage = calculateProgressPercentage(activePlan.startDate, activePlan.durationWeeks);
@@ -241,11 +306,18 @@ export function HomeContent({ data }: { data: HomeData }) {
                   {todayWorkout.workoutType.charAt(0).toUpperCase() + todayWorkout.workoutType.slice(1)}
                 </h2>
               </div>
+              {todayLog?.status === 'completed' && (
+                <div className="flex items-center gap-2 text-success">
+                  <span className="text-sm font-medium">Completed</span>
+                  <div className="w-6 h-6 rounded-full bg-success flex items-center justify-center">
+                    <Check className="w-4 h-4 text-white" />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-4 text-sm text-muted-foreground">
               <span>{todayWorkout.exercises.length} exercises</span>
-              <span>~{calculateWorkoutDuration(todayWorkout.exercises)} min</span>
             </div>
 
             {/* Exercise List */}
@@ -313,7 +385,9 @@ export function HomeContent({ data }: { data: HomeData }) {
 
             <div className="flex gap-2 overflow-x-auto pb-2 pt-1">
               {weekPreview.map((day, index) => {
-                const isToday = index === new Date().getDay();
+                // Since we built the week preview using client's local timezone, 
+                // we can directly check if this is today's day of week
+                const isToday = index === clientToday.getDay();
                 const dayAbbr = day.dayName.slice(0, 3);
                 const hasWorkout = day.id && day.workoutType !== 'rest' && day.exerciseCount > 0;
                 const isCompleted = day.logStatus === 'completed';
@@ -466,28 +540,34 @@ function getGreeting(): string {
   return 'Good evening';
 }
 
-function calculateWorkoutDuration(exercises: { sets: number; reps: number; restTime: number; exerciseType: string }[]): number {
-  let totalMinutes = 0;
-  
-  for (const exercise of exercises) {
-    if (exercise.exerciseType === 'cardio_time' || exercise.exerciseType === 'mobility_time') {
-      // For time-based exercises, reps = duration in minutes
-      totalMinutes += exercise.reps;
+function formatExerciseDisplay(exercise: { sets: number; reps: number; exerciseType: string; duration: number | null; weightValue: number; weightType: string }): string {
+  if (exercise.exerciseType === 'cardio_time' || exercise.exerciseType === 'mobility_time') {
+    // Duration is stored in minutes, fall back to reps if duration is not set
+    // If duration is 0 or null/undefined, use reps; if that's also 0 or 1, show as time-based exercise
+    let minutes: number;
+    if (exercise.duration !== null && exercise.duration !== undefined && exercise.duration > 0) {
+      minutes = exercise.duration;
+    } else if (exercise.reps > 1) {
+      minutes = exercise.reps;
     } else {
-      // For strength exercises: estimate set time + rest time
-      const estimatedSetTime = 30; // seconds per set (average time to complete reps)
-      const totalSetTime = (estimatedSetTime * exercise.sets) / 60; // convert to minutes
-      const totalRestTime = (exercise.restTime * (exercise.sets - 1)) / 60; // rest between sets
-      totalMinutes += totalSetTime + totalRestTime;
+      // If both duration and reps are not set properly, this exercise needs fixing
+      return 'Time-based';
+    }
+    return `${minutes} min`;
+  }
+  
+  // For strength exercises, show sets×reps @ weight
+  let display = `${exercise.sets}×${exercise.reps}`;
+  
+  if (exercise.weightValue > 0) {
+    if (exercise.weightType === 'BW') {
+      display += ` @ ${Math.round(exercise.weightValue * 100)}% BW`;
+    } else if (exercise.weightType === '1RM') {
+      display += ` @ ${Math.round(exercise.weightValue * 100)}% 1RM`;
+    } else {
+      display += ` @ ${exercise.weightValue} lbs`;
     }
   }
   
-  return Math.round(totalMinutes);
-}
-
-function formatExerciseDisplay(exercise: { sets: number; reps: number; exerciseType: string }): string {
-  if (exercise.exerciseType === 'cardio_time' || exercise.exerciseType === 'mobility_time') {
-    return `${exercise.reps} min`;
-  }
-  return `${exercise.sets}×${exercise.reps}`;
+  return display;
 }

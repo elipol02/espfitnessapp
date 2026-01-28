@@ -109,21 +109,21 @@ async function getHomeData(userId: string) {
     getWorkoutLog(nextWorkout, tomorrow),
   ]);
 
-  // Get workout logs for the current week
-  const startOfWeek = new Date(today);
-  startOfWeek.setDate(today.getDate() - today.getDay());
-  startOfWeek.setHours(0, 0, 0, 0);
+  // Get workout logs for current week plus one week before and after
+  const oneWeekAgo = new Date(today);
+  oneWeekAgo.setDate(today.getDate() - 7);
+  oneWeekAgo.setHours(0, 0, 0, 0);
   
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 7);
+  const oneWeekAhead = new Date(today);
+  oneWeekAhead.setDate(today.getDate() + 7);
   
-  const weekLogs = activePlan ? await prisma.workoutLog.findMany({
+  const recentLogs = activePlan ? await prisma.workoutLog.findMany({
     where: {
       userId,
       planId: activePlan.id,
       workoutDate: {
-        gte: startOfWeek,
-        lt: endOfWeek,
+        gte: oneWeekAgo,
+        lt: oneWeekAhead,
       },
     },
     select: {
@@ -134,57 +134,17 @@ async function getHomeData(userId: string) {
     },
   }) : [];
 
-  // Generate full 7-day week preview for current week based on scheduledDate
-  const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const weekPreview = daysOfWeek.map((dayName, index) => {
-    // Calculate the date for this day of the week
-    const dayDate = new Date(startOfWeek);
-    dayDate.setDate(startOfWeek.getDate() + index);
-    const dayDateStr = getUTCDateString(dayDate);
-    
-    // Find the workout scheduled for this specific date
-    const workoutDay = activePlan?.workoutDays.find((d: any) => {
-      if (!d.scheduledDate) return false;
-      const scheduledDateStr = getUTCDateString(new Date(d.scheduledDate));
-      return scheduledDateStr === dayDateStr;
-    });
-    
-    // Find if there's a log for this workout day on this date
-    const log = workoutDay ? weekLogs.find((l: { id: string; dayId: string; workoutDate: Date; status: string }) => {
-      const logDateStr = getUTCDateString(new Date(l.workoutDate));
-      return logDateStr === dayDateStr && l.dayId === workoutDay.id;
-    }) : null;
-    
-    if (workoutDay) {
-      return {
-        id: workoutDay.id,
-        dayNumber: index,
-        dayName: workoutDay.dayName,
-        workoutType: workoutDay.workoutType,
-        workoutColor: workoutDay.workoutColor,
-        exerciseCount: workoutDay.exercises.length,
-        isGenerated: (workoutDay as any).isGenerated,
-        logId: log?.id || null,
-        logStatus: log?.status || null,
-        scheduledDate: (workoutDay as any).scheduledDate?.toISOString() || null,
-        calculatedDate: dayDate.toISOString(),
-      };
-    } else {
-      return {
-        id: null,
-        dayNumber: index,
-        dayName: dayName,
-        workoutType: 'rest',
-        workoutColor: '#404040',
-        exerciseCount: 0,
-        isGenerated: false,
-        logId: null,
-        logStatus: null,
-        scheduledDate: null,
-        calculatedDate: dayDate.toISOString(),
-      };
-    }
-  });
+  // Send all workout days - client will build week preview based on its timezone
+  const allWorkoutDays = activePlan?.workoutDays.map((day: any) => ({
+    id: day.id,
+    dayName: day.dayName,
+    dayNumber: day.dayNumber,
+    workoutType: day.workoutType,
+    workoutColor: day.workoutColor,
+    exerciseCount: day.exercises.length,
+    isGenerated: day.isGenerated,
+    scheduledDate: day.scheduledDate?.toISOString() || null,
+  })) || [];
 
   // Calculate missed workout days and completed workouts
   let daysMissed = 0;
@@ -264,6 +224,9 @@ async function getHomeData(userId: string) {
         reps: e.reps,
         restTime: e.restTime,
         exerciseType: e.exerciseType,
+        duration: e.duration !== null && e.duration !== undefined ? e.duration : null,
+        weightValue: e.weightValue,
+        weightType: e.weightType,
       })),
     };
   };
@@ -302,7 +265,14 @@ async function getHomeData(userId: string) {
     currentLog: formatLog(currentLog),
     previousLog: formatLog(previousLog),
     nextLog: formatLog(nextLog),
-    weekPreview,
+    // Send all workout days and recent logs - client will build week preview based on its timezone
+    allWorkoutDays,
+    recentLogs: recentLogs.map((log: { id: string; dayId: string; workoutDate: Date; status: string }) => ({
+      id: log.id,
+      dayId: log.dayId,
+      workoutDate: log.workoutDate.toISOString(),
+      status: log.status,
+    })),
     daysMissed,
     completedWorkouts,
     weeksRemaining,

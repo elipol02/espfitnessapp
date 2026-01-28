@@ -26,11 +26,7 @@ export interface ExerciseWithPerformance {
     distance?: number; // Performed distance
   };
   history: PerformanceHistory[];
-  progression?: {
-    type: string;
-    increment: number;
-    frequency: string;
-  };
+  progression?: string;
   // Prescribed Time-based fields
   duration?: number;
   // Prescribed Distance-based fields
@@ -61,6 +57,8 @@ export interface AdjustmentSuggestion {
   nextWeight: number;
   nextSets: number;
   nextReps: number;
+  nextRestTime?: number;
+  nextProgression?: string; // e.g., "linear +5 lbs weekly", "add 1 rep each session"
   nextDuration?: number;
   nextDistance?: number;
   nextTimeCap?: number;
@@ -252,11 +250,7 @@ export async function buildExerciseData(
     const exercise = exerciseLog.exercise;
     const history = historyMap.get(exercise.name) || [];
 
-    const progression = exercise.progression as {
-      type: string;
-      increment: number;
-      frequency: string;
-    } | null;
+    const progression = exercise.progression as string | null;
 
     // Convert prescribed weight to absolute pounds
     let prescribedWeightInLbs = exercise.weightValue;
@@ -354,9 +348,9 @@ export async function generateWorkoutExercises(
       repsMin: templateExercise.repsMin || undefined,
       weightType: suggestion ? 'ABSOLUTE' : templateExercise.weightType,
       weightValue: suggestion?.nextWeight ?? templateExercise.weightValue,
-      restTime: templateExercise.restTime,
+      restTime: suggestion?.nextRestTime ?? templateExercise.restTime,
       exerciseType: templateExercise.exerciseType,
-      progression: templateExercise.progression || undefined,
+      progression: suggestion?.nextProgression ?? (templateExercise.progression || undefined),
       movementDetails: templateExercise.movementDetails || undefined,
       order: templateExercise.order,
       duration: suggestion?.nextDuration ?? (templateExercise.duration || undefined),
@@ -389,6 +383,21 @@ export async function applyAdjustments(
   currentDate: Date,
   suggestions: AdjustmentSuggestion[]
 ): Promise<{ success: boolean; updatedWorkoutIds?: string[]; error?: string }> {
+  // Find the FIRST (template) workout of this type - this is the baseline that future generations use
+  const templateWorkout = await prisma.workoutDay.findFirst({
+    where: {
+      planId,
+      workoutType,
+      isGenerated: true,
+    },
+    include: {
+      exercises: {
+        orderBy: { order: 'asc' },
+      },
+    },
+    orderBy: { scheduledDate: 'asc' }, // Get the FIRST one
+  });
+
   // Find ALL future occurrences of this workout type
   const futureWorkouts = await prisma.workoutDay.findMany({
     where: {
@@ -404,7 +413,7 @@ export async function applyAdjustments(
     orderBy: { scheduledDate: 'asc' },
   });
 
-  if (futureWorkouts.length === 0) {
+  if (futureWorkouts.length === 0 && !templateWorkout) {
     return {
       success: false,
       error: 'No future workouts found for this workout type',
@@ -419,8 +428,34 @@ export async function applyAdjustments(
     const exerciseUpdates: Array<{ id: string; suggestion: AdjustmentSuggestion }> = [];
     const workoutsToGenerate: Array<{ id: string }> = [];
 
-    // First pass: identify what needs to be updated
+    // FIRST: Update the template workout (the baseline for future generations)
+    if (templateWorkout && templateWorkout.exercises.length > 0) {
+      console.log(`Updating template workout ${templateWorkout.id} (scheduled ${templateWorkout.scheduledDate?.toISOString()})`);
+      
+      for (const suggestion of suggestions) {
+        const exercise = templateWorkout.exercises.find(
+          (e: { name: string }) => e.name.toLowerCase().trim() === suggestion.name.toLowerCase().trim()
+        );
+
+        if (exercise) {
+          console.log(`  - Template: Will update exercise "${exercise.name}": ${exercise.sets}×${exercise.reps} @ ${exercise.weightValue} lbs → ${suggestion.nextSets}×${suggestion.nextReps} @ ${suggestion.nextWeight} lbs`);
+          exerciseUpdates.push({ id: exercise.id, suggestion });
+        }
+      }
+      
+      // Only add to updated list if it's a future workout
+      if (templateWorkout.scheduledDate && templateWorkout.scheduledDate > currentDate) {
+        updatedWorkoutIds.push(templateWorkout.id);
+      }
+    }
+
+    // SECOND: Update all future workouts
     for (const workout of futureWorkouts) {
+      // Skip if this is the template workout (already processed)
+      if (templateWorkout && workout.id === templateWorkout.id) {
+        continue;
+      }
+
       if (workout.isGenerated && workout.exercises.length > 0) {
         console.log(`Preparing updates for workout ${workout.id} (scheduled ${workout.scheduledDate?.toISOString()})`);
         
@@ -459,6 +494,12 @@ export async function applyAdjustments(
           weightType: 'ABSOLUTE',
         };
         
+        if (suggestion.nextRestTime !== undefined) {
+          updateData.restTime = suggestion.nextRestTime;
+        }
+        if (suggestion.nextProgression !== undefined) {
+          updateData.progression = suggestion.nextProgression;
+        }
         if (suggestion.nextDuration !== undefined) {
           updateData.duration = suggestion.nextDuration;
         }
@@ -494,6 +535,9 @@ export async function applyAdjustments(
   });
   
   console.log(`Adjustments applied successfully to ${updatedWorkoutIds.length} future workouts`);
+  if (templateWorkout) {
+    console.log(`Template workout updated: ${templateWorkout.id} - this will be the new baseline for future workout generations`);
+  }
 
   return {
     success: true,

@@ -6,11 +6,7 @@ import { ChevronDown, ChevronRight, ArrowLeft, Check, MessageSquare, Calendar, X
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
 
-interface Progression {
-  type: string;
-  increment: number;
-  frequency: string;
-}
+type Progression = string; // e.g., "linear +5 lbs weekly"
 
 interface MovementDetails {
   description: string;
@@ -218,18 +214,11 @@ export function PlanViewerContent({ plan }: { plan: Plan }) {
   };
 
   const renderProgression = (prog: unknown) => {
-    if (!prog || typeof prog !== 'object') return null;
-    const p = prog as Progression;
-    if (!p.increment) return null;
-    
-    // If increment is less than 1, treat it as a percentage
-    const incrementDisplay = p.increment < 1 
-      ? `${(p.increment * 100).toFixed(1)}%`
-      : `${p.increment} lbs`;
+    if (!prog || typeof prog !== 'string') return null;
     
     return (
       <div className="p-2 bg-background rounded">
-        <p className="text-xs text-muted-foreground">Progression: <span className="text-foreground">+{incrementDisplay} {p.frequency}</span></p>
+        <p className="text-xs text-muted-foreground">Progression: <span className="text-foreground">{prog}</span></p>
       </div>
     );
   };

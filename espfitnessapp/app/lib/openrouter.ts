@@ -78,11 +78,7 @@ export interface WorkoutDayData {
     weightValue: number;
     restTime?: number;
     exerciseType?: string;
-    progression?: {
-      type: string;
-      increment: number;
-      frequency: string;
-    };
+    progression?: string;
     movementDetails?: {
       description: string;
       cues: string[];
@@ -279,6 +275,8 @@ Then, provide the suggestions in JSON format wrapped in triple backticks (the us
       "nextWeight": <number>,
       "nextSets": <number>,
       "nextReps": <number>,
+      "nextRestTime": <number or undefined>,  // Rest time in seconds (60-180s typical, adjust based on intensity)
+      "nextProgression": "<string or undefined>",  // e.g., "linear +5 lbs weekly", "add 1 rep each session", "wave loading"
       "nextDuration": <number or undefined>,  // For time-based exercises ONLY (in minutes)
       "nextDistance": <number or undefined>,  // For distance exercises ONLY (same as current)
       "nextTimeCap": <number or undefined>,   // For EMOM/AMRAP/Tabata ONLY (in seconds)
@@ -288,6 +286,21 @@ Then, provide the suggestions in JSON format wrapped in triple backticks (the us
   ]
 }
 \`\`\`
+
+REST TIME GUIDELINES:
+- Heavy compound lifts (squats, deadlifts, heavy presses): 120-180 seconds
+- Moderate strength work: 90-120 seconds
+- Hypertrophy/accessory work: 60-90 seconds
+- Light isolation/conditioning: 45-60 seconds
+- Increase rest if user is struggling to complete sets
+- Decrease rest if user is crushing the workout and needs more challenge
+
+PROGRESSION STRATEGY ADJUSTMENTS:
+- Keep existing progression unless there's a good reason to change it
+- Progression is a single descriptive string that explains the strategy
+- Examples: "linear +5 lbs weekly", "add 1 rep each session", "wave loading 5/3/1", "deload every 4th week"
+- Be specific about what progresses (weight, reps, sets, intensity) and how often
+- Consider changing progression if user is plateauing or showing signs of overtraining
 
 EXAMPLES:
 
@@ -461,11 +474,7 @@ STRENGTH (lifting for sets × reps) → "3×8 @ 135 lbs"
   "exerciseType": "strength",
   "sets": 3, "reps": 8,
   "weightType": "ABSOLUTE", "weightValue": 135, "restTime": 90,
-  "progression": {
-    "type": "linear",
-    "increment": 5,
-    "frequency": "weekly"
-  },
+  "progression": "linear +5 lbs weekly",
   "movementDetails": {
     "description": "Lie flat on bench, grip bar slightly wider than shoulders, lower to chest, press up explosively.",
     "cues": ["Retract shoulder blades", "Elbows 45 degrees", "Drive through feet", "Full lockout at top"],
@@ -479,11 +488,7 @@ KETTLEBELL EXAMPLE (use ABSOLUTE with actual KB weight):
   "exerciseType": "strength",
   "sets": 5, "reps": 10,
   "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 90,
-  "progression": {
-    "type": "linear",
-    "increment": 9,
-    "frequency": "every 2 weeks"
-  },
+  "progression": "linear +9 lbs every 2 weeks",
   "movementDetails": {
     "description": "Hinge at hips, swing KB between legs, explosively drive hips forward to shoulder height.",
     "cues": ["Hinge, don't squat", "Snap hips", "Keep core tight", "Neutral spine"],
@@ -516,11 +521,7 @@ DISTANCE (carries, sprints) → "3 × 40 meters"
   "sets": 3, "reps": 1,
   "distance": 40, "distanceUnit": "meters",
   "weightType": "BW", "weightValue": 0.5, "restTime": 60,
-  "progression": {
-    "type": "linear",
-    "increment": 0.05,
-    "frequency": "weekly"
-  },
+  "progression": "linear +5% weekly",
   "movementDetails": {
     "description": "Hold heavy weight in one hand, walk specified distance maintaining upright posture.",
     "cues": ["Stand tall", "Don't lean", "Squeeze the weight", "Brace core"],
@@ -550,11 +551,7 @@ AMRAP (single movement) → "AMRAP 10 min • 10 reps/round"
   "timeCap": 600,
   "reps": 10,
   "sets": 1, "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 0,
-  "progression": {
-    "type": "linear",
-    "increment": 2,
-    "frequency": "weekly"
-  },
+  "progression": "linear +2 lbs weekly",
   "movementDetails": {
     "description": "Complete as many rounds as possible of 10 KB swings in 10 minutes.",
     "cues": ["Maintain form", "Rest as needed", "Count your rounds"],
@@ -578,11 +575,7 @@ EMOM (with weight) → "EMOM 10 min • 10 reps/min @ 53 lbs"
   "timeCap": 600,
   "reps": 10,
   "sets": 1, "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 0,
-  "progression": {
-    "type": "linear",
-    "increment": 9,
-    "frequency": "every 2 weeks"
-  },
+  "progression": "linear +9 lbs every 2 weeks",
   "movementDetails": {
     "description": "Perform 10 kettlebell swings at the start of every minute for 10 minutes.",
     "cues": ["Start each minute fresh", "Maintain pace", "Use rest time wisely"],
@@ -596,11 +589,7 @@ TABATA → "Tabata 8 rounds • 8 reps/round"
   "exerciseType": "tabata",
   "timeCap": 240, "sets": 8, "reps": 8,
   "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0,
-  "progression": {
-    "type": "linear",
-    "increment": 1,
-    "frequency": "weekly"
-  },
+  "progression": "linear +1 rep weekly",
   "movementDetails": {
     "description": "Perform burpees for 20 seconds, rest 10 seconds. Repeat for 8 rounds.",
     "cues": ["Go hard for 20s", "Use 10s rest", "Track total reps"],
@@ -637,7 +626,7 @@ OUTPUT FORMAT:
 }
 
 REQUIRED FOR ALL EXERCISES:
-- progression: { "type": "linear", "increment": 5, "frequency": "weekly" }
+- progression: "linear +5 lbs weekly" (single string describing the progression strategy)
 - movementDetails: { "description": "...", "cues": ["...", "..."], "muscles": ["...", "..."] }`,
 };
 
@@ -979,11 +968,7 @@ You previously generated a plan in this conversation. If the user is asking to m
           setsCompleted: number;
           avgReps: number;
         }>;
-        progression?: {
-          type: string;
-          increment: number;
-          frequency: string;
-        };
+        progression?: string;
         // Prescribed values for non-strength exercises
         duration?: number;
         distance?: number;
@@ -1053,7 +1038,7 @@ ${ex.history.length > 0 ? ex.history.map((h: { date: Date; sets: number; reps: n
   `   ${h.date.toLocaleDateString()}: ${h.sets}×${h.reps} @ ${h.weight} lbs - Completed: ${h.setsCompleted} sets, avg ${h.avgReps} reps`
 ).join('\n') : '   No previous history'}
 
-🎯 PROGRESSION STRATEGY: ${ex.progression?.type || 'linear'} (${ex.progression?.increment || 5} lb increment per ${ex.progression?.frequency || 'session'})
+🎯 PROGRESSION STRATEGY: ${ex.progression || 'linear +5 lbs per session'}
 `;
     }).join('\n\n');
 
@@ -1361,11 +1346,7 @@ export const workoutPlanSchema = z.object({
           weightValue: z.number(),
           restTime: z.number().optional().default(90), // Rest time in seconds
           exerciseType: z.string().optional().default('strength'), // strength, cardio_time, mobility_time, distance, interval, amrap, emom, tabata, tempo
-          progression: z.object({
-            type: z.string(),
-            increment: z.number(),
-            frequency: z.string(),
-          }).optional(),
+          progression: z.string().optional(),
           movementDetails: z.object({
             description: z.string(),
             cues: z.array(z.string()),

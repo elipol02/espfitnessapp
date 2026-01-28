@@ -12,6 +12,8 @@ const applySchema = z.object({
       weight: z.number().optional(),
       sets: z.number().optional(),
       reps: z.number().optional(),
+      restTime: z.number().optional(),
+      progression: z.string().optional(),
     })
   ).optional(),
 });
@@ -83,6 +85,8 @@ export async function POST(request: NextRequest) {
           nextWeight: mod.weight ?? suggestion.nextWeight,
           nextSets: mod.sets ?? suggestion.nextSets,
           nextReps: mod.reps ?? suggestion.nextReps,
+          nextRestTime: mod.restTime ?? suggestion.nextRestTime,
+          nextProgression: mod.progression ?? suggestion.nextProgression,
         };
       }
       return suggestion;

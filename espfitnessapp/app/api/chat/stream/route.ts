@@ -596,6 +596,8 @@ export async function POST(request: NextRequest) {
               nextSets: number;
               nextReps: number;
               nextWeight: number;
+              nextRestTime?: number;  // Rest time in seconds
+              nextProgression?: string; // Progression type
               nextDuration?: number;  // For time-based exercises (in minutes)
               nextDistance?: number;  // For distance exercises
               nextTimeCap?: number;   // For EMOM/AMRAP/Tabata (in seconds)
@@ -663,6 +665,8 @@ export async function POST(request: NextRequest) {
                   currentWeightType: original.weightType,
                   currentSets: original.sets,
                   currentReps: original.reps,
+                  currentRestTime: original.restTime,
+                  currentProgression: original.progression,
                   currentDuration: original.duration,
                   currentDistance: original.distance,
                   currentDistanceUnit: original.distanceUnit,
@@ -679,6 +683,8 @@ export async function POST(request: NextRequest) {
                   nextWeightType: original.weightType,
                   nextSets: original.sets,
                   nextReps: original.reps,
+                  nextRestTime: original.restTime,
+                  nextProgression: original.progression,
                   nextDuration: original.duration,
                   nextDistance: original.distance,
                   nextTimeCap: original.timeCap,
@@ -697,6 +703,8 @@ export async function POST(request: NextRequest) {
                 currentWeightType: original.weightType,
                 currentSets: original.sets,
                 currentReps: original.reps,
+                currentRestTime: original.restTime,
+                currentProgression: original.progression,
                 currentDuration: original.duration,
                 currentDistance: original.distance,
                 currentDistanceUnit: original.distanceUnit,
@@ -713,6 +721,8 @@ export async function POST(request: NextRequest) {
                 nextWeightType: 'ABSOLUTE', // AI suggestions are always in absolute pounds
                 nextSets: suggestion.nextSets,
                 nextReps: suggestion.nextReps,
+                nextRestTime: suggestion.nextRestTime ?? original.restTime,
+                nextProgression: suggestion.nextProgression ?? original.progression,
                 nextDuration: suggestion.nextDuration,
                 nextDistance: suggestion.nextDistance,
                 nextTimeCap: suggestion.nextTimeCap,

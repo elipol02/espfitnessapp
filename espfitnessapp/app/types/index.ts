@@ -146,12 +146,7 @@ export interface Movement {
   weightType?: WeightType;
 }
 
-export interface ProgressionStrategy {
-  type: 'linear' | 'wave' | 'deload' | 'custom';
-  increment: number;
-  frequency: string;
-  notes?: string;
-}
+export type ProgressionStrategy = string; // e.g., "linear +5 lbs weekly", "add 1 rep each session", "wave loading", etc.
 
 export interface MovementDetails {
   description: string;
@@ -296,11 +291,7 @@ export interface StreamingWorkoutDay {
     weightValue: number;
     restTime?: number;
     exerciseType?: string;
-    progression?: {
-      type: string;
-      increment: number;
-      frequency: string;
-    };
+    progression?: string;
     movementDetails?: {
       description: string;
       cues: string[];
@@ -319,8 +310,12 @@ export interface StreamingExerciseAdjustment {
   currentWeight: number;
   currentSets: number;
   currentReps: number;
+  currentRestTime?: number;
+  currentProgression?: string;
   nextWeight: number;
   nextSets: number;
   nextReps: number;
+  nextRestTime?: number;
+  nextProgression?: string;
   reasoning: string;
 }

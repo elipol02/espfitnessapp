@@ -13,6 +13,73 @@ interface PendingAdjustmentData {
   status: string;
 }
 
+// Helper to migrate old progression object format to new string format
+function migrateProgression(prog: unknown): string | undefined {
+  if (!prog) return undefined;
+  if (typeof prog === 'string') return prog;
+  if (typeof prog === 'object' && prog !== null) {
+    const p = prog as { type?: string; increment?: number | string; frequency?: string };
+    if (p.type || p.increment || p.frequency) {
+      // Convert old object format to string
+      const type = p.type || 'linear';
+      let increment = '';
+      if (p.increment !== undefined) {
+        if (typeof p.increment === 'number') {
+          increment = p.increment < 1 
+            ? `+${(p.increment * 100).toFixed(0)}%`
+            : `+${p.increment} lbs`;
+        } else {
+          increment = String(p.increment);
+        }
+      }
+      const frequency = p.frequency || 'weekly';
+      return `${type} ${increment} ${frequency}`.trim();
+    }
+  }
+  return undefined;
+}
+
+// Helper to migrate metadata with progression fields
+function migrateMetadata(metadata: unknown): unknown {
+  if (!metadata || typeof metadata !== 'object') return metadata;
+  
+  const meta = metadata as any;
+  
+  // Migrate plan_preview metadata
+  if (meta.type === 'plan_preview' && meta.planData?.schedule) {
+    return {
+      ...meta,
+      planData: {
+        ...meta.planData,
+        schedule: meta.planData.schedule.map((day: any) => ({
+          ...day,
+          exercises: day.exercises?.map((ex: any) => ({
+            ...ex,
+            progression: migrateProgression(ex.progression),
+          })) || []
+        }))
+      }
+    };
+  }
+  
+  // Migrate adjustment_preview metadata
+  if (meta.type === 'adjustment_preview' && meta.adjustmentData?.exercises) {
+    return {
+      ...meta,
+      adjustmentData: {
+        ...meta.adjustmentData,
+        exercises: meta.adjustmentData.exercises.map((ex: any) => ({
+          ...ex,
+          currentProgression: migrateProgression(ex.currentProgression),
+          nextProgression: migrateProgression(ex.nextProgression),
+        }))
+      }
+    };
+  }
+  
+  return metadata;
+}
+
 async function getChatData(userId: string, sessionId?: string, forceNew: boolean = false, adjustmentId?: string) {
   let session: { id: string; userId: string; title: string | null; createdAt: Date; updatedAt: Date } | null;
   let messages: any[];
@@ -51,13 +118,20 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
           orderBy: { scheduledDate: 'asc' },
         });
 
+        // Migrate progression in suggestions
+        const migratedSuggestions = (adjustment.suggestions as any[]).map((sug: any) => ({
+          ...sug,
+          currentProgression: migrateProgression(sug.currentProgression),
+          nextProgression: migrateProgression(sug.nextProgression),
+        }));
+
         pendingAdjustment = {
           id: adjustment.id,
           workoutLogId: adjustment.workoutLogId,
           workoutType: workoutLog.day.workoutType,
           completedDate: workoutLog.workoutDate,
           nextWorkoutDate: nextWorkout?.scheduledDate || null,
-          suggestions: adjustment.suggestions as unknown[],
+          suggestions: migratedSuggestions,
           status: adjustment.status,
         };
       }
@@ -182,7 +256,7 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
       id: m.id,
       role: m.role as 'user' | 'assistant' | 'system',
       content: m.content,
-      metadata: m.metadata as Record<string, unknown> | null,
+      metadata: migrateMetadata(m.metadata) as Record<string, unknown> | null,
       createdAt: m.createdAt.toISOString(),
     })),
     activePlan,

@@ -192,7 +192,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
   }
 
   return (
-    <div className="px-5 pt-10 pb-28">
+    <div className="px-5 py-4">
       <div className="max-w-lg mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">

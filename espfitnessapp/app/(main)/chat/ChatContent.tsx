@@ -53,11 +53,7 @@ interface WorkoutDayData {
       weight?: number;
       weightType?: string;
     }>;
-    progression?: {
-      type: string;
-      increment: number;
-      frequency: string;
-    };
+    progression?: string;
     movementDetails?: {
       description: string;
       cues: string[];
@@ -71,6 +67,8 @@ interface ExerciseAdjustment {
   currentWeight: number;
   currentSets: number;
   currentReps: number;
+  currentRestTime?: number;
+  currentProgression?: string;
   currentDuration?: number;
   currentDistance?: number;
   currentTimeCap?: number;
@@ -78,6 +76,8 @@ interface ExerciseAdjustment {
   nextWeight: number;
   nextSets: number;
   nextReps: number;
+  nextRestTime?: number;
+  nextProgression?: string;
   nextDuration?: number;
   nextDistance?: number;
   nextTimeCap?: number;
@@ -97,9 +97,13 @@ interface MessageMetadata {
       currentWeight: number;
       currentSets: number;
       currentReps: number;
+      currentRestTime?: number;
+      currentProgression?: string;
       nextWeight: number;
       nextSets: number;
       nextReps: number;
+      nextRestTime?: number;
+      nextProgression?: string;
       reasoning: string;
     }>;
   };
@@ -556,9 +560,9 @@ export function ChatContent({
       streamingMessageIdRef.current = null;
       streamingContentRef.current = '';
       
-      // Skip syncing with server to prevent overwriting our complete local state
-      // The server has saved the messages, they'll sync on next navigation
-      skipNextSyncRef.current = true;
+      // Refresh from server to get the correct database message IDs
+      // This is needed so approval works with the real message IDs
+      router.refresh();
 
     } catch (error) {
       if ((error as Error).name === 'AbortError') {
@@ -877,9 +881,9 @@ export function ChatContent({
           streamingMessageIdRef.current = null;
           streamingContentRef.current = '';
           
-          // Skip syncing with server to prevent overwriting our complete local state
-          // The server has saved the messages, they'll sync on next navigation
-          skipNextSyncRef.current = true;
+          // Refresh from server to get the correct database message IDs
+          // This is needed so approval works with the real message IDs
+          router.refresh();
 
         } catch (error) {
           console.error('Streaming error:', error);
@@ -1621,12 +1625,37 @@ export function ChatContent({
                                     }
                                   };
                                   
+                                  const formatRestTime = () => {
+                                    if (!ex.restTime) return null;
+                                    const seconds = ex.restTime;
+                                    if (seconds >= 60) {
+                                      const mins = Math.floor(seconds / 60);
+                                      const secs = seconds % 60;
+                                      return secs > 0 ? `${mins}:${String(secs).padStart(2, '0')} rest` : `${mins}min rest`;
+                                    }
+                                    return `${seconds}s rest`;
+                                  };
+                                  
+                                  const formatProgression = () => {
+                                    if (!ex.progression) return null;
+                                    return ex.progression;
+                                  };
+                                  
                                   return (
-                                    <div key={exIdx} className="text-xs">
-                                      <span className="font-medium">{ex.name}</span>
-                                      <span className="text-muted-foreground ml-2">
-                                        {formatExercise()}
-                                      </span>
+                                    <div key={exIdx} className="text-xs space-y-0.5">
+                                      <div>
+                                        <span className="font-medium">{ex.name}</span>
+                                        <span className="text-muted-foreground ml-2">
+                                          {formatExercise()}
+                                        </span>
+                                      </div>
+                                      {(ex.restTime || ex.progression) && (
+                                        <div className="text-muted-foreground/70 text-[11px] ml-0 flex items-center gap-2">
+                                          {formatRestTime()}
+                                          {ex.restTime && ex.progression && <span>•</span>}
+                                          {formatProgression()}
+                                        </div>
+                                      )}
                                     </div>
                                   );
                                 })}
@@ -1869,6 +1898,20 @@ export function ChatContent({
                               }
                             };
                             
+                            // Format rest time comparison
+                            const formatRestTime = (seconds: number) => {
+                              if (seconds >= 60) {
+                                const mins = Math.floor(seconds / 60);
+                                const secs = seconds % 60;
+                                return secs > 0 ? `${mins}:${String(secs).padStart(2, '0')}` : `${mins}min`;
+                              }
+                              return `${seconds}s`;
+                            };
+                            
+                            // Check if rest time or progression changed
+                            const restTimeChanged = ex.nextRestTime && ex.nextRestTime !== ex.currentRestTime;
+                            const progressionChanged = ex.nextProgression && ex.nextProgression !== ex.currentProgression;
+                            
                             return (
                               <div key={idx} className="bg-background/30 rounded-lg p-3">
                                 <p className="font-semibold text-sm mb-2">{ex.name}</p>
@@ -1895,6 +1938,36 @@ export function ChatContent({
                                       {formatNext()}
                                     </span>
                                   </div>
+                                  
+                                  {/* Rest time comparison */}
+                                  {(ex.currentRestTime || ex.nextRestTime) && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-muted-foreground w-20">Rest:</span>
+                                      <span className={restTimeChanged ? "text-success font-medium" : "text-foreground"}>
+                                        {ex.currentRestTime && formatRestTime(ex.currentRestTime)}
+                                        {restTimeChanged && ` → ${formatRestTime(ex.nextRestTime!)}`}
+                                        {!restTimeChanged && ex.nextRestTime && !ex.currentRestTime && formatRestTime(ex.nextRestTime)}
+                                      </span>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Progression comparison */}
+                                  {(ex.currentProgression || ex.nextProgression) && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-muted-foreground w-20">Progression:</span>
+                                      <span className={progressionChanged ? "text-success font-medium" : "text-foreground"}>
+                                        {progressionChanged ? (
+                                          <>
+                                            {ex.currentProgression}
+                                            {' → '}
+                                            {ex.nextProgression}
+                                          </>
+                                        ) : (
+                                          ex.nextProgression || ex.currentProgression || ''
+                                        )}
+                                      </span>
+                                    </div>
+                                  )}
                                 </div>
                                 
                                 <p className="text-xs text-muted-foreground">{ex.reasoning}</p>

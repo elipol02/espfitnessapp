@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Plus, Minus, Check, Timer, ChevronRight, Play } from 'lucide-react';
+import { ArrowLeft, Plus, Minus, Check, Timer, ChevronRight, Play, Edit2, X } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import { LoadingSpinner } from '@/app/components/LoadingSpinner';
 import { haptic } from '@/app/lib/utils';
@@ -100,32 +100,53 @@ export function LiveWorkoutContent({
   const [weight, setWeight] = useState(0);
   const [reps, setReps] = useState(0);
   const [distance, setDistance] = useState(0);
-  const [restTimer, setRestTimer] = useState<number | null>(null);
-  const [cardioTimer, setCardioTimer] = useState<number | null>(null);
-  const [startTime] = useState(new Date());
   const [saving, setSaving] = useState(false);
+  
+  // Edit mode state
+  const [editingSetIndex, setEditingSetIndex] = useState<number | null>(null);
+  const [editWeight, setEditWeight] = useState(0);
+  const [editReps, setEditReps] = useState(0);
+  const [editDistance, setEditDistance] = useState(0);
+  
+  // Timer state - using start times instead of countdown values
+  const [restTimerStart, setRestTimerStart] = useState<number | null>(null);
+  const [restTimerDuration, setRestTimerDuration] = useState<number>(0);
+  const [cardioTimerStart, setCardioTimerStart] = useState<number | null>(null);
+  const [cardioTimerDuration, setCardioTimerDuration] = useState<number>(0);
   
   // Interval state
   const [intervalRound, setIntervalRound] = useState(0);
   const [intervalPhaseIndex, setIntervalPhaseIndex] = useState(0);
-  const [intervalTimer, setIntervalTimer] = useState<number | null>(null);
+  const [intervalTimerStart, setIntervalTimerStart] = useState<number | null>(null);
+  const [intervalTimerDuration, setIntervalTimerDuration] = useState<number>(0);
   const [intervalRunning, setIntervalRunning] = useState(false);
   
   // AMRAP state
-  const [amrapTimer, setAmrapTimer] = useState<number | null>(null);
+  const [amrapTimerStart, setAmrapTimerStart] = useState<number | null>(null);
+  const [amrapTimerDuration, setAmrapTimerDuration] = useState<number>(0);
   const [amrapReps, setAmrapReps] = useState(0);
   const [amrapRunning, setAmrapRunning] = useState(false);
   
   // EMOM state
   const [emomRound, setEmomRound] = useState(0);
-  const [emomTimer, setEmomTimer] = useState<number | null>(null);
+  const [emomTimerStart, setEmomTimerStart] = useState<number | null>(null);
+  const [emomTimerDuration, setEmomTimerDuration] = useState<number>(0);
   const [emomRunning, setEmomRunning] = useState(false);
   
   // Tabata state
   const [tabataRound, setTabataRound] = useState(0);
   const [tabataPhase, setTabataPhase] = useState<'work' | 'rest'>('work');
-  const [tabataTimer, setTabataTimer] = useState<number | null>(null);
+  const [tabataTimerStart, setTabataTimerStart] = useState<number | null>(null);
+  const [tabataTimerDuration, setTabataTimerDuration] = useState<number>(0);
   const [tabataRunning, setTabataRunning] = useState(false);
+  
+  // Current timer values (calculated from start times)
+  const [restTimer, setRestTimer] = useState<number | null>(null);
+  const [cardioTimer, setCardioTimer] = useState<number | null>(null);
+  const [intervalTimer, setIntervalTimer] = useState<number | null>(null);
+  const [amrapTimer, setAmrapTimer] = useState<number | null>(null);
+  const [emomTimer, setEmomTimer] = useState<number | null>(null);
+  const [tabataTimer, setTabataTimer] = useState<number | null>(null);
 
   const currentExercise = exercises[currentExerciseIndex];
 
@@ -159,6 +180,115 @@ export function LiveWorkoutContent({
 
   const [workoutCompleted, setWorkoutCompleted] = useState(workoutStatus === 'completed');
   const [adjustmentIdForChat, setAdjustmentIdForChat] = useState<string | null>(pendingAdjustmentId || null);
+
+  // localStorage key for this workout's timer state
+  const timerStateKey = `workout-timers-${workoutLogId}`;
+
+  // Load timer state from localStorage on mount
+  useEffect(() => {
+    const savedState = localStorage.getItem(timerStateKey);
+    if (savedState) {
+      try {
+        const state = JSON.parse(savedState);
+        if (state.restTimerStart) {
+          setRestTimerStart(state.restTimerStart);
+          setRestTimerDuration(state.restTimerDuration || 0);
+        }
+        if (state.cardioTimerStart) {
+          setCardioTimerStart(state.cardioTimerStart);
+          setCardioTimerDuration(state.cardioTimerDuration || 0);
+        }
+        if (state.intervalTimerStart) {
+          setIntervalTimerStart(state.intervalTimerStart);
+          setIntervalTimerDuration(state.intervalTimerDuration || 0);
+          setIntervalRunning(state.intervalRunning || false);
+          setIntervalRound(state.intervalRound || 0);
+          setIntervalPhaseIndex(state.intervalPhaseIndex || 0);
+        }
+        if (state.amrapTimerStart) {
+          setAmrapTimerStart(state.amrapTimerStart);
+          setAmrapTimerDuration(state.amrapTimerDuration || 0);
+          setAmrapRunning(state.amrapRunning || false);
+          setAmrapReps(state.amrapReps || 0);
+        }
+        if (state.emomTimerStart) {
+          setEmomTimerStart(state.emomTimerStart);
+          setEmomTimerDuration(state.emomTimerDuration || 0);
+          setEmomRunning(state.emomRunning || false);
+          setEmomRound(state.emomRound || 0);
+        }
+        if (state.tabataTimerStart) {
+          setTabataTimerStart(state.tabataTimerStart);
+          setTabataTimerDuration(state.tabataTimerDuration || 0);
+          setTabataRunning(state.tabataRunning || false);
+          setTabataRound(state.tabataRound || 0);
+          setTabataPhase(state.tabataPhase || 'work');
+        }
+      } catch (error) {
+        console.error('Failed to load timer state:', error);
+      }
+    }
+  }, [timerStateKey]);
+
+  // Save timer state to localStorage whenever it changes
+  useEffect(() => {
+    const state = {
+      restTimerStart,
+      restTimerDuration,
+      cardioTimerStart,
+      cardioTimerDuration,
+      intervalTimerStart,
+      intervalTimerDuration,
+      intervalRunning,
+      intervalRound,
+      intervalPhaseIndex,
+      amrapTimerStart,
+      amrapTimerDuration,
+      amrapRunning,
+      amrapReps,
+      emomTimerStart,
+      emomTimerDuration,
+      emomRunning,
+      emomRound,
+      tabataTimerStart,
+      tabataTimerDuration,
+      tabataRunning,
+      tabataRound,
+      tabataPhase,
+    };
+    localStorage.setItem(timerStateKey, JSON.stringify(state));
+  }, [
+    timerStateKey,
+    restTimerStart,
+    restTimerDuration,
+    cardioTimerStart,
+    cardioTimerDuration,
+    intervalTimerStart,
+    intervalTimerDuration,
+    intervalRunning,
+    intervalRound,
+    intervalPhaseIndex,
+    amrapTimerStart,
+    amrapTimerDuration,
+    amrapRunning,
+    amrapReps,
+    emomTimerStart,
+    emomTimerDuration,
+    emomRunning,
+    emomRound,
+    tabataTimerStart,
+    tabataTimerDuration,
+    tabataRunning,
+    tabataRound,
+    tabataPhase,
+  ]);
+
+  // Clear timer state from localStorage when workout is completed
+  useEffect(() => {
+    if (workoutCompleted) {
+      localStorage.removeItem(timerStateKey);
+    }
+  }, [workoutCompleted, timerStateKey]);
 
   const finishWorkout = useCallback(async () => {
     if (saving) return;
@@ -230,174 +360,248 @@ export function LiveWorkoutContent({
       // Reset all timer states when changing exercises
       setIntervalRound(0);
       setIntervalPhaseIndex(0);
+      setIntervalTimerStart(null);
+      setIntervalTimerDuration(0);
       setIntervalTimer(null);
       setIntervalRunning(false);
+      setAmrapTimerStart(null);
+      setAmrapTimerDuration(0);
       setAmrapTimer(null);
       setAmrapReps(0);
       setAmrapRunning(false);
       setEmomRound(0);
+      setEmomTimerStart(null);
+      setEmomTimerDuration(0);
       setEmomTimer(null);
       setEmomRunning(false);
       setTabataRound(0);
       setTabataPhase('work');
+      setTabataTimerStart(null);
+      setTabataTimerDuration(0);
       setTabataTimer(null);
       setTabataRunning(false);
     }
   }, [currentExercise, userBodyweight, calculateTargetWeight]);
 
-  // Rest timer countdown
+  // Rest timer - calculate remaining time based on start time
   useEffect(() => {
-    if (restTimer === null) return;
-
-    if (restTimer <= 0) {
+    if (restTimerStart === null) {
       setRestTimer(null);
-      haptic('medium');
       return;
     }
 
-    const interval = setInterval(() => {
-      setRestTimer((prev) => (prev ? prev - 1 : null));
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [restTimer]);
-
-  // Cardio timer countdown
-  useEffect(() => {
-    if (cardioTimer === null) return;
-
-    if (cardioTimer <= 0) {
-      setCardioTimer(null);
-      haptic('medium');
-      return;
-    }
-
-    const interval = setInterval(() => {
-      setCardioTimer((prev) => (prev ? prev - 1 : null));
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [cardioTimer]);
-
-  // Interval timer countdown
-  useEffect(() => {
-    if (intervalTimer === null || !intervalRunning || !currentExercise?.intervals) return;
-
-    if (intervalTimer <= 0) {
-      haptic('medium');
-      const intervals = currentExercise.intervals;
-      const nextPhaseIndex = intervalPhaseIndex + 1;
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - restTimerStart) / 1000);
+      const remaining = Math.max(0, restTimerDuration - elapsed);
       
-      if (nextPhaseIndex >= intervals.phases.length) {
-        // End of round
-        const nextRound = intervalRound + 1;
-        if (nextRound >= intervals.rounds) {
-          // All rounds complete
-          setIntervalRunning(false);
-          setIntervalTimer(null);
-          completeIntervalExercise();
-        } else {
-          // Next round
-          setIntervalRound(nextRound);
-          setIntervalPhaseIndex(0);
-          setIntervalTimer(intervals.phases[0].duration);
-        }
+      if (remaining <= 0) {
+        setRestTimer(null);
+        setRestTimerStart(null);
+        setRestTimerDuration(0);
+        haptic('medium');
       } else {
-        // Next phase
-        setIntervalPhaseIndex(nextPhaseIndex);
-        setIntervalTimer(intervals.phases[nextPhaseIndex].duration);
+        setRestTimer(remaining);
       }
+    };
+
+    // Update immediately
+    updateTimer();
+
+    // Update every 100ms for smooth display
+    const interval = setInterval(updateTimer, 100);
+    return () => clearInterval(interval);
+  }, [restTimerStart, restTimerDuration]);
+
+  // Cardio timer - calculate remaining time based on start time
+  useEffect(() => {
+    if (cardioTimerStart === null) {
+      setCardioTimer(null);
       return;
     }
 
-    const interval = setInterval(() => {
-      setIntervalTimer((prev) => (prev ? prev - 1 : null));
-    }, 1000);
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - cardioTimerStart) / 1000);
+      const remaining = Math.max(0, cardioTimerDuration - elapsed);
+      
+      if (remaining <= 0) {
+        setCardioTimer(null);
+        setCardioTimerStart(null);
+        setCardioTimerDuration(0);
+        haptic('medium');
+      } else {
+        setCardioTimer(remaining);
+      }
+    };
 
+    updateTimer();
+    const interval = setInterval(updateTimer, 100);
     return () => clearInterval(interval);
-  }, [intervalTimer, intervalRunning, intervalPhaseIndex, intervalRound, currentExercise]);
+  }, [cardioTimerStart, cardioTimerDuration]);
 
-  // AMRAP timer countdown
+  // Interval timer - calculate remaining time based on start time
   useEffect(() => {
-    if (amrapTimer === null || !amrapRunning) return;
+    if (intervalTimerStart === null || !intervalRunning || !currentExercise?.intervals) {
+      setIntervalTimer(null);
+      return;
+    }
 
-    if (amrapTimer <= 0) {
-      haptic('medium');
-      setAmrapRunning(false);
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - intervalTimerStart) / 1000);
+      const remaining = Math.max(0, intervalTimerDuration - elapsed);
+      
+      if (remaining <= 0) {
+        haptic('medium');
+        const intervals = currentExercise.intervals;
+        if (!intervals) return;
+        
+        const nextPhaseIndex = intervalPhaseIndex + 1;
+        
+        if (nextPhaseIndex >= intervals.phases.length) {
+          // End of round
+          const nextRound = intervalRound + 1;
+          if (nextRound >= intervals.rounds) {
+            // All rounds complete
+            setIntervalRunning(false);
+            setIntervalTimer(null);
+            setIntervalTimerStart(null);
+            setIntervalTimerDuration(0);
+            completeIntervalExercise();
+          } else {
+            // Next round
+            setIntervalRound(nextRound);
+            setIntervalPhaseIndex(0);
+            const newDuration = intervals.phases[0].duration;
+            setIntervalTimerStart(Date.now());
+            setIntervalTimerDuration(newDuration);
+          }
+        } else {
+          // Next phase
+          setIntervalPhaseIndex(nextPhaseIndex);
+          const newDuration = intervals.phases[nextPhaseIndex].duration;
+          setIntervalTimerStart(Date.now());
+          setIntervalTimerDuration(newDuration);
+        }
+      } else {
+        setIntervalTimer(remaining);
+      }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 100);
+    return () => clearInterval(interval);
+  }, [intervalTimerStart, intervalTimerDuration, intervalRunning, intervalPhaseIndex, intervalRound, currentExercise]);
+
+  // AMRAP timer - calculate remaining time based on start time
+  useEffect(() => {
+    if (amrapTimerStart === null || !amrapRunning) {
       setAmrapTimer(null);
-      completeAmrapExercise();
       return;
     }
 
-    const interval = setInterval(() => {
-      setAmrapTimer((prev) => (prev ? prev - 1 : null));
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [amrapTimer, amrapRunning]);
-
-  // EMOM timer countdown
-  useEffect(() => {
-    if (emomTimer === null || !emomRunning || !currentExercise) return;
-
-    if (emomTimer <= 0) {
-      haptic('medium');
-      const nextRound = emomRound + 1;
-      const totalRounds = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets;
-      if (nextRound >= totalRounds) {
-        // All rounds complete
-        setEmomRunning(false);
-        setEmomTimer(null);
-        completeEmomExercise();
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - amrapTimerStart) / 1000);
+      const remaining = Math.max(0, amrapTimerDuration - elapsed);
+      
+      if (remaining <= 0) {
+        haptic('medium');
+        setAmrapRunning(false);
+        setAmrapTimer(null);
+        setAmrapTimerStart(null);
+        setAmrapTimerDuration(0);
+        completeAmrapExercise();
       } else {
-        // Next minute
-        setEmomRound(nextRound);
-        setEmomTimer(60);
+        setAmrapTimer(remaining);
       }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 100);
+    return () => clearInterval(interval);
+  }, [amrapTimerStart, amrapTimerDuration, amrapRunning]);
+
+  // EMOM timer - calculate remaining time based on start time
+  useEffect(() => {
+    if (emomTimerStart === null || !emomRunning || !currentExercise) {
+      setEmomTimer(null);
       return;
     }
 
-    const interval = setInterval(() => {
-      setEmomTimer((prev) => (prev ? prev - 1 : null));
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [emomTimer, emomRunning, emomRound, currentExercise]);
-
-  // Tabata timer countdown
-  useEffect(() => {
-    if (tabataTimer === null || !tabataRunning || !currentExercise) return;
-
-    if (tabataTimer <= 0) {
-      haptic('light');
-      if (tabataPhase === 'work') {
-        // Switch to rest
-        setTabataPhase('rest');
-        setTabataTimer(10);
-      } else {
-        // Switch to work or finish
-        const nextRound = tabataRound + 1;
-        if (nextRound >= currentExercise.sets) {
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - emomTimerStart) / 1000);
+      const remaining = Math.max(0, emomTimerDuration - elapsed);
+      
+      if (remaining <= 0) {
+        haptic('medium');
+        const nextRound = emomRound + 1;
+        const totalRounds = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets;
+        if (nextRound >= totalRounds) {
           // All rounds complete
-          haptic('medium');
-          setTabataRunning(false);
-          setTabataTimer(null);
-          completeTabataExercise();
+          setEmomRunning(false);
+          setEmomTimer(null);
+          setEmomTimerStart(null);
+          setEmomTimerDuration(0);
+          completeEmomExercise();
         } else {
-          setTabataRound(nextRound);
-          setTabataPhase('work');
-          setTabataTimer(20);
+          // Next minute
+          setEmomRound(nextRound);
+          setEmomTimerStart(Date.now());
+          setEmomTimerDuration(60);
         }
+      } else {
+        setEmomTimer(remaining);
       }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 100);
+    return () => clearInterval(interval);
+  }, [emomTimerStart, emomTimerDuration, emomRunning, emomRound, currentExercise]);
+
+  // Tabata timer - calculate remaining time based on start time
+  useEffect(() => {
+    if (tabataTimerStart === null || !tabataRunning || !currentExercise) {
+      setTabataTimer(null);
       return;
     }
 
-    const interval = setInterval(() => {
-      setTabataTimer((prev) => (prev ? prev - 1 : null));
-    }, 1000);
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - tabataTimerStart) / 1000);
+      const remaining = Math.max(0, tabataTimerDuration - elapsed);
+      
+      if (remaining <= 0) {
+        haptic('light');
+        if (tabataPhase === 'work') {
+          // Switch to rest
+          setTabataPhase('rest');
+          setTabataTimerStart(Date.now());
+          setTabataTimerDuration(10);
+        } else {
+          // Switch to work or finish
+          const nextRound = tabataRound + 1;
+          if (nextRound >= currentExercise.sets) {
+            // All rounds complete
+            haptic('medium');
+            setTabataRunning(false);
+            setTabataTimer(null);
+            setTabataTimerStart(null);
+            setTabataTimerDuration(0);
+            completeTabataExercise();
+          } else {
+            setTabataRound(nextRound);
+            setTabataPhase('work');
+            setTabataTimerStart(Date.now());
+            setTabataTimerDuration(20);
+          }
+        }
+      } else {
+        setTabataTimer(remaining);
+      }
+    };
 
+    updateTimer();
+    const interval = setInterval(updateTimer, 100);
     return () => clearInterval(interval);
-  }, [tabataTimer, tabataRunning, tabataPhase, tabataRound, currentExercise]);
+  }, [tabataTimerStart, tabataTimerDuration, tabataRunning, tabataPhase, tabataRound, currentExercise]);
 
   // Auto-finish workout when all exercises are complete (only for in_progress workouts)
   useEffect(() => {
@@ -473,7 +677,8 @@ export function LiveWorkoutContent({
     if (!currentExercise) return;
     const durationMinutes = currentExercise.duration || currentExercise.reps; // Use duration field, fall back to reps
     const durationSeconds = durationMinutes * 60;
-    setCardioTimer(durationSeconds);
+    setCardioTimerStart(Date.now());
+    setCardioTimerDuration(durationSeconds);
   };
 
   const completeTimeBasedExercise = async () => {
@@ -507,6 +712,8 @@ export function LiveWorkoutContent({
     }
 
     // Reset timer
+    setCardioTimerStart(null);
+    setCardioTimerDuration(0);
     setCardioTimer(null);
   };
 
@@ -524,7 +731,8 @@ export function LiveWorkoutContent({
     // Start rest timer immediately (while save runs in background) - but not if this was the last set
     const isLastSet = newSets.length >= currentExercise.sets;
     if (!isLastSet) {
-      setRestTimer(currentExercise.restTime);
+      setRestTimerStart(Date.now());
+      setRestTimerDuration(currentExercise.restTime);
     }
 
     // Save to database (fire-and-forget; timer already running)
@@ -579,7 +787,8 @@ export function LiveWorkoutContent({
     if (!currentExercise?.intervals) return;
     setIntervalRound(0);
     setIntervalPhaseIndex(0);
-    setIntervalTimer(currentExercise.intervals.phases[0].duration);
+    setIntervalTimerStart(Date.now());
+    setIntervalTimerDuration(currentExercise.intervals.phases[0].duration);
     setIntervalRunning(true);
   };
 
@@ -612,7 +821,8 @@ export function LiveWorkoutContent({
   // Start AMRAP workout
   const startAmrap = () => {
     if (!currentExercise?.timeCap) return;
-    setAmrapTimer(currentExercise.timeCap);
+    setAmrapTimerStart(Date.now());
+    setAmrapTimerDuration(currentExercise.timeCap);
     setAmrapReps(0);
     setAmrapRunning(true);
   };
@@ -647,7 +857,8 @@ export function LiveWorkoutContent({
   // Start EMOM workout
   const startEmom = () => {
     setEmomRound(0);
-    setEmomTimer(60);
+    setEmomTimerStart(Date.now());
+    setEmomTimerDuration(60);
     setEmomRunning(true);
   };
 
@@ -681,7 +892,8 @@ export function LiveWorkoutContent({
   const startTabata = () => {
     setTabataRound(0);
     setTabataPhase('work');
-    setTabataTimer(20);
+    setTabataTimerStart(Date.now());
+    setTabataTimerDuration(20);
     setTabataRunning(true);
   };
 
@@ -698,7 +910,8 @@ export function LiveWorkoutContent({
     // Start rest timer immediately (while save runs in background) - but not if this was the last set
     const isLastSet = newSets.length >= currentExercise.sets;
     if (!isLastSet) {
-      setRestTimer(currentExercise.restTime);
+      setRestTimerStart(Date.now());
+      setRestTimerDuration(currentExercise.restTime);
     }
 
     // Save to database (fire-and-forget; timer already running)
@@ -717,13 +930,66 @@ export function LiveWorkoutContent({
     }
   };
 
+  const startEditSet = (index: number, set: CompletedSet) => {
+    setEditingSetIndex(index);
+    setEditWeight(set.weight);
+    setEditReps(set.reps);
+    setEditDistance(set.distance || 0);
+  };
+
+  const cancelEditSet = () => {
+    setEditingSetIndex(null);
+    setEditWeight(0);
+    setEditReps(0);
+    setEditDistance(0);
+  };
+
+  const saveEditSet = async () => {
+    if (!currentExercise || editingSetIndex === null || isPreview) return;
+
+    haptic('light');
+
+    // Update the set in the completedSets map
+    const updatedSets = [...currentSets];
+    updatedSets[editingSetIndex] = {
+      reps: editReps,
+      weight: editWeight,
+      distance: isDistanceBased ? editDistance : updatedSets[editingSetIndex].distance,
+      time: updatedSets[editingSetIndex].time,
+    };
+
+    const newMap = new Map(completedSets);
+    newMap.set(currentExercise.id, updatedSets);
+    setCompletedSets(newMap);
+
+    // Save to database
+    try {
+      await fetch('/api/workout/live/add-set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workoutLogId,
+          exerciseId: currentExercise.id,
+          sets: updatedSets.map(s => ({ reps: s.reps, weight: s.weight })),
+          distance: isDistanceBased ? editDistance : undefined,
+        }),
+      });
+    } catch (error) {
+      console.error('Failed to update set:', error);
+    }
+
+    // Exit edit mode
+    setEditingSetIndex(null);
+    setEditWeight(0);
+    setEditReps(0);
+    setEditDistance(0);
+  };
+
   const formatTime = useCallback((seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   }, []);
-
-  const elapsedMinutes = Math.floor((Date.now() - startTime.getTime()) / 60000);
 
   if (!currentExercise) {
     return null;
@@ -764,7 +1030,6 @@ export function LiveWorkoutContent({
             >
               {workoutDay.workoutType}
             </h1>
-            <p className="text-xs text-muted-foreground">{elapsedMinutes} min</p>
           </div>
 
            <div className="w-9"></div>
@@ -784,10 +1049,12 @@ export function LiveWorkoutContent({
                 key={exercise.id}
                 onClick={() => {
                   setCurrentExerciseIndex(index);
+                  setRestTimerStart(null);
+                  setRestTimerDuration(0);
                   setRestTimer(null);
                 }}
                 className={`
-                  flex-shrink-0 px-3 py-2 rounded-lg transition-colors text-left
+                  flex-shrink-0 px-3 py-2 rounded-lg transition-colors text-left relative
                   ${isCurrent 
                     ? 'bg-primary text-white' 
                     : isComplete
@@ -796,7 +1063,12 @@ export function LiveWorkoutContent({
                   }
                 `}
               >
-                <div className="text-xs font-medium">{index + 1}</div>
+                <div className="flex items-center gap-1.5">
+                  <div className="text-xs font-medium">{index + 1}</div>
+                  {isComplete && (
+                    <Check size={12} className={isCurrent ? 'text-white' : 'text-success'} />
+                  )}
+                </div>
                 <div className="text-[10px] leading-tight mt-0.5 opacity-80 max-w-[80px] truncate">
                   {exercise.name}
                 </div>
@@ -816,7 +1088,7 @@ export function LiveWorkoutContent({
       )}
 
       {/* Main Content */}
-      <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6">
+      <div className="flex-1 overflow-y-auto px-5 py-6 pb-24 space-y-6">
         {/* Exercise Name */}
         <div className="text-center">
           <h2 className="text-2xl font-bold text-foreground">{currentExercise.name}</h2>
@@ -864,19 +1136,141 @@ export function LiveWorkoutContent({
                 return `Set ${i + 1}`;
               };
 
-              return (
-              <div
-                key={i}
-                className="flex items-center justify-between p-3 bg-surface rounded-lg"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
-                    <Check size={16} className="text-success" />
+              // Don't allow editing single-completion exercises
+              const canEdit = !isSingleCompletionType && !isPreview;
+
+              // If this set is being edited, show edit interface
+              if (editingSetIndex === i) {
+                return (
+                  <div key={i} className="bg-surface rounded-lg p-4 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-foreground">{getSetLabel()}</span>
+                      <button
+                        onClick={cancelEditSet}
+                        className="p-1 text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+
+                    {/* Weight Input */}
+                    {!isTimeBased && (
+                      <div className="space-y-2">
+                        <label className="text-xs text-muted-foreground text-center block">
+                          Weight (lbs)
+                        </label>
+                        <div className="flex items-center justify-center gap-3">
+                          <button
+                            onClick={() => setEditWeight(Math.max(0, editWeight - 5))}
+                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
+                          >
+                            <Minus size={16} />
+                          </button>
+                          <input
+                            type="number"
+                            value={editWeight}
+                            onChange={(e) => setEditWeight(Number(e.target.value))}
+                            className="w-20 text-center text-2xl font-bold bg-transparent text-foreground focus:outline-none"
+                          />
+                          <button
+                            onClick={() => setEditWeight(editWeight + 5)}
+                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
+                          >
+                            <Plus size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Reps Input */}
+                    {!isTimeBased && !isDistanceBased && (
+                      <div className="space-y-2">
+                        <label className="text-xs text-muted-foreground text-center block">
+                          Reps
+                        </label>
+                        <div className="flex items-center justify-center gap-3">
+                          <button
+                            onClick={() => setEditReps(Math.max(0, editReps - 1))}
+                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
+                          >
+                            <Minus size={16} />
+                          </button>
+                          <input
+                            type="number"
+                            value={editReps}
+                            onChange={(e) => setEditReps(Number(e.target.value))}
+                            className="w-20 text-center text-2xl font-bold bg-transparent text-foreground focus:outline-none"
+                          />
+                          <button
+                            onClick={() => setEditReps(editReps + 1)}
+                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
+                          >
+                            <Plus size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Distance Input */}
+                    {isDistanceBased && (
+                      <div className="space-y-2">
+                        <label className="text-xs text-muted-foreground text-center block">
+                          Distance ({currentExercise.distanceUnit || 'feet'})
+                        </label>
+                        <div className="flex items-center justify-center gap-3">
+                          <button
+                            onClick={() => setEditDistance(Math.max(0, editDistance - 5))}
+                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
+                          >
+                            <Minus size={16} />
+                          </button>
+                          <input
+                            type="number"
+                            value={editDistance}
+                            onChange={(e) => setEditDistance(Number(e.target.value))}
+                            className="w-20 text-center text-2xl font-bold bg-transparent text-foreground focus:outline-none"
+                          />
+                          <button
+                            onClick={() => setEditDistance(editDistance + 5)}
+                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
+                          >
+                            <Plus size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Save Button */}
+                    <Button onClick={saveEditSet} fullWidth size="sm">
+                      Save Changes
+                    </Button>
                   </div>
+                );
+              }
+
+              return (
+                <div
+                  key={i}
+                  className="flex items-center justify-between p-3 bg-surface rounded-lg"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+                      <Check size={16} className="text-success" />
+                    </div>
                     <span className="font-medium text-foreground">{getSetLabel()}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-muted-foreground">{getSetDisplay()}</span>
+                    {canEdit && (
+                      <button
+                        onClick={() => startEditSet(i, set)}
+                        className="p-1.5 text-muted-foreground hover:text-primary transition-colors"
+                      >
+                        <Edit2 size={16} />
+                      </button>
+                    )}
+                  </div>
                 </div>
-                  <span className="text-muted-foreground">{getSetDisplay()}</span>
-              </div>
               );
             })}
           </div>
@@ -893,7 +1287,11 @@ export function LiveWorkoutContent({
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setRestTimer(null)}
+              onClick={() => {
+                setRestTimerStart(null);
+                setRestTimerDuration(0);
+                setRestTimer(null);
+              }}
             >
               Skip
             </Button>
@@ -1076,6 +1474,8 @@ export function LiveWorkoutContent({
                         variant="secondary" 
                         onClick={() => {
                           setIntervalRunning(false);
+                          setIntervalTimerStart(null);
+                          setIntervalTimerDuration(0);
                           setIntervalTimer(null);
                         }} 
                         fullWidth
@@ -1382,22 +1782,25 @@ export function LiveWorkoutContent({
          {/* All sets complete for this exercise */}
          {isExerciseComplete && (
            <div className={`rounded-xl p-4 space-y-3 ${
-             currentExerciseIndex === exercises.length - 1 ? 'bg-primary/10' : 'bg-success/10'
+             workoutCompleted || workoutStatus === 'completed' ? 'bg-primary/10' : 'bg-success/10'
            }`}>
              <div className={`flex items-center justify-center gap-2 ${
-               currentExerciseIndex === exercises.length - 1 ? 'text-primary' : 'text-success'
+               workoutCompleted || workoutStatus === 'completed' ? 'text-primary' : 'text-success'
              }`}>
                <div className="text-2xl">✓</div>
                <p className="font-medium">
-                 {currentExerciseIndex === exercises.length - 1 ? 'Workout Complete!' : 'Exercise Complete!'}
+                 {workoutCompleted || workoutStatus === 'completed' ? 'Workout Complete!' : 'Exercise Complete!'}
                </p>
              </div>
-             {currentExerciseIndex < exercises.length - 1 ? (
-               <Button
-                 onClick={() => {
-                   setCurrentExerciseIndex(currentExerciseIndex + 1);
-                   setRestTimer(null);
-                 }}
+             {/* Show Next button only if not on last exercise AND workout not completed */}
+             {currentExerciseIndex < exercises.length - 1 && !workoutCompleted && workoutStatus !== 'completed' ? (
+              <Button
+                onClick={() => {
+                  setCurrentExerciseIndex(currentExerciseIndex + 1);
+                  setRestTimerStart(null);
+                  setRestTimerDuration(0);
+                  setRestTimer(null);
+                }}
                  fullWidth
                  size="lg"
                >
@@ -1407,8 +1810,7 @@ export function LiveWorkoutContent({
                  </span>
                </Button>
              ) : (
-               // Show button to view/generate analysis on last exercise if workout is completed and has adjustment
-               // Use adjustmentIdForChat for just-completed workouts, pendingAdjustmentId for viewing completed workouts
+               // Show analysis button if workout is completed and has adjustment
                (workoutCompleted && adjustmentIdForChat || workoutStatus === 'completed' && pendingAdjustmentId) && (
                  <Button
                    onClick={() => {
@@ -1428,29 +1830,6 @@ export function LiveWorkoutContent({
                  </Button>
                )
              )}
-           </div>
-         )}
-
-         {/* Show analysis button for already completed workouts (viewing mode) */}
-         {/* Only show if NOT on the last exercise with it complete (to avoid duplicate with completion section) */}
-         {workoutStatus === 'completed' && pendingAdjustmentId && !(currentExerciseIndex === exercises.length - 1 && isExerciseComplete) && (
-           <div className="rounded-xl p-4 space-y-3 bg-surface">
-             <Button
-               onClick={() => {
-                 // If analysis exists and we have a chat session, go to that session
-                 // Otherwise, create new analysis
-                 if (hasAnalysis && chatSessionId) {
-                   router.push(`/chat/post_workout?session=${chatSessionId}`);
-                 } else {
-                   router.push(`/chat/post_workout?adjustmentId=${pendingAdjustmentId}`);
-                 }
-               }}
-               fullWidth
-               size="lg"
-               variant="secondary"
-             >
-               {hasAnalysis ? 'View Workout Analysis' : 'Generate Analysis'}
-             </Button>
            </div>
          )}
        </div>

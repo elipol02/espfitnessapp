@@ -138,7 +138,16 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
     autoStartedRef.current = false;
     // Clear navigating state when new data loads
     setNavigatingSession(false);
-  }, [data.sessionId, data.messages]);
+    
+    // Update URL to use sessionId if we're on a new chat URL
+    if (typeof window !== 'undefined') {
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.has('new') && data.sessionId) {
+        // Replace the URL with the actual session ID to prevent creating duplicate sessions
+        router.replace(`/chat?session=${data.sessionId}`);
+      }
+    }
+  }, [data.sessionId, data.messages, router]);
 
   // Handle streaming send
   const handleStreamingSend = useCallback(async (messageContent: string) => {

@@ -1,17 +1,7 @@
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
-import { ChatContent } from '../ChatContent';
+import { ChatContent } from './ChatContent';
 import { redirect } from 'next/navigation';
-
-interface PendingAdjustmentData {
-  id: string;
-  workoutLogId: string;
-  workoutType: string;
-  completedDate: Date;
-  nextWorkoutDate: Date | null;
-  suggestions: unknown[];
-  status: string;
-}
 
 // Helper to migrate old progression object format to new string format
 function migrateProgression(prog: unknown): string | undefined {
@@ -20,7 +10,6 @@ function migrateProgression(prog: unknown): string | undefined {
   if (typeof prog === 'object' && prog !== null) {
     const p = prog as { type?: string; increment?: number | string; frequency?: string };
     if (p.type || p.increment || p.frequency) {
-      // Convert old object format to string
       const type = p.type || 'linear';
       let increment = '';
       if (p.increment !== undefined) {
@@ -80,74 +69,11 @@ function migrateMetadata(metadata: unknown): unknown {
   return metadata;
 }
 
-async function getChatData(userId: string, sessionId?: string, forceNew: boolean = false, adjustmentId?: string) {
+async function getChatData(userId: string, sessionId?: string, adjustmentId?: string, forceNew?: boolean) {
   let session: { id: string; userId: string; title: string | null; createdAt: Date; updatedAt: Date } | null;
   let messages: any[];
-  let pendingAdjustment: PendingAdjustmentData | null = null;
   
-  // If there's an adjustment ID, fetch the pending adjustment data
-  if (adjustmentId) {
-    const adjustment = await prisma.pendingAdjustment.findUnique({
-      where: { id: adjustmentId },
-      include: {
-        plan: {
-          select: { id: true },
-        },
-      },
-    });
-
-    if (adjustment && adjustment.userId === userId) {
-      // Get the workout log details
-      const workoutLog = await prisma.workoutLog.findUnique({
-        where: { id: adjustment.workoutLogId },
-        include: {
-          day: {
-            select: { workoutType: true },
-          },
-        },
-      });
-
-      if (workoutLog) {
-        // Find the next workout of the same type
-        const nextWorkout = await prisma.workoutDay.findFirst({
-          where: {
-            planId: adjustment.planId,
-            workoutType: workoutLog.day.workoutType,
-            scheduledDate: { gt: new Date() },
-          },
-          orderBy: { scheduledDate: 'asc' },
-        });
-
-        // Migrate progression in suggestions
-        const migratedSuggestions = (adjustment.suggestions as any[]).map((sug: any) => ({
-          ...sug,
-          currentProgression: migrateProgression(sug.currentProgression),
-          nextProgression: migrateProgression(sug.nextProgression),
-        }));
-
-        pendingAdjustment = {
-          id: adjustment.id,
-          workoutLogId: adjustment.workoutLogId,
-          workoutType: workoutLog.day.workoutType,
-          completedDate: workoutLog.workoutDate,
-          nextWorkoutDate: nextWorkout?.scheduledDate || null,
-          suggestions: migratedSuggestions,
-          status: adjustment.status,
-        };
-      }
-    }
-  }
-  
-  if (forceNew) {
-    // Force create a brand new session
-    session = await prisma.chatSession.create({
-      data: {
-        userId,
-        title: null,
-      },
-    });
-    messages = [];
-  } else if (sessionId) {
+  if (sessionId) {
     // Load specific session
     session = await prisma.chatSession.findUnique({
       where: { id: sessionId, userId },
@@ -162,25 +88,45 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
     } else {
       messages = [];
     }
-  } else {
-    // Get or create the most recent session (within last hour)
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    session = await prisma.chatSession.findFirst({
-      where: {
-        userId,
-        updatedAt: { gte: oneHourAgo },
-      },
-      orderBy: { updatedAt: 'desc' },
+  } else if (adjustmentId) {
+    // If adjustmentId is provided, look for an existing session with that adjustment
+    // Get all recent messages for this user and filter in JavaScript
+    const allRecentMessages = await prisma.chatMessage.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      include: { session: true },
     });
-    
-    if (session) {
+
+    const messageWithAdjustment = allRecentMessages.find((msg) => {
+      if (msg.metadata && typeof msg.metadata === 'object') {
+        const meta = msg.metadata as { adjustmentId?: string };
+        return meta.adjustmentId === adjustmentId;
+      }
+      return false;
+    });
+
+    if (messageWithAdjustment) {
+      // Use existing session
+      session = messageWithAdjustment.session;
       messages = await prisma.chatMessage.findMany({
         where: { sessionId: session.id },
         orderBy: { createdAt: 'asc' },
         take: 100,
       });
     } else {
-      // Create new session
+      // Create new session for this adjustment
+      session = await prisma.chatSession.create({
+        data: {
+          userId,
+          title: 'Workout Analysis',
+        },
+      });
+      messages = [];
+    }
+  } else {
+    // If forceNew is true, always create a new session
+    if (forceNew) {
       session = await prisma.chatSession.create({
         data: {
           userId,
@@ -188,6 +134,33 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
         },
       });
       messages = [];
+    } else {
+      // Get or create the most recent session (within last hour)
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      session = await prisma.chatSession.findFirst({
+        where: {
+          userId,
+          updatedAt: { gte: oneHourAgo },
+        },
+        orderBy: { updatedAt: 'desc' },
+      });
+      
+      if (session) {
+        messages = await prisma.chatMessage.findMany({
+          where: { sessionId: session.id },
+          orderBy: { createdAt: 'asc' },
+          take: 100,
+        });
+      } else {
+        // Create new session
+        session = await prisma.chatSession.create({
+          data: {
+            userId,
+            title: null,
+          },
+        });
+        messages = [];
+      }
     }
   }
 
@@ -240,13 +213,13 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
     .filter((a: { id: string; status: string }) => a.status === 'approved')
     .map((a: { id: string; status: string }) => a.id);
 
-  // Detect mode from message history if present
-  let detectedMode: string | null = null;
-  if (messages.length > 0) {
-    const firstUserMessage = messages.find((m: any) => m.role === 'user');
-    if (firstUserMessage?.metadata && typeof firstUserMessage.metadata === 'object') {
-      const metadata = firstUserMessage.metadata as { mode?: string };
-      detectedMode = metadata.mode || null;
+  // Check if this session has a pending adjustment
+  let sessionAdjustmentId = adjustmentId || null;
+  if (!sessionAdjustmentId && messages.length > 0) {
+    // Look for adjustmentId in message metadata
+    const msgWithAdj = messages.find((m: any) => m.metadata?.adjustmentId);
+    if (msgWithAdj) {
+      sessionAdjustmentId = msgWithAdj.metadata.adjustmentId;
     }
   }
 
@@ -263,16 +236,13 @@ async function getChatData(userId: string, sessionId?: string, forceNew: boolean
     user,
     approvedPlanIds,
     approvedAdjustmentIds,
-    detectedMode,
-    pendingAdjustment,
+    adjustmentId: sessionAdjustmentId,
   };
 }
 
 export default async function ChatPage({
-  params,
   searchParams,
 }: {
-  params: Promise<{ slug?: string[] }>;
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   const { session, error } = await validateSession();
@@ -281,81 +251,12 @@ export default async function ChatPage({
     redirect('/login');
   }
 
-  const routeParams = await params;
   const queryParams = await searchParams;
-  
-  // Extract mode from URL path (e.g., /chat/create → mode = 'create')
-  const pathMode = routeParams.slug?.[0];
-  
   const sessionId = queryParams.session as string | undefined;
-  const isPostWorkout = queryParams.postWorkout === 'true';
   const adjustmentId = queryParams.adjustmentId as string | undefined;
-  const isNew = queryParams.new === 'true';
+  const forceNew = queryParams.new !== undefined; // If 'new' param exists, force new session
   
-  // Determine the mode
-  let mode: string | undefined;
-  if (isPostWorkout || pathMode === 'post_workout') {
-    mode = 'post_workout';
-  } else if (pathMode && ['create', 'edit', 'ask'].includes(pathMode)) {
-    mode = pathMode;
-  }
-  
-  // Force new session for post-workout mode when there's no existing session specified
-  // This ensures "Generate Analysis" creates a fresh chat
-  const forceNewSession = (isPostWorkout || pathMode === 'post_workout') && !sessionId;
-  
-  // If new=true and no sessionId, return empty data to show menu
-  let data;
-  if (isNew && !sessionId) {
-    // Create a new empty session for the menu
-    const newSession = await prisma.chatSession.create({
-      data: {
-        userId: session.user.id,
-        title: null,
-      },
-    });
-    
-    // Get active plan and user info
-    const activePlan = await prisma.workoutPlan.findFirst({
-      where: {
-        userId: session.user.id,
-        status: 'active',
-      },
-      select: {
-        id: true,
-        goal: true,
-      },
-    });
+  const data = await getChatData(session.user.id, sessionId, adjustmentId, forceNew);
 
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: {
-        name: true,
-        bodyweight: true,
-      },
-    });
-    
-    data = {
-      sessionId: newSession.id,
-      messages: [],
-      activePlan,
-      user,
-      approvedPlanIds: [],
-      approvedAdjustmentIds: [],
-      detectedMode: null,
-      pendingAdjustment: null,
-    };
-  } else {
-    data = await getChatData(session.user.id, sessionId, forceNewSession, adjustmentId);
-  }
-
-  return (
-    <ChatContent 
-      data={data} 
-      userId={session.user.id} 
-      isNewSession={forceNewSession} 
-      urlMode={mode}
-      adjustmentId={adjustmentId}
-    />
-  );
+  return <ChatContent data={data} userId={session.user.id} />;
 }

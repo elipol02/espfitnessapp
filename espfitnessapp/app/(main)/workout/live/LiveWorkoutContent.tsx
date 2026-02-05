@@ -723,7 +723,8 @@ export function LiveWorkoutContent({
 
     haptic('light');
 
-    const newSets = [...currentSets, { reps: 1, weight, distance }];
+    // For distance exercises, store distance in the reps field so repsPerSet contains distance values
+    const newSets = [...currentSets, { reps: distance, weight, distance }];
     const newMap = new Map(completedSets);
     newMap.set(currentExercise.id, newSets);
     setCompletedSets(newMap);
@@ -743,8 +744,9 @@ export function LiveWorkoutContent({
         body: JSON.stringify({
           workoutLogId,
           exerciseId: currentExercise.id,
-          sets: newSets.map(s => ({ reps: s.reps, weight: s.weight })), // Strip distance from sets
-          distance: distance, // Send distance as separate field
+          // For distance exercises, reps contains the distance value per set
+          sets: newSets.map(s => ({ reps: s.reps, weight: s.weight })),
+          distance: distance, // Also send last distance for backward compatibility
         }),
       });
     } catch (error) {
@@ -951,8 +953,9 @@ export function LiveWorkoutContent({
 
     // Update the set in the completedSets map
     const updatedSets = [...currentSets];
+    // For distance exercises, store distance in the reps field
     updatedSets[editingSetIndex] = {
-      reps: editReps,
+      reps: isDistanceBased ? editDistance : editReps,
       weight: editWeight,
       distance: isDistanceBased ? editDistance : updatedSets[editingSetIndex].distance,
       time: updatedSets[editingSetIndex].time,
@@ -970,6 +973,7 @@ export function LiveWorkoutContent({
         body: JSON.stringify({
           workoutLogId,
           exerciseId: currentExercise.id,
+          // For distance exercises, reps contains the distance value per set
           sets: updatedSets.map(s => ({ reps: s.reps, weight: s.weight })),
           distance: isDistanceBased ? editDistance : undefined,
         }),
@@ -1818,9 +1822,9 @@ export function LiveWorkoutContent({
                      // If analysis exists and we have a chat session, go to that session
                      // Otherwise, create new analysis
                      if (hasAnalysis && chatSessionId) {
-                       router.push(`/chat/post_workout?session=${chatSessionId}`);
+                       router.push(`/chat?session=${chatSessionId}`);
                      } else {
-                       router.push(`/chat/post_workout?adjustmentId=${adjId}`);
+                       router.push(`/chat?adjustmentId=${adjId}`);
                      }
                    }}
                    fullWidth

@@ -256,20 +256,26 @@ export interface CompletedSet {
 
 // SSE Streaming Types
 export type SSEEventType = 
-  | 'text-chunk'           // Token from conversational response (ALL modes)
-  | 'text-done'            // Conversational text complete (ALL modes)
-  | 'day-generated'        // One workout day complete with exercises (create/edit only)
-  | 'adjustment-generated' // One exercise adjustment ready (post_workout only)
-  | 'error'                // Something went wrong (ALL modes)
-  | 'done'                 // Generation complete (ALL modes)
-  | 'cancelled';           // User stopped generation (ALL modes)
+  | 'text-chunk'           // Token from conversational response
+  | 'text-done'            // Conversational text complete
+  | 'tool-call'            // Tool call detected (includes tool name and args)
+  | 'tool-result'          // Tool execution result
+  | 'error'                // Something went wrong
+  | 'done'                 // Generation complete
+  | 'cancelled';           // User stopped generation
 
 export interface SSEEvent {
   type: SSEEventType;
   content?: string;
-  day?: StreamingWorkoutDay;
-  adjustment?: StreamingExerciseAdjustment;
-  planId?: string;
+  toolCall?: {
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+  };
+  toolResult?: {
+    toolCallId: string;
+    result: unknown;
+  };
   error?: string;
   progress?: {
     current: number;

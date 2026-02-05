@@ -182,7 +182,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                 Create a workout plan to see your schedule here
               </p>
             </div>
-            <Link href="/chat/create">
+            <Link href="/chat">
               <Button size="lg">Create a Plan</Button>
             </Link>
           </div>

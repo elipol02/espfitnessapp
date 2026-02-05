@@ -562,7 +562,7 @@ export function PlanViewerContent({ plan }: { plan: Plan }) {
       {plan.status === 'draft' && (
         <div className="fixed bottom-0 left-0 right-0 bg-background border-t border-border p-4 safe-bottom">
           <div className="max-w-lg mx-auto flex gap-3">
-            <Link href="/chat/create" className="flex-1">
+            <Link href="/chat" className="flex-1">
               <Button variant="secondary" fullWidth size="lg">
                 <MessageSquare size={18} className="mr-2" />
                 Edit

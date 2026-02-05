@@ -339,10 +339,18 @@ export async function generateWorkoutExercises(
       (s) => s.name.toLowerCase().trim() === templateExercise.name.toLowerCase().trim()
     );
 
+    const nextSets = suggestion?.nextSets ?? templateExercise.sets;
+    
+    // For EMOM exercises, auto-calculate timeCap from sets (rounds)
+    let calculatedTimeCap = suggestion?.nextTimeCap ?? (templateExercise.timeCap || undefined);
+    if (templateExercise.exerciseType === 'emom' && suggestion) {
+      calculatedTimeCap = nextSets * 60; // EMOM: 1 round = 1 minute
+    }
+
     return {
       dayId: workoutDayId,
       name: templateExercise.name,
-      sets: suggestion?.nextSets ?? templateExercise.sets,
+      sets: nextSets,
       setsMin: templateExercise.setsMin || undefined,
       reps: suggestion?.nextReps ?? templateExercise.reps,
       repsMin: templateExercise.repsMin || undefined,
@@ -358,7 +366,7 @@ export async function generateWorkoutExercises(
       distanceUnit: templateExercise.distanceUnit || undefined,
       intervals: suggestion?.nextIntervals ?? (templateExercise.intervals || undefined),
       tempo: templateExercise.tempo || undefined,
-      timeCap: suggestion?.nextTimeCap ?? (templateExercise.timeCap || undefined),
+      timeCap: calculatedTimeCap,
       movements: templateExercise.movements || undefined,
     };
   });
@@ -413,6 +421,11 @@ export async function applyAdjustments(
     orderBy: { scheduledDate: 'asc' },
   });
 
+  console.log(`Found ${futureWorkouts.length} future workouts for type "${workoutType}" after ${currentDate.toISOString()}`);
+  futureWorkouts.forEach((w, idx) => {
+    console.log(`  [${idx + 1}] ${w.id} - scheduled: ${w.scheduledDate?.toISOString()}, isGenerated: ${w.isGenerated}, exercises: ${w.exercises.length}`);
+  });
+
   if (futureWorkouts.length === 0 && !templateWorkout) {
     return {
       success: false,
@@ -431,6 +444,8 @@ export async function applyAdjustments(
     // FIRST: Update the template workout (the baseline for future generations)
     if (templateWorkout && templateWorkout.exercises.length > 0) {
       console.log(`Updating template workout ${templateWorkout.id} (scheduled ${templateWorkout.scheduledDate?.toISOString()})`);
+      console.log(`  Available template exercises:`, templateWorkout.exercises.map((e: { name: string }) => e.name));
+      console.log(`  Suggestions to apply:`, suggestions.map(s => s.name));
       
       for (const suggestion of suggestions) {
         const exercise = templateWorkout.exercises.find(
@@ -440,6 +455,8 @@ export async function applyAdjustments(
         if (exercise) {
           console.log(`  - Template: Will update exercise "${exercise.name}": ${exercise.sets}×${exercise.reps} @ ${exercise.weightValue} lbs → ${suggestion.nextSets}×${suggestion.nextReps} @ ${suggestion.nextWeight} lbs`);
           exerciseUpdates.push({ id: exercise.id, suggestion });
+        } else {
+          console.log(`  - Template: Exercise "${suggestion.name}" NOT FOUND. Available:`, templateWorkout.exercises.map((e: { name: string }) => e.name));
         }
       }
       
@@ -485,14 +502,31 @@ export async function applyAdjustments(
     if (exerciseUpdates.length > 0) {
       console.log(`Performing bulk update of ${exerciseUpdates.length} exercises in transaction`);
       
+      // First, get all exercise types so we can calculate timeCap for EMOM/AMRAP
+      const exerciseIds = exerciseUpdates.map(({ id }) => id);
+      const exercises = await tx.exercise.findMany({
+        where: { id: { in: exerciseIds } },
+        select: { id: true, exerciseType: true },
+      });
+      const exerciseTypeMap = new Map(exercises.map((e: { id: string; exerciseType: string }) => [e.id, e.exerciseType]));
+      
       // Create update operations for all exercises
       const updateOperations = exerciseUpdates.map(({ id, suggestion }) => {
+        const exerciseType = exerciseTypeMap.get(id) || 'strength';
+        
         const updateData: any = {
           sets: suggestion.nextSets,
           reps: suggestion.nextReps,
           weightValue: suggestion.nextWeight,
           weightType: 'ABSOLUTE',
         };
+        
+        // For EMOM exercises, automatically calculate timeCap from nextSets (rounds)
+        // EMOM: 1 round = 1 minute, so timeCap = nextSets * 60 seconds
+        if (exerciseType === 'emom') {
+          updateData.timeCap = suggestion.nextSets * 60;
+          console.log(`  - Auto-calculating timeCap for EMOM "${suggestion.name}": ${suggestion.nextSets} rounds = ${updateData.timeCap} seconds`);
+        }
         
         if (suggestion.nextRestTime !== undefined) {
           updateData.restTime = suggestion.nextRestTime;

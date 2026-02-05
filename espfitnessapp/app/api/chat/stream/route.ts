@@ -3,12 +3,10 @@ import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import {
   getOpenRouterClient,
-  extractJSON,
   type ChatMessage,
   type SSEEvent,
   type WorkoutDayData,
 } from '@/app/lib/openrouter';
-import { buildExerciseData, findNextWorkout } from '@/app/lib/progressive';
 
 // Set timeout to 5 minutes for streaming AI responses
 export const maxDuration = 300;
@@ -42,7 +40,7 @@ export async function POST(request: NextRequest) {
 
       const userId = session.user.id;
       const body = await request.json();
-      const { sessionId, message, mode, planId, context } = body;
+      const { sessionId, message, planId, context } = body;
 
       // Verify session belongs to user
       const chatSession = await prisma.chatSession.findUnique({
@@ -64,7 +62,7 @@ export async function POST(request: NextRequest) {
             planId: planId || null,
             role: 'user',
             content: message,
-            metadata: { mode, adjustmentId: context?.adjustmentId },
+            metadata: {},
           },
         });
       }
@@ -93,9 +91,9 @@ export async function POST(request: NextRequest) {
       // Get OpenRouter client
       const openRouter = getOpenRouterClient();
       let fullResponse = '';
-      let metadata: object | string | number | boolean | null | undefined = undefined;
+      let toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
 
-      // Get current plan for context (for both create and edit modes)
+      // Get current plan for context
       let currentPlan = null;
       if (planId) {
         currentPlan = await prisma.workoutPlan.findUnique({
@@ -109,688 +107,299 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // Handle different modes
-      switch (mode) {
-        case 'create':
-        case 'edit':
-          // Step 1: Stream the plan STRUCTURE (no exercises)
-          const structureGenerator = openRouter.generatePlanStructureStream(chatHistory, {
-            bodyweight: context?.bodyweight,
-            experienceLevel: context?.experienceLevel,
-            currentPlan: currentPlan || undefined,
+      // Check if this chat session has an associated pending adjustment
+      // First check if adjustmentId was passed in context, otherwise look for one in previous messages
+      let adjustmentId = context?.adjustmentId || null;
+      
+      if (!adjustmentId) {
+        // Look for adjustment metadata in previous messages
+        // Get recent messages and check their metadata in JavaScript (Prisma JSON queries can be tricky)
+        const recentMsgs = await prisma.chatMessage.findMany({
+          where: { sessionId },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+          select: { metadata: true },
+        });
+
+        for (const msg of recentMsgs) {
+          if (msg.metadata && typeof msg.metadata === 'object') {
+            const metadata = msg.metadata as { adjustmentId?: string };
+            if (metadata.adjustmentId) {
+              adjustmentId = metadata.adjustmentId;
+              break;
+            }
+          }
+        }
+      }
+
+      // If still no adjustmentId but we have a planId, check for any pending adjustments for this plan
+      if (!adjustmentId && planId) {
+        const pendingAdj = await prisma.pendingAdjustment.findFirst({
+          where: {
+            userId,
+            planId,
+            status: 'pending',
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        if (pendingAdj) {
+          adjustmentId = pendingAdj.id;
+        }
+      }
+
+      // Log adjustmentId for debugging
+      if (adjustmentId) {
+        console.log('Passing adjustmentId to AI context:', adjustmentId);
+      }
+
+      // Fetch workout log data if adjustmentId is present
+      let workoutLogData = null;
+      if (adjustmentId) {
+        const pendingAdj = await prisma.pendingAdjustment.findUnique({
+          where: { id: adjustmentId },
+          select: { workoutLogId: true },
+        });
+
+        if (pendingAdj?.workoutLogId) {
+          const workoutLog = await prisma.workoutLog.findUnique({
+            where: { id: pendingAdj.workoutLogId },
+            include: {
+              day: true,
+              exerciseLogs: {
+                include: {
+                  exercise: true,
+                },
+              },
+            },
           });
 
-          // Stream text but filter out JSON - only send conversational text
-          let inJsonBlock = false;
-          let jsonDepth = 0;
-          let textBuffer = '';
-          
-          for await (const chunk of structureGenerator) {
-            fullResponse += chunk;
-            
-            // Process chunk character by character to detect JSON
-            for (const char of chunk) {
-              if (char === '`' && textBuffer.endsWith('``')) {
-                // Detected start of code block
-                inJsonBlock = true;
-                textBuffer = textBuffer.slice(0, -2); // Remove the backticks from buffer
-                // Send any buffered text before the JSON
-                if (textBuffer.trim()) {
-                  await sendEvent({ type: 'text-chunk', content: textBuffer });
-                }
-                textBuffer = '';
-                continue;
-              }
-              
-              if (inJsonBlock) {
-                // Look for end of code block
-                if (char === '`' && textBuffer.endsWith('``')) {
-                  inJsonBlock = false;
-                  textBuffer = '';
-                }
-                continue;
-              }
-              
-              // Also detect raw JSON objects (starting with {)
-              if (char === '{' && !inJsonBlock) {
-                jsonDepth++;
-                if (jsonDepth === 1 && textBuffer.trim()) {
-                  // Send buffered text before JSON starts
-                  await sendEvent({ type: 'text-chunk', content: textBuffer });
-                  textBuffer = '';
-                }
-                continue;
-              }
-              
-              if (jsonDepth > 0) {
-                if (char === '{') jsonDepth++;
-                if (char === '}') jsonDepth--;
-                continue;
-              }
-              
-              textBuffer += char;
-            }
-            
-            // Send buffered text if we have enough
-            if (textBuffer.length > 50 && !inJsonBlock && jsonDepth === 0) {
-              await sendEvent({ type: 'text-chunk', content: textBuffer });
-              textBuffer = '';
-            }
+          if (workoutLog) {
+            workoutLogData = {
+              workoutDate: workoutLog.workoutDate,
+              dayName: workoutLog.day.dayName,
+              workoutType: workoutLog.day.workoutType,
+              exercises: workoutLog.exerciseLogs.map((exLog) => ({
+                name: exLog.exercise.name,
+                exerciseType: exLog.exercise.exerciseType,
+                prescribedSets: exLog.exercise.sets,
+                prescribedReps: exLog.exercise.reps,
+                prescribedWeight: exLog.exercise.weightValue,
+                weightType: exLog.exercise.weightType,
+                prescribedRestTime: exLog.exercise.restTime,
+                progression: exLog.exercise.progression,
+                // Time-based fields
+                duration: exLog.exercise.duration,
+                // Distance fields
+                distance: exLog.exercise.distance,
+                distanceUnit: exLog.exercise.distanceUnit,
+                // AMRAP/EMOM/Tabata fields
+                timeCap: exLog.exercise.timeCap,
+                intervals: exLog.exercise.intervals,
+                tempo: exLog.exercise.tempo,
+                // Completed data
+                completedSets: exLog.setsCompleted,
+                repsPerSet: exLog.repsPerSet,
+                weightUsed: exLog.weightUsed,
+                completedDuration: exLog.duration,
+                completedDistance: exLog.distance,
+                completedRounds: exLog.roundsCompleted,
+                timeElapsed: exLog.timeElapsed,
+                performanceData: exLog.performanceData,
+                notes: exLog.notes,
+              })),
+            };
           }
-          
-          // Send any remaining text
-          if (textBuffer.trim() && !inJsonBlock && jsonDepth === 0) {
-            await sendEvent({ type: 'text-chunk', content: textBuffer });
+        }
+      }
+
+      // Stream the unified chat with tool support
+      const chatGenerator = openRouter.unifiedChatStream(
+        chatHistory,
+        {
+          currentPlan: currentPlan || undefined,
+          userName: context?.userName,
+          bodyweight: context?.bodyweight,
+          adjustmentId: adjustmentId || undefined,
+          workoutLogData: workoutLogData || undefined,
+        }
+      );
+
+      for await (const chunk of chatGenerator) {
+        if (chunk.type === 'text') {
+          fullResponse += chunk.content;
+          await sendEvent({ type: 'text-chunk', content: chunk.content });
+        } else if (chunk.type === 'tool_call') {
+          // Parse tool call arguments
+          try {
+            const args = JSON.parse(chunk.toolCall.arguments);
+            toolCalls.push({
+              id: chunk.toolCall.id,
+              name: chunk.toolCall.name,
+              arguments: args,
+            });
+            
+            // Send tool-call event
+            await sendEvent({
+              type: 'tool-call',
+              toolCall: {
+                id: chunk.toolCall.id,
+                name: chunk.toolCall.name,
+                arguments: args,
+              },
+            });
+          } catch (e) {
+            console.error('Failed to parse tool call arguments:', e);
           }
+        }
+      }
 
-          await sendEvent({ type: 'text-done' });
+      await sendEvent({ type: 'text-done' });
 
-          // Step 2: Extract plan structure (without exercises)
-          const structureData = extractJSON<{
-            goal: string;
-            weeksDuration?: number;
-            sessionsPerWeek?: number;
-            schedule: Array<{
-              dayNumber: number;
-              dayName: string;
-              workoutType: string;
-              workoutColor: string;
-            }>;
-          }>(fullResponse);
-          
-          if (structureData && structureData.schedule) {
-            // Set start date to today (as local date, no timezone issues)
-            const now = new Date();
-            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-            
-            const weeksDuration = structureData.weeksDuration || 12;
-            const sessionsPerWeek = structureData.sessionsPerWeek || structureData.schedule.filter(d => d.workoutType !== 'Rest').length;
-            
-            // Don't create plan in database yet - just generate the structure
+      // Execute tool calls and send results
+      let metadata: Record<string, unknown> | undefined = undefined;
+
+      for (const toolCall of toolCalls) {
+        try {
+          if (toolCall.name === 'create_workout_plan') {
+            // Handle plan creation/editing
+            const args = toolCall.arguments as {
+              goal: string;
+              weeksDuration?: number;
+              sessionsPerWeek?: number;
+              schedule: Array<{
+                dayNumber: number;
+                dayName: string;
+                workoutType: string;
+                workoutColor: string;
+                exercises: WorkoutDayData['exercises'];
+              }>;
+              isEdit?: boolean;
+            };
+
+            // Create plan data structure
             const planData = {
-              goal: structureData.goal,
-              weeksDuration: weeksDuration,
-              sessionsPerWeek: sessionsPerWeek,
-              startDate: today.toISOString(),
-            };
-
-            // Helper to parse reps/sets - handles "6-8" range format
-            // Returns { value: max, min: min or null }
-            const parseRange = (val: number | string): { value: number; min: number | null } => {
-              if (typeof val === 'number') return { value: Math.round(val), min: null };
-              const str = String(val);
-              // Handle range like "6-8"
-              if (str.includes('-')) {
-                const parts = str.split('-').map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
-                if (parts.length >= 2) {
-                  return { value: Math.max(...parts), min: Math.min(...parts) };
-                }
-              }
-              const parsed = parseInt(str, 10);
-              return { value: isNaN(parsed) ? 8 : parsed, min: null };
-            };
-
-            // Step 3: Generate exercises for each day one by one (first week only shown)
-            // Filter out any rest days the AI might have included (we don't store them)
-            // Keep "(no changes)" and "(copy from draft)" entries - they indicate days to preserve
-            const workoutDays = structureData.schedule.filter(d => d.workoutType !== 'Rest');
-            const totalWorkoutDays = workoutDays.length;
-            const generatedDays: WorkoutDayData[] = [];
-            const previousDaysSummary: Array<{ dayName: string; workoutType: string; exerciseNames: string[] }> = [];
-
-            // If editing existing plan, map existing exercises to days (from database)
-            const existingDaysMap = new Map<number, WorkoutDayData>();
-            if (currentPlan && mode === 'edit') {
-              for (const workoutDay of currentPlan.workoutDays) {
-                const exercises = workoutDay.exercises.map((ex: any) => ({
-                  name: ex.name,
-                  sets: ex.sets,
-                  setsMin: ex.setsMin,
-                  reps: ex.reps,
-                  repsMin: ex.repsMin,
-                  weightType: ex.weightType,
-                  weightValue: ex.weightValue,
-                  restTime: ex.restTime,
-                  exerciseType: ex.exerciseType,
-                  progression: ex.progression,
-                  movementDetails: ex.movementDetails,
-                  duration: ex.duration,
-                  distance: ex.distance,
-                  distanceUnit: ex.distanceUnit,
-                  intervals: ex.intervals,
-                  tempo: ex.tempo,
-                  timeCap: ex.timeCap,
-                  movements: ex.movements,
-                }));
-                
-                existingDaysMap.set(workoutDay.dayNumber, {
-                  dayNumber: workoutDay.dayNumber,
-                  dayName: workoutDay.dayName,
-                  workoutType: workoutDay.workoutType,
-                  workoutColor: workoutDay.workoutColor,
-                  exercises: exercises,
-                });
-              }
-            }
-
-            // Get last generated plan from chat history (for "(copy from draft)")
-            const lastDraftDaysMap = new Map<number, WorkoutDayData>();
-            let lastDraftPlan = null;
-            type RecentMsg = { role: string; metadata?: unknown };
-            const lastAssistantMessage = (recentMessages as RecentMsg[])
-              .filter((m: RecentMsg) => m.role === 'assistant' && m.metadata && typeof m.metadata === 'object')
-              .reverse()
-              .find((m: RecentMsg) => {
-                const meta = m.metadata as { type?: string; planData?: { schedule?: unknown } } | undefined;
-                return meta?.type === 'plan_preview' && meta?.planData?.schedule;
-              });
-            
-            if (lastAssistantMessage?.metadata) {
-              const lastPlanData = (lastAssistantMessage.metadata as any).planData;
-              if (lastPlanData?.schedule) {
-                lastDraftPlan = lastPlanData; // Store entire plan for context
-                for (const day of lastPlanData.schedule) {
-                  lastDraftDaysMap.set(day.dayNumber, day);
-                }
-              }
-            }
-
-            // Generate first week's exercises day by day
-            for (let i = 0; i < workoutDays.length; i++) {
-              const dayStructure = workoutDays[i];
-
-              // Check if this day should use existing data
-              let dayWithExercises: WorkoutDayData | null = null;
-              let sourceDescription = '';
-              
-              if (dayStructure.workoutType === '(no changes)') {
-                // Copy from database plan
-                const existingDay = existingDaysMap.get(dayStructure.dayNumber);
-                if (existingDay) {
-                  dayWithExercises = existingDay;
-                  sourceDescription = 'database plan';
-                } else {
-                  console.warn(`Day marked as "(no changes)" but no existing data found for day ${dayStructure.dayNumber}`);
-                }
-              } else if (dayStructure.workoutType === '(copy from draft)') {
-                // Copy from last generated plan in this chat
-                const lastDraftDay = lastDraftDaysMap.get(dayStructure.dayNumber);
-                if (lastDraftDay) {
-                  dayWithExercises = lastDraftDay;
-                  sourceDescription = 'last draft';
-                } else {
-                  console.warn(`Day marked as "(copy from draft)" but no previous draft found for day ${dayStructure.dayNumber}`);
-                }
-              } else if (currentPlan && mode === 'edit' && existingDaysMap.has(dayStructure.dayNumber)) {
-                // Implicit preservation - day exists in current plan and wasn't explicitly marked
-                const existingDay = existingDaysMap.get(dayStructure.dayNumber);
-                if (existingDay) {
-                  // Update type/color if specified, keep exercises
-                  dayWithExercises = {
-                    ...existingDay,
-                    workoutType: dayStructure.workoutType,
-                    workoutColor: dayStructure.workoutColor,
-                  };
-                  sourceDescription = 'implicit preservation (updated type/color)';
-                }
-              }
-              
-              if (!dayWithExercises) {
-                // Generate exercises for this day using AI (new day or create mode)
-                dayWithExercises = await openRouter.generateDay(
-                  {
-                    goal: structureData.goal,
-                    weeksDuration: weeksDuration,
-                    sessionsPerWeek: sessionsPerWeek,
-                    bodyweight: context?.bodyweight,
-                    experienceLevel: context?.experienceLevel,
-                  },
-                  {
-                    dayNumber: dayStructure.dayNumber,
-                    dayName: dayStructure.dayName,
-                    workoutType: dayStructure.workoutType,
-                    workoutColor: dayStructure.workoutColor,
-                  },
-                  previousDaysSummary,
-                  {
-                    chatHistory: chatHistory,
-                    fullGeneratedDays: generatedDays,
-                    currentPlan: currentPlan, // Pass active plan for "(no changes)"
-                    lastDraftPlan: lastDraftPlan, // Pass last draft for "(copy from draft)"
-                  }
-                );
-                sourceDescription = 'generated';
-              }
-              
-              if (sourceDescription) {
-                console.log(`Day ${dayStructure.dayNumber} (${dayStructure.dayName}): ${sourceDescription}`);
-              }
-
-              if (dayWithExercises) {
-                // Track for next day's context
-                previousDaysSummary.push({
-                  dayName: dayStructure.dayName,
-                  workoutType: dayStructure.workoutType,
-                  exerciseNames: dayWithExercises.exercises.map(e => e.name),
-                });
-
-                // Sanitize exercises for display (parse ranges properly)
-                const sanitizedDay: WorkoutDayData = {
-                  ...dayWithExercises,
-                  exercises: dayWithExercises.exercises.map(ex => {
-                    const setsRange = parseRange(ex.sets);
-                    const repsRange = parseRange(ex.reps);
-                    return {
-                      ...ex,
-                      sets: setsRange.value,
-                      setsMin: setsRange.min || undefined,
-                      reps: repsRange.value,
-                      repsMin: repsRange.min || undefined,
-                      weightValue: typeof ex.weightValue === 'number' ? ex.weightValue : parseFloat(String(ex.weightValue)) || 0,
-                    };
-                  }),
-                };
-
-                generatedDays.push(sanitizedDay);
-
-                // Determine next day for progress indicator
-                const nextDayIndex = i + 1;
-                const nextDay = nextDayIndex < workoutDays.length 
-                  ? workoutDays[nextDayIndex] 
-                  : null;
-
-                // Send day-generated event
-                await sendEvent({
-                  type: 'day-generated',
-                  day: sanitizedDay,
-                  progress: nextDay ? {
-                    current: i + 1,
-                    total: totalWorkoutDays,
-                    label: nextDay.dayName,
-                  } : undefined, // No progress indicator on last day
-                });
-              }
-            }
-
-            // Build final plan data with exercises (full JSON saved in message)
-            const finalPlanData = {
-              ...planData,
-              schedule: generatedDays,
+              goal: args.goal,
+              weeksDuration: args.weeksDuration || 12,
+              sessionsPerWeek: args.sessionsPerWeek || args.schedule.length,
+              schedule: args.schedule,
             };
 
             metadata = {
               type: 'plan_preview',
-              planData: finalPlanData as unknown as object,
+              planData,
             };
 
+            // Send tool result
             await sendEvent({
-              type: 'done',
-            });
-          } else {
-            // No plan structure extracted - just a conversation message (maybe asking questions)
-            await sendEvent({ type: 'done' });
-          }
-          break;
-
-        case 'post_workout':
-          // Handle post-workout analysis with streaming
-          let { adjustmentId } = context || {};
-          
-          // If adjustmentId not in context, try to retrieve it from previous messages in this session
-          if (!adjustmentId) {
-            const previousMessage = await prisma.chatMessage.findFirst({
-              where: { 
-                sessionId,
-                metadata: {
-                  path: ['adjustmentId'],
-                  not: null as any,
-                },
+              type: 'tool-result',
+              toolResult: {
+                toolCallId: toolCall.id,
+                result: { success: true, planData },
               },
-              orderBy: { createdAt: 'desc' },
             });
-            
-            if (previousMessage?.metadata && typeof previousMessage.metadata === 'object') {
-              const metadata = previousMessage.metadata as { adjustmentId?: string };
-              adjustmentId = metadata.adjustmentId;
+          } else if (toolCall.name === 'analyze_workout') {
+            // Handle workout analysis
+            const args = toolCall.arguments as {
+              adjustmentId: string;
+              summary: string;
+              exercises: Array<{
+                name: string;
+                exerciseType?: string;
+                currentWeight: number;
+                currentSets: number;
+                currentReps: number;
+                currentRepsPerSet?: number[];
+                currentWeightsUsed?: number[];
+                currentDistanceUnit?: string;
+                currentRestTime?: number;
+                currentIntervalStructure?: string;
+                nextWeight: number;
+                nextSets: number;
+                nextReps: number;
+                nextDistanceUnit?: string;
+                nextRestTime?: number;
+                nextIntervalStructure?: string;
+                nextProgression?: string;
+                reasoning: string;
+              }>;
+            };
+
+            // Log the raw arguments for debugging
+            console.log('analyze_workout tool call arguments:', JSON.stringify(args, null, 2));
+
+            // Validate adjustmentId format (should be a CUID, not a long string with text)
+            const adjId = args.adjustmentId?.trim();
+            if (!adjId || adjId.length > 30 || adjId.includes(' ')) {
+              console.error('Invalid adjustmentId format:', adjId);
+              throw new Error(`Invalid adjustmentId format. Expected a short ID string, got: "${adjId?.substring(0, 50)}...". Please use the exact adjustmentId from the system context.`);
             }
-          }
-          
-          if (!adjustmentId) {
-            fullResponse = "I couldn't find the workout data to analyze. Please try completing a workout first.";
-            await sendEvent({ type: 'text-chunk', content: fullResponse });
-            await sendEvent({ type: 'text-done' });
-            await sendEvent({ type: 'done' });
-            break;
-          }
 
-          // Fetch the pending adjustment with workout data
-          const pendingAdjustment = await prisma.pendingAdjustment.findUnique({
-            where: { id: adjustmentId },
-          });
-
-          if (!pendingAdjustment || pendingAdjustment.userId !== userId) {
-            fullResponse = "I couldn't find your workout data. Please try again.";
-            await sendEvent({ type: 'text-chunk', content: fullResponse });
-            await sendEvent({ type: 'text-done' });
-            await sendEvent({ type: 'done' });
-            break;
-          }
-
-          // Get the workout log details
-          const workoutLog = await prisma.workoutLog.findUnique({
-            where: { id: pendingAdjustment.workoutLogId },
-            include: {
-              day: true,
-            },
-          });
-
-          if (!workoutLog) {
-            fullResponse = "Workout data not found. Please try again.";
-            await sendEvent({ type: 'text-chunk', content: fullResponse });
-            await sendEvent({ type: 'text-done' });
-            await sendEvent({ type: 'done' });
-            break;
-          }
-
-          // Get user's bodyweight for weight calculations
-          const user = await prisma.user.findUnique({
-            where: { id: userId },
-            select: { bodyweight: true },
-          });
-
-          // Build exercise data with performance history (converts percentages to absolute pounds)
-          const exerciseData = await buildExerciseData(
-            workoutLog.id,
-            workoutLog.planId,
-            workoutLog.day.workoutType,
-            workoutLog.workoutDate,
-            user?.bodyweight || undefined
-          );
-
-          // Find the next workout of this type (after the completed workout's date)
-          const nextWorkout = await findNextWorkout(
-            workoutLog.planId,
-            workoutLog.day.workoutType,
-            workoutLog.workoutDate
-          );
-
-          // Stream the post-workout analysis with chat history for conversational context
-          const analysisGenerator = openRouter.analyzePostWorkoutStream({
-            workoutType: workoutLog.day.workoutType,
-            completedDate: workoutLog.workoutDate,
-            nextDate: nextWorkout?.scheduledDate || null,
-            feedback: workoutLog.feedback as { rating: number; notes?: string } | undefined,
-            exercises: exerciseData,
-          }, chatHistory);
-
-          // Stream the analysis text but filter out JSON - only send conversational text
-          let analysisInJsonBlock = false;
-          let analysisJsonDepth = 0;
-          let analysisTextBuffer = '';
-          
-          for await (const chunk of analysisGenerator) {
-            fullResponse += chunk;
-            
-            // Process chunk character by character to detect JSON
-            for (const char of chunk) {
-              if (char === '`' && analysisTextBuffer.endsWith('``')) {
-                // Detected start of code block
-                analysisInJsonBlock = true;
-                analysisTextBuffer = analysisTextBuffer.slice(0, -2); // Remove the backticks from buffer
-                // Send any buffered text before the JSON
-                if (analysisTextBuffer.trim()) {
-                  await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
-                }
-                analysisTextBuffer = '';
-                continue;
-              }
-              
-              if (analysisInJsonBlock) {
-                // Look for end of code block
-                if (char === '`' && analysisTextBuffer.endsWith('``')) {
-                  analysisInJsonBlock = false;
-                  analysisTextBuffer = '';
-                }
-                continue;
-              }
-              
-              // Also detect raw JSON objects (starting with {)
-              if (char === '{' && !analysisInJsonBlock) {
-                analysisJsonDepth++;
-                if (analysisJsonDepth === 1 && analysisTextBuffer.trim()) {
-                  // Send buffered text before JSON starts
-                  await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
-                  analysisTextBuffer = '';
-                }
-                continue;
-              }
-              
-              if (analysisJsonDepth > 0) {
-                if (char === '{') analysisJsonDepth++;
-                if (char === '}') analysisJsonDepth--;
-                continue;
-              }
-              
-              analysisTextBuffer += char;
-            }
-            
-            // Send buffered text if we have enough
-            if (analysisTextBuffer.length > 50 && !analysisInJsonBlock && analysisJsonDepth === 0) {
-              await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
-              analysisTextBuffer = '';
-            }
-          }
-          
-          // Send any remaining text
-          if (analysisTextBuffer.trim() && !analysisInJsonBlock && analysisJsonDepth === 0) {
-            await sendEvent({ type: 'text-chunk', content: analysisTextBuffer });
-          }
-
-          await sendEvent({ type: 'text-done' });
-
-          // Try to extract JSON suggestions from AI response
-          const suggestionData = extractJSON<{
-            summary: string;
-            exercises: Array<{
-              name: string;
-              nextSets: number;
-              nextReps: number;
-              nextWeight: number;
-              nextRestTime?: number;  // Rest time in seconds
-              nextProgression?: string; // Progression type
-              nextDuration?: number;  // For time-based exercises (in minutes)
-              nextDistance?: number;  // For distance exercises
-              nextTimeCap?: number;   // For EMOM/AMRAP/Tabata (in seconds)
-              nextIntervals?: {       // For interval exercises
-                type: string;
-                rounds: number;
-                phases: Array<{
-                  name: string;
-                  duration: number;
-                  intensity?: string;
-                }>;
-              };
-              reasoning: string;
-            }>;
-          }>(fullResponse);
-
-          if (suggestionData && suggestionData.exercises) {
-            // Log exercise names for debugging matching issues
-            console.log('AI returned exercise names:', suggestionData.exercises.map(e => e.name));
-            console.log('Expected exercise names:', exerciseData.map(e => e.name));
-            
-            // Format suggestions in the same order as the original exercises
-            const formattedSuggestions = exerciseData.map((original) => {
-              // Find the matching suggestion from AI with flexible matching
-              // Try exact match first, then fuzzy match (handles names with/without parenthetical notes)
-              const suggestion = suggestionData.exercises.find(
-                (ex) => {
-                  const aiName = ex.name.toLowerCase().trim();
-                  const dbName = original.name.toLowerCase().trim();
-                  
-                  // Exact match
-                  if (aiName === dbName) return true;
-                  
-                  // Remove parenthetical notes and compare base names
-                  const aiBaseName = aiName.split('(')[0].trim();
-                  const dbBaseName = dbName.split('(')[0].trim();
-                  
-                  // Base name match (after removing parenthetical notes)
-                  if (aiBaseName === dbBaseName) return true;
-                  
-                  // Only allow "contains" matching if the names are very similar
-                  // This prevents "Front Squat" from matching both "KB Front Squat" and "2KB Front Squat"
-                  // Only match if the AI name is the full database name or vice versa (no partial substring matches)
-                  if (aiName === dbBaseName || dbName === aiBaseName) return true;
-                  
-                  return false;
-                }
-              );
-              
-              // Calculate average reps performed
-              const avgRepsPerformed = original.performed.repsPerSet.length > 0
-                ? Math.round(original.performed.repsPerSet.reduce((a, b) => a + b, 0) / original.performed.repsPerSet.length)
-                : original.reps;
-              
-              // Get the detailed reps per set for display
-              const repsDetail = original.performed.repsPerSet;
-              
-              if (!suggestion) {
-                // If AI didn't provide a suggestion for this exercise, use current values
-                console.warn(`No AI suggestion found for exercise: "${original.name}". Available AI suggestions:`, suggestionData.exercises.map(e => e.name));
-                return {
-                  name: original.name,
-                  exerciseType: original.exerciseType,
-                  currentWeight: original.weightValue,
-                  currentWeightType: original.weightType,
-                  currentSets: original.sets,
-                  currentReps: original.reps,
-                  currentRestTime: original.restTime,
-                  currentProgression: original.progression,
-                  currentDuration: original.duration,
-                  currentDistance: original.distance,
-                  currentDistanceUnit: original.distanceUnit,
-                  currentTimeCap: original.timeCap,
-                  currentIntervals: original.intervals,
-                  performedSets: original.performed.setsCompleted,
-                  performedReps: avgRepsPerformed,
-                  performedRepsDetail: repsDetail,
-                  performedWeightsDetail: original.performed.weightsPerSet,
-                  performedWeight: Math.max(...original.performed.weightsPerSet), // Show max weight
-                  performedDuration: original.performed.duration,
-                  performedDistance: original.performed.distance,
-                  nextWeight: original.weightValue,
-                  nextWeightType: original.weightType,
-                  nextSets: original.sets,
-                  nextReps: original.reps,
-                  nextRestTime: original.restTime,
-                  nextProgression: original.progression,
-                  nextDuration: original.duration,
-                  nextDistance: original.distance,
-                  nextTimeCap: original.timeCap,
-                  nextIntervals: original.intervals,
-                  reasoning: 'Maintain current prescription',
-                };
-              }
-              
-              // Log successful match and weight change
-              console.log(`Matched AI suggestion for "${original.name}": ${original.weightValue} lbs → ${suggestion.nextWeight} lbs`);
-              
-              return {
-                name: original.name, // Use original name for consistency
-                exerciseType: original.exerciseType,
-                currentWeight: original.weightValue,
-                currentWeightType: original.weightType,
-                currentSets: original.sets,
-                currentReps: original.reps,
-                currentRestTime: original.restTime,
-                currentProgression: original.progression,
-                currentDuration: original.duration,
-                currentDistance: original.distance,
-                currentDistanceUnit: original.distanceUnit,
-                currentTimeCap: original.timeCap,
-                currentIntervals: original.intervals,
-                performedSets: original.performed.setsCompleted,
-                performedReps: avgRepsPerformed,
-                performedRepsDetail: repsDetail,
-                performedWeightsDetail: original.performed.weightsPerSet,
-                performedWeight: Math.max(...original.performed.weightsPerSet), // Show max weight
-                performedDuration: original.performed.duration,
-                performedDistance: original.performed.distance,
-                nextWeight: suggestion.nextWeight,
-                nextWeightType: 'ABSOLUTE', // AI suggestions are always in absolute pounds
-                nextSets: suggestion.nextSets,
-                nextReps: suggestion.nextReps,
-                nextRestTime: suggestion.nextRestTime ?? original.restTime,
-                nextProgression: suggestion.nextProgression ?? original.progression,
-                nextDuration: suggestion.nextDuration,
-                nextDistance: suggestion.nextDistance,
-                nextTimeCap: suggestion.nextTimeCap,
-                nextIntervals: suggestion.nextIntervals,
-                reasoning: suggestion.reasoning,
-              };
+            // Verify pending adjustment exists
+            const pendingAdj = await prisma.pendingAdjustment.findUnique({
+              where: { id: adjId },
             });
 
+            if (!pendingAdj) {
+              throw new Error(`Pending adjustment ${adjId} not found. Cannot analyze workout without an adjustment record.`);
+            }
+
+            // Update pending adjustment with suggestions
             await prisma.pendingAdjustment.update({
-              where: { id: adjustmentId },
+              where: { id: adjId },
               data: {
-                suggestions: formattedSuggestions,
+                suggestions: args.exercises,
               },
             });
-
-            // Send adjustment events for each exercise
-            for (let i = 0; i < formattedSuggestions.length; i++) {
-              await sendEvent({
-                type: 'adjustment-generated',
-                adjustment: formattedSuggestions[i],
-                progress: {
-                  current: i + 1,
-                  total: formattedSuggestions.length,
-                  label: formattedSuggestions[i].name,
-                },
-              });
-            }
 
             metadata = {
               type: 'adjustment_preview',
-              adjustmentId: adjustmentId,
+              adjustmentId: adjId,
               adjustmentData: {
-                summary: suggestionData.summary,
-                exercises: formattedSuggestions,
+                summary: args.summary,
+                exercises: args.exercises,
               },
             };
+            
+            // Store adjustmentId for future messages in this session
+            adjustmentId = adjId;
+
+            // Send tool result with adjustmentId
+            await sendEvent({
+              type: 'tool-result',
+              toolResult: {
+                toolCallId: toolCall.id,
+                result: { 
+                  success: true, 
+                  adjustmentData: metadata.adjustmentData,
+                  adjustmentId: adjId,
+                },
+              },
+            });
           }
-
-          await sendEvent({ type: 'done' });
-          break;
-
-        default:
-          // General chat (includes "Ask me anything") - stream the response with full plan context when available
-          const generalGenerator = openRouter.generalChatStream(chatHistory, {
-            currentPlan: currentPlan || undefined,
-            userName: context?.userName,
-            bodyweight: context?.bodyweight,
+        } catch (error) {
+          console.error(`Tool execution error (${toolCall.name}):`, error);
+          await sendEvent({
+            type: 'error',
+            error: `Failed to execute ${toolCall.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
           });
-
-          for await (const chunk of generalGenerator) {
-            fullResponse += chunk;
-            await sendEvent({ type: 'text-chunk', content: chunk });
-          }
-
-          await sendEvent({ type: 'text-done' });
-          await sendEvent({ type: 'done' });
+        }
       }
 
+      await sendEvent({ type: 'done' });
+
       // Save assistant message
-      const metadataObj = metadata as { planId?: string } | undefined;
+      // If we have an adjustmentId and no specific metadata, include it
+      const messageMetadata = metadata || (adjustmentId ? { adjustmentId } : undefined);
+      
       await prisma.chatMessage.create({
         data: {
           sessionId,
           userId,
-          planId: planId || metadataObj?.planId || undefined,
+          planId: planId || undefined,
           role: 'assistant',
           content: fullResponse,
-          metadata: metadata,
+          metadata: messageMetadata as any,
         },
       });
 
@@ -800,30 +409,28 @@ export async function POST(request: NextRequest) {
         data: { updatedAt: new Date() },
       });
 
-      // Set title based on mode if this is the first message and no title exists
+      // Set title based on first message if no title exists
       if (!updatedSession.title) {
         const messageCount = await prisma.chatMessage.count({
           where: { sessionId },
         });
-        
+
         if (messageCount >= 2) {
           let title = 'General Chat';
-          
-          if (mode === 'create' || mode === 'edit') {
+
+          // Determine title based on tool calls or content
+          if (toolCalls.some(tc => tc.name === 'create_workout_plan')) {
             title = 'Create Workout Plan';
-          } else if (mode === 'general') {
-            title = 'Fitness Question';
-          } else if (mode === 'post_workout') {
+          } else if (toolCalls.some(tc => tc.name === 'analyze_workout')) {
             title = 'Workout Analysis';
           }
-          
+
           await prisma.chatSession.update({
             where: { id: sessionId },
             data: { title },
           });
         }
       }
-
     } catch (error) {
       console.error('Streaming chat error:', error);
       await sendEvent({

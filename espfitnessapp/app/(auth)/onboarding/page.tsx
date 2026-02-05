@@ -31,7 +31,7 @@ export default function OnboardingPage() {
       if (goal.trim()) {
         // Store goal in session/localStorage for chat to pick up
         sessionStorage.setItem('initialGoal', goal);
-        router.push('/chat/create');
+        router.push('/chat');
       } else {
         router.push('/home');
       }

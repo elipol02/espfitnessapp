@@ -246,7 +246,7 @@ export function HomeContent({ data }: { data: HomeData }) {
                 Create your first personalized workout plan with AI
               </p>
             </div>
-            <Link href="/chat/create">
+            <Link href="/chat">
               <Button size="lg" fullWidth>
                 Create Your Plan
               </Button>

@@ -118,7 +118,7 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
             <p className="text-sm text-muted-foreground mb-6 max-w-sm">
               Create your first workout plan by chatting with the AI assistant
             </p>
-            <Button onClick={() => router.push('/chat/create')}>
+            <Button onClick={() => router.push('/chat')}>
               Create Plan
             </Button>
           </div>

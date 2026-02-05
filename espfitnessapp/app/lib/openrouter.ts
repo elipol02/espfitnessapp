@@ -1,8 +1,6 @@
 import { z } from 'zod';
 
-// OpenRouter API client for GPT-5.2 Thinking
-// use anthropic/claude-haiku-4.5 for cheaper
-
+// OpenRouter API client
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'anthropic/claude-haiku-4.5';
 
@@ -41,20 +39,26 @@ export interface OpenRouterStreamChunk {
 
 // SSE Event types for streaming chat
 export type SSEEventType = 
-  | 'text-chunk'           // Token from conversational response (ALL modes)
-  | 'text-done'            // Conversational text complete (ALL modes)
-  | 'day-generated'        // One workout day complete with exercises (create/edit only)
-  | 'adjustment-generated' // One exercise adjustment ready (post_workout only)
-  | 'error'                // Something went wrong (ALL modes)
-  | 'done'                 // Generation complete (ALL modes)
-  | 'cancelled';           // User stopped generation (ALL modes)
+  | 'text-chunk'           // Token from conversational response
+  | 'text-done'            // Conversational text complete
+  | 'tool-call'            // Tool call detected (includes tool name and args)
+  | 'tool-result'          // Tool execution result
+  | 'error'                // Something went wrong
+  | 'done'                 // Generation complete
+  | 'cancelled';           // User stopped generation
 
 export interface SSEEvent {
   type: SSEEventType;
   content?: string;
-  day?: WorkoutDayData;
-  adjustment?: ExerciseAdjustment;
-  planId?: string;
+  toolCall?: {
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+  };
+  toolResult?: {
+    toolCallId: string;
+    result: unknown;
+  };
   error?: string;
   progress?: {
     current: number;
@@ -71,9 +75,9 @@ export interface WorkoutDayData {
   exercises: Array<{
     name: string;
     sets: number;
-    setsMin?: number;      // For ranges like "3-4", this is 3 and sets is 4
+    setsMin?: number;
     reps: number;
-    repsMin?: number;      // For ranges like "6-8", this is 6 and reps is 8
+    repsMin?: number;
     weightType: string;
     weightValue: number;
     restTime?: number;
@@ -84,16 +88,11 @@ export interface WorkoutDayData {
       cues: string[];
       muscles: string[];
     };
-    // Time-based fields
-    duration?: number;     // Duration in minutes (cardio_time, mobility_time)
-    // Distance fields
+    duration?: number;
     distance?: number;
     distanceUnit?: string;
-    // Interval fields
     intervals?: object;
-    // Tempo fields
     tempo?: string;
-    // AMRAP/EMOM/Tabata fields
     timeCap?: number;
     movements?: Array<{
       name: string;
@@ -124,511 +123,297 @@ export interface ExerciseAdjustment {
   reasoning: string;
 }
 
-// System prompts for different modes
-export const SYSTEM_PROMPTS = {
-  workoutSubmission: `You are a fitness tracking assistant. The user has already chosen to LOG A WORKOUT - they selected this action from the menu.
-
-DO NOT ask them "what do you want help with" or offer menu choices. They already chose to log their workout.
-
-When a user describes their workout:
-1. Parse the exercises, sets, reps, and weights they mention
-2. Ask clarifying questions if anything is unclear (which exercises? how many sets/reps? what weight?)
-3. Match exercises to their scheduled workout when possible
-4. Provide encouraging feedback
-
-After collecting workout data, output it in this JSON format:
-{
-  "exercises": [
-    {
-      "name": "Bench Press",
-      "sets": [
-        { "reps": 8, "weight": 185 },
-        { "reps": 8, "weight": 185 },
-        { "reps": 7, "weight": 185 }
-      ]
+// Tool definitions for function calling
+export const WORKOUT_TOOLS = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'create_workout_plan',
+      description: 'Create or edit a workout plan. Use this when the user wants to create a new workout plan, edit their existing plan, add exercises, modify workout structure, etc. IMPORTANT: Ask for equipment, days per week, experience level, injuries, and session length BEFORE calling this tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          goal: {
+            type: 'string',
+            description: 'The user\'s fitness goal (e.g., "build muscle", "lose weight", "get stronger")'
+          },
+          weeksDuration: {
+            type: 'number',
+            description: 'How many weeks the plan should last (default: 12)'
+          },
+          sessionsPerWeek: {
+            type: 'number',
+            description: 'Number of workout sessions per week'
+          },
+          schedule: {
+            type: 'array',
+            description: 'Array of workout days with complete exercises. Each day includes dayNumber (0=Sunday, 1=Monday, etc.), dayName, workoutType, workoutColor, and exercises array with ALL details (sets, reps, weight, progression, movementDetails).',
+            items: {
+              type: 'object',
+              properties: {
+                dayNumber: { type: 'number' },
+                dayName: { type: 'string' },
+                workoutType: { type: 'string' },
+                workoutColor: { type: 'string' },
+                exercises: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      exerciseType: { type: 'string', enum: ['strength', 'cardio_time', 'mobility_time', 'distance', 'interval', 'amrap', 'emom', 'tabata', 'tempo'] },
+                      sets: { type: 'number' },
+                      reps: { type: 'number' },
+                      weightType: { type: 'string', enum: ['ABSOLUTE', 'BW', '1RM'] },
+                      weightValue: { type: 'number' },
+                      restTime: { type: 'number' },
+                      progression: { type: 'string' },
+                      movementDetails: {
+                        type: 'object',
+                        properties: {
+                          description: { type: 'string' },
+                          cues: { type: 'array', items: { type: 'string' } },
+                          muscles: { type: 'array', items: { type: 'string' } }
+                        },
+                        required: ['description', 'cues', 'muscles']
+                      },
+                      duration: { type: 'number' },
+                      distance: { type: 'number' },
+                      distanceUnit: { type: 'string' },
+                      tempo: { type: 'string' },
+                      timeCap: { type: 'number' }
+                    },
+                    required: ['name', 'sets', 'reps', 'weightType', 'weightValue', 'progression', 'movementDetails']
+                  }
+                }
+              },
+              required: ['dayNumber', 'dayName', 'workoutType', 'workoutColor', 'exercises']
+            }
+          },
+          isEdit: {
+            type: 'boolean',
+            description: 'True if editing an existing plan, false if creating new'
+          }
+        },
+        required: ['goal', 'schedule']
+      }
     }
-  ],
-  "feedback": {
-    "rating": 4,
-    "notes": "Optional notes"
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'analyze_workout',
+      description: 'Analyze a completed workout and provide progression recommendations. ONLY use this tool when an adjustmentId is explicitly provided in the system context. Do NOT call this tool if no adjustmentId is available.',
+      parameters: {
+        type: 'object',
+        properties: {
+          adjustmentId: {
+            type: 'string',
+            description: 'CRITICAL: Use the EXACT adjustmentId string provided in the system message after "Adjustment ID available in context:". Copy it exactly as-is - do not modify, append, or include any other text. Example: if system says "Adjustment ID available in context: abc123", use "abc123"'
+          },
+          summary: {
+            type: 'string',
+            description: 'Brief overall assessment of the workout'
+          },
+          exercises: {
+            type: 'array',
+            description: 'Array of exercise adjustments with current and next values. Include detailed set-by-set performance data if available.',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                exerciseType: { type: 'string', description: 'Type of exercise: strength, distance, cardio_time, etc.' },
+                currentWeight: { type: 'number', description: 'Average weight used (only for summary)' },
+                currentSets: { type: 'number', description: 'Number of sets completed' },
+                currentReps: { type: 'number', description: 'Average reps/distance completed (only for summary)' },
+                currentRepsPerSet: { type: 'array', items: { type: 'number' }, description: 'REQUIRED: Extract actual values from each set. For strength: reps per set. For distance: distance per set. For time-based (cardio_time, mobility_time): minutes. Examples: "Set 1: 40 meters" -> [40], "5 minutes" -> [5]' },
+                currentWeightsUsed: { type: 'array', items: { type: 'number' }, description: 'REQUIRED: Extract actual weights from each set. Example: "@ 50 lbs" for each set -> [50, 50, 50]. For exercises without weight, use [0]' },
+                currentDistanceUnit: { type: 'string', description: 'For distance exercises only: the unit (feet, meters, yards)' },
+                currentRestTime: { type: 'number', description: 'Rest time in seconds from prescribed rest time' },
+                currentIntervalStructure: { type: 'string', description: 'For interval exercises only: description of interval phases (e.g., "30sec hard / 30sec easy")' },
+                nextWeight: { type: 'number' },
+                nextSets: { type: 'number' },
+                nextReps: { type: 'number', description: 'For strength: reps. For distance: distance value. For time-based: minutes' },
+                nextDistanceUnit: { type: 'string', description: 'For distance exercises only: the unit (feet, meters, yards)' },
+                nextRestTime: { type: 'number', description: 'Recommended rest time in seconds for next workout' },
+                nextIntervalStructure: { type: 'string', description: 'For interval exercises only: description of interval phases for next workout (e.g., "30sec hard / 30sec easy")' },
+                nextProgression: { type: 'string', description: 'Progressive overload strategy (e.g., "linear +5 lbs weekly", "linear +10 meters per set weekly")' },
+                reasoning: { type: 'string' }
+              },
+              required: ['name', 'currentWeight', 'currentSets', 'currentReps', 'nextWeight', 'nextSets', 'nextReps', 'reasoning']
+            }
+          }
+        },
+        required: ['adjustmentId', 'summary', 'exercises']
+      }
+    }
   }
-}
+];
 
-Be supportive and celebrate progress. Ask how the workout felt after logging.`,
+// System prompt for unified chat with tool calls
+export const SYSTEM_PROMPT = `You are ESP Fitness AI, an expert fitness coach assistant that helps users with their workout plans and fitness questions.
 
+IMPORTANT: You have access to specialized tools for workout operations. Use them when appropriate:
 
-  general: `You are ESP Fitness AI, a helpful fitness coach assistant. The user has chosen to ASK A QUESTION - they selected this action from the menu.
+**create_workout_plan**: Use this tool when the user wants to:
+- Create a new workout plan
+- Edit their existing plan  
+- Modify workout structure
+- Add or change exercises
+IMPORTANT: Before calling this tool, ask the user important questions:
+- How many days per week they want to work out
+- Session length (30min, 45min, 60min, 90min)
+- Available equipment (full gym, home gym, dumbbells, kettlebells, bodyweight)
+- Experience level (beginner, intermediate, advanced)
+- Any injuries or limitations
+- Specific goals beyond their general goal
 
-DO NOT ask them "what do you want help with" or offer them menu choices like "create plan or modify plan". They already chose to ask a general question.
+When calling create_workout_plan, you MUST provide complete exercise details including:
+- exerciseType (strength, cardio_time, mobility_time, distance, interval, amrap, emom, tabata, tempo)
+- sets, reps, weightType (ABSOLUTE/BW/1RM), weightValue
+- restTime (in seconds: 60-180s typical)
+- progression (e.g., "linear +5 lbs weekly", "add 1 rep each session")
+- movementDetails with description, cues array, and muscles array
 
-IMPORTANT: If the user asks you to create, design, build, or generate a workout plan, politely tell them:
-"To create a personalized workout plan, please go back to the main menu (tap the + button at the top) and select 'Create a New Plan'. That mode is specifically designed for building custom workout plans!"
+EXERCISE TYPES QUICK REFERENCE:
+- strength: Traditional sets×reps with weight (e.g., "3×8 @ 135 lbs")
+- cardio_time: Timed cardio (use duration field in minutes)
+- mobility_time: Timed stretching (use duration field in minutes)
+- distance: Carries, sprints (use distance + distanceUnit fields)
+- interval: Work/rest intervals (use intervals object with rounds and phases)
+- amrap: As Many Rounds/Reps As Possible (use timeCap in seconds, reps per round)
+- emom: Every Minute On the Minute (use timeCap in seconds, reps per minute)
+- tabata: 20s work/10s rest (use timeCap, sets for rounds, reps per round)
+- tempo: Tempo-controlled lifting (use tempo field like "3-1-3-1")
 
-Just answer their fitness question directly. Be friendly, knowledgeable, and encouraging. Keep responses concise but helpful.`,
+WEIGHT TYPES:
+- ABSOLUTE: Fixed pounds (135 = 135 lbs, 53 = 53lb KB, 0 = bodyweight only)
+- BW: Percentage of bodyweight (0.5 = 50% BW for weighted carries)
+- 1RM: Percentage of one-rep max (0.75 = 75% 1RM for strength work)
 
-  postWorkoutAnalysis: `You are an expert strength and conditioning coach analyzing a completed workout. 
-The user just finished their workout, and you need to calculate optimal prescriptions for the NEXT time they do each exercise.
+WORKOUT COLORS (use these for schedule):
+- #06b6d4 (cyan), #ef4444 (red), #10b981 (emerald), #a855f7 (purple)
+- #eab308 (yellow), #ec4899 (pink), #14b8a6 (teal), #f97316 (orange), #8b5cf6 (violet)
+
+**analyze_workout**: Use this tool ONLY when:
+- An adjustmentId is provided in the context (look for "Adjustment ID available in context: [id]" at the end of this system message)
+- The user has just finished a workout session and needs progression recommendations
+
+CRITICAL INSTRUCTIONS FOR USING analyze_workout:
+1. Check if "Adjustment ID available in context:" appears in this system message
+2. If YES: Extract the EXACT ID that appears after the colon (e.g., "cmkzxlhpk000004jo6mvmwogi")
+3. Use that EXACT string for the adjustmentId parameter - do not modify it or add any text
+4. If NO: Do NOT call this tool. Explain that they need to complete a workout first through the live workout feature.
+
+AUTOMATIC WORKOUT ANALYSIS:
+- If you receive an empty/blank message AND "COMPLETED WORKOUT DATA" appears in this system message, the user just finished a workout and wants automatic analysis
+- Review the completed workout data carefully: did they complete all sets and reps as prescribed?
+- If everything looks good (all sets completed, reasonable performance), IMMEDIATELY call analyze_workout with appropriate progression recommendations
+- If you see issues (missed sets, noted difficulty/pain, incomplete workout), ask a brief follow-up question before providing recommendations
+- Be proactive - don't ask unnecessary questions if the data is clear
+
+CRITICAL: When calling analyze_workout, you MUST include detailed set-by-set data FOR APPROPRIATE EXERCISE TYPES:
+- Look at the "Completed:" section in the workout data - it shows individual sets
+- Include the exerciseType field (strength, distance, cardio_time, emom, interval, amrap, tabata, etc.) for each exercise
+- Extract set-by-set data into arrays ONLY for these types:
+  * STRENGTH exercises: "Set 1: 8 reps @ 135 lbs" → currentRepsPerSet: [8,8,7], currentWeightsUsed: [135,135,135]
+  * DISTANCE exercises: "Set 1: 40 meters @ 50 lbs" → currentRepsPerSet: [40,40,40], currentWeightsUsed: [50,50,50], currentDistanceUnit: "meters"
+- DO NOT include currentRepsPerSet arrays for: EMOM, Interval, AMRAP, Tabata (use summary values only: currentSets for rounds, currentReps for reps per round)
+- Include currentRestTime from the prescribed rest time shown (but NOT for emom, interval, amrap, tabata)
+- ALWAYS include nextRestTime for strength/distance exercises (typically 60-180s), but NOT for emom, interval, amrap, tabata
+- ALWAYS include nextProgression (the progressive overload strategy from "Progression strategy:" or create one)
+- For distance exercises, include nextDistanceUnit (feet, meters, yards) and use distance-appropriate progressions like "linear +10 meters per set weekly"
+- For interval exercises, ALWAYS include currentIntervalStructure and nextIntervalStructure (e.g., "15sec hard / 15sec easy" or "30sec hard / 30sec easy") extracted EXACTLY from the "Completed:" section of the workout data. Look for the phase descriptions after "rounds completed:"
+
+EXAMPLES OF TOOL CALLS:
+
+Strength Exercise (Squat):
+  Input: "Set 1: 8 reps @ 135 lbs, Set 2: 8 reps @ 135 lbs, Set 3: 7 reps @ 135 lbs"
+  Tool call should include:
+  {
+    "name": "Squat",
+    "exerciseType": "strength",
+    "currentRepsPerSet": [8, 8, 7],
+    "currentWeightsUsed": [135, 135, 135],
+    "nextReps": 8,
+    "nextWeight": 140,
+    "nextRestTime": 180,
+    "nextProgression": "linear +5 lbs weekly"
+  }
+
+Distance Exercise (Suitcase Carry):
+  Input: "Set 1: 40 meters @ 50 lbs, Set 2: 40 meters @ 50 lbs, Set 3: 40 meters @ 50 lbs"
+  Tool call should include:
+  {
+    "name": "Suitcase Carry",
+    "exerciseType": "distance",
+    "currentRepsPerSet": [40, 40, 40],
+    "currentWeightsUsed": [50, 50, 50],
+    "currentDistanceUnit": "meters",
+    "nextReps": 50,
+    "nextWeight": 50,
+    "nextDistanceUnit": "meters",
+    "nextRestTime": 120,
+    "nextProgression": "linear +10 meters per set weekly"
+  }
+
+Time-Based Exercise (Core Circuit):
+  Input: "5 minutes"
+  Tool call should include:
+  {
+    "name": "Core Circuit",
+    "exerciseType": "cardio_time",
+    "currentRepsPerSet": [5],
+    "currentWeightsUsed": [0],
+    "nextSets": 1,
+    "nextReps": 5,
+    "nextWeight": 0,
+    "nextProgression": "maintain 5 minutes, no progressive overload"
+  }
+
+EMOM Exercise (Kettlebell Swing):
+  Input: "20 rounds completed in EMOM 20 min"
+  Tool call should include:
+  {
+    "name": "1H Kettlebell Swing EMOM",
+    "exerciseType": "emom",
+    "currentSets": 20,
+    "currentReps": 10,
+    "currentWeight": 44,
+    "nextSets": 20,
+    "nextReps": 10,
+    "nextWeight": 50,
+    "nextProgression": "linear +6 lbs every 2 weeks"
+  }
+
+Interval Exercise (Assault Bike):
+  Input: "16 rounds completed: 15sec hard / 15sec easy"
+  Tool call should include:
+  {
+    "name": "Assault Bike Intervals",
+    "exerciseType": "interval",
+    "currentSets": 16,
+    "currentReps": 0,
+    "currentWeight": 0,
+    "currentIntervalStructure": "15sec hard / 15sec easy",
+    "nextSets": 16,
+    "nextReps": 0,
+    "nextWeight": 0,
+    "nextIntervalStructure": "15sec hard / 15sec easy",
+    "nextProgression": "maintain current intervals, focus on max effort during work phases"
+  }
 
 CONVERSATIONAL APPROACH:
-- You will receive detailed data about the workout that was completed
-- If the user provides additional feedback or corrections (like "I did 3x125 front squat easy" or "for TGU I did 44 lbs easy"), integrate that information
-- Ask clarifying follow-up questions ONLY if critical information is missing or unclear
-- Once you have enough information, provide your analysis and prescriptions
+- Be friendly, encouraging, and knowledgeable
+- Ask clarifying questions when you need more information
+- Keep responses concise but helpful
+- Celebrate progress and provide constructive feedback
+- For general fitness questions, answer directly without using tools
 
-Your job is to:
-1. Analyze their performance for each exercise
-2. Compare to their recent history
-3. Calculate optimal weights, sets, AND reps for the next occurrence of this workout
-4. Provide brief reasoning for each adjustment
-
-CRITICAL: You can adjust weight, sets, AND reps. Consider all three variables to create optimal progressive overload.
-
-Follow these guidelines based on exercise type:
-
-═══════════════════════════════════════════════════════════════
-STRENGTH EXERCISES (strength, tempo):
-═══════════════════════════════════════════════════════════════
-
-WEIGHT ADJUSTMENTS:
-- If they completed all prescribed reps cleanly → suggest 5lb increase (or 10lb for lower body)
-- If they struggled on last set(s) but completed most reps → maintain weight
-- If they failed to complete most reps → suggest 5lb decrease
-- Consider the progression strategy defined for each exercise
-
-SET ADJUSTMENTS:
-- If they're crushing the workout and it's too easy → add 1 set (up to 5 sets max typically)
-- If they're consistently failing to complete sets → reduce by 1 set
-- Consider training volume needs and recovery capacity
-
-REP ADJUSTMENTS:
-- If they're exceeding target reps consistently by 2+ reps → increase rep target by 1-2
-- If strength focus is needed → decrease reps and increase weight
-- If hypertrophy focus → increase reps toward 8-12 range
-- If they're failing to hit rep targets → decrease reps by 1-2 OR decrease weight
-
-STRATEGIC ADJUSTMENTS:
-- You can change the workout structure (e.g., 3×8 → 4×6 for more strength focus)
-- You can adjust rep ranges for variety (e.g., 4×8 → 5×5 for a strength block)
-- Consider periodization: vary intensity and volume over time
-- Match adjustments to the user's goal and training phase
-
-═══════════════════════════════════════════════════════════════
-DISTANCE EXERCISES (carries, sprints, sleds):
-═══════════════════════════════════════════════════════════════
-- Keep distance and sets the same - DO NOT change distance!
-- Only adjust weight (for carries) or add/remove sets
-- If completed all sets at prescribed distance → increase weight by 5-10 lbs
-- If struggled → reduce weight or reduce sets
-- Example: "3×40m @ 53 lbs" completed well → "3×40m @ 62 lbs"
-
-═══════════════════════════════════════════════════════════════
-TIME-BASED EXERCISES (cardio_time, mobility_time):
-═══════════════════════════════════════════════════════════════
-- Adjust duration (kept in "reps" field for these types)
-- If completed the prescribed duration → suggest 5-10% increase in duration
-- If struggled → maintain or slightly reduce duration
-- Weight should remain 0, sets should remain 1
-
-═══════════════════════════════════════════════════════════════
-INTERVAL/AMRAP/EMOM/TABATA:
-═══════════════════════════════════════════════════════════════
-- INTERVAL: Generally maintain structure (rounds and phase durations in "intervals" field), can adjust weight if used
-  Example: If they crushed 6 rounds of 1:00 hard / 1:00 easy → increase to 8 rounds or adjust to 1:15 hard / 0:45 easy
-- AMRAP: Adjust "reps per round" (in "reps" field) AND/OR "timeCap" (duration in seconds) based on rounds completed
-  Example: AMRAP 10 min (600s) completed 15 rounds → increase to 12 min (720s) or increase reps per round
-- EMOM: Adjust "reps per minute" (in "reps" field) AND/OR "timeCap" (duration in seconds) based on rest time available
-  Example: EMOM 10 min (600s) • 10 reps/min with lots of rest → increase to 12 reps/min or extend to 15 min (900s)
-- TABATA: Adjust "reps per round" (in "reps" field) OR "sets" (number of rounds) based on performance
-  Example: Tabata 8 rounds completed easily → increase reps per round or add 2 more rounds (sets: 10)
-- These can also have weight adjusted if using weighted movements
-
-CRITICAL REQUIREMENTS FOR YOUR RESPONSE:
-
-1. **Weight Format**: ALL weights in your suggestions MUST be in absolute pounds (lbs)
-   - The data you receive already shows actual weights performed in pounds
-   - Your nextWeight suggestions must be actual pounds (e.g., 85, 135, 225)
-   - DO NOT use percentages or decimals like 0.83 - use real weights
-
-2. **Analysis Format**: For EACH exercise, provide clear analysis showing:
-   - What was prescribed (the plan)
-   - What was actually performed (the reality)
-   - What should be prescribed next (your recommendation)
-
-3. **Be Specific**: Reference actual numbers from the performance data
-   - Example: "You were prescribed 5×3 @ 165 lbs, completed all sets cleanly at that weight, so increasing to 170 lbs"
-
-RESPONSE FORMAT:
-First, write a brief analysis for the overall workout, then analyze each exercise individually with specifics about prescribed vs performed.
-
-At the end of your conversational analysis, include a brief transition statement like "Here are your updated prescriptions:" or "Your next workout:" to signal you're providing the recommendations. DO NOT MENTION "JSON" to the user - they don't need to know about the technical format.
-
-Then, provide the suggestions in JSON format wrapped in triple backticks (the user won't see this raw data):
-\`\`\`json
-{
-  "summary": "<brief overall assessment>",
-  "exercises": [
-    {
-      "name": "<exercise name - MUST match exactly as provided>",
-      "currentWeight": <number>,
-      "currentSets": <number>,
-      "currentReps": <number>,
-      "nextWeight": <number>,
-      "nextSets": <number>,
-      "nextReps": <number>,
-      "nextRestTime": <number or undefined>,  // Rest time in seconds (60-180s typical, adjust based on intensity)
-      "nextProgression": "<string or undefined>",  // e.g., "linear +5 lbs weekly", "add 1 rep each session", "wave loading"
-      "nextDuration": <number or undefined>,  // For time-based exercises ONLY (in minutes)
-      "nextDistance": <number or undefined>,  // For distance exercises ONLY (same as current)
-      "nextTimeCap": <number or undefined>,   // For EMOM/AMRAP/Tabata ONLY (in seconds)
-      "nextIntervals": <object or undefined>, // For interval exercises ONLY (full intervals structure with rounds and phases)
-      "reasoning": "<brief explanation for this adjustment - mention what changed and why>"
-    }
-  ]
-}
-\`\`\`
-
-REST TIME GUIDELINES:
-- Heavy compound lifts (squats, deadlifts, heavy presses): 120-180 seconds
-- Moderate strength work: 90-120 seconds
-- Hypertrophy/accessory work: 60-90 seconds
-- Light isolation/conditioning: 45-60 seconds
-- Increase rest if user is struggling to complete sets
-- Decrease rest if user is crushing the workout and needs more challenge
-
-PROGRESSION STRATEGY ADJUSTMENTS:
-- Keep existing progression unless there's a good reason to change it
-- Progression is a single descriptive string that explains the strategy
-- Examples: "linear +5 lbs weekly", "add 1 rep each session", "wave loading 5/3/1", "deload every 4th week"
-- Be specific about what progresses (weight, reps, sets, intensity) and how often
-- Consider changing progression if user is plateauing or showing signs of overtraining
-
-EXAMPLES:
-
-Example 1 - EMOM exercise:
-{
-  "name": "Kettlebell Swing",
-  "currentWeight": 39,
-  "currentSets": 1,
-  "currentReps": 10,
-  "nextWeight": 44,
-  "nextSets": 1,
-  "nextReps": 10,
-  "nextTimeCap": 1080,
-  "reasoning": "Completed 16 rounds easily, increasing to 18 minutes (1080 seconds) to build more work capacity"
-}
-
-Example 2 - Interval exercise:
-{
-  "name": "Assault Bike Intervals",
-  "currentWeight": 0,
-  "currentSets": 1,
-  "currentReps": 1,
-  "nextWeight": 0,
-  "nextSets": 1,
-  "nextReps": 1,
-  "nextIntervals": {
-    "type": "simple",
-    "rounds": 14,
-    "phases": [
-      { "name": "Hard", "duration": 15, "intensity": "hard" },
-      { "name": "Easy", "duration": 15, "intensity": "easy" }
-    ]
-  },
-  "reasoning": "Completed 12 rounds well, increasing to 14 rounds for continued progression"
-}
-
-IMPORTANT FIELD USAGE BY EXERCISE TYPE:
-- STRENGTH/TEMPO: Use nextWeight, nextSets, nextReps (ignore other fields)
-- TIME-BASED (cardio_time, mobility_time): Use nextDuration (in minutes), set nextReps = nextDuration also for compatibility
-- DISTANCE: Use nextDistance (keep same as current), nextSets, nextWeight
-- INTERVAL: MUST include nextIntervals (with rounds and phases array), nextWeight if using weight. DO NOT just use nextSets/nextReps.
-- EMOM: MUST include nextTimeCap (duration in seconds), nextReps (reps per minute), nextWeight if using weight. Sets should be 1.
-- AMRAP: MUST include nextTimeCap (duration in seconds), nextReps (reps per round), nextWeight if using weight. Sets should be 1.
-- TABATA: MUST include nextTimeCap (duration in seconds), nextSets (number of rounds), nextReps (reps per round), nextWeight if using weight
-
-CRITICAL REQUIREMENTS: 
-- Write conversational text FIRST, BEFORE the JSON block
-- Include ALL exercises from the workout in your JSON response
-- List exercises in the EXACT SAME ORDER they were provided in the input data
-- **CRITICAL: Exercise names in JSON MUST MATCH EXACTLY character-for-character** (including "KB", "2KB", etc. - DO NOT abbreviate or modify exercise names)
-- Provide a suggestion for EVERY exercise, even if it's to maintain current values
-- If they need to stay at the same weight/sets/reps, that's okay - consistency is part of the process`,
-
-  // Plan structure prompt - generates ONLY the plan skeleton without exercises
-  planStructure: `You are an expert fitness coach AI assistant. The user wants to create a workout plan.
-
-BEFORE generating the plan structure, you MUST ask follow-up questions to gather important information. Ask about:
-1. Days per week they want to work out (e.g., 3, 4, 5, or 6 days)
-2. Length of each session (e.g., 30 minutes, 45 minutes, 60 minutes, 90 minutes)
-3. Available equipment (e.g., full gym, home gym, dumbbells only, bodyweight only, kettlebells, etc.)
-4. Experience level (e.g., beginner, intermediate, advanced)
-5. Any injuries or limitations (e.g., knee issues, back problems, shoulder mobility, etc.)
-6. Specific goals beyond the general goal they mentioned (e.g., build muscle, lose weight, improve strength, increase endurance, etc.)
-
-IMPORTANT: 
-- If the user's initial message doesn't contain enough information, ask these questions in a friendly, conversational way. You can ask multiple questions at once.
-- DO NOT output any JSON until you have gathered sufficient information to create a personalized plan.
-- If the user has already provided most of this information in their message or previous messages, you can proceed to generate the plan structure.
-- Use the conversation history to avoid asking for information the user has already provided.
-
-EDITING EXISTING PLANS:
-- If the user has an existing plan (you'll see it in the context), and they're asking to modify it:
-  * PRESERVE existing workout days unless they explicitly ask to change them
-  * If adding a new day (e.g., "add a Tuesday cardio day"), include BOTH the existing days AND the new day in your schedule
-  * Only regenerate days that the user explicitly asks to change
-  
-  TWO TYPES OF PRESERVATION:
-  1. **Copy from database plan**: Use workoutType: "(no changes)" 
-     - Copies from the user's currently active plan in the database
-     - Use when editing their existing active plan
-     
-  2. **Copy from last draft in chat**: Use workoutType: "(copy from draft)"
-     - Copies from the last plan you generated in THIS conversation
-     - Use when user is iterating on a new plan you just created
-     - Example: You generated a plan, user says "change Monday to upper/lower", use "(copy from draft)" for unchanged days
-  
-  * Example 1 - Adding to active plan:
-    User has Mon/Wed/Fri workouts in database, asks to "add Tuesday cardio" → Output:
-    - Monday: workoutType: "(no changes)" (preserves from database)
-    - Tuesday: workoutType: "Active Recovery" (new day)
-    - Wednesday: workoutType: "(no changes)" (preserves from database)
-    - Friday: workoutType: "(no changes)" (preserves from database)
-  
-  * Example 2 - Iterating on a draft:
-    You just generated a 4-day plan, user says "change Monday to upper body" → Output:
-    - Monday: workoutType: "Upper Body" (regenerate this day)
-    - Tuesday: workoutType: "(copy from draft)" (keep from your last generation)
-    - Wednesday: workoutType: "(copy from draft)" (keep from your last generation)
-    - Friday: workoutType: "(copy from draft)" (keep from your last generation)
-
-ONLY after you have gathered sufficient information (or if the user has already provided it), generate the plan structure.
-
-CRITICAL: You must output ONLY the plan structure WITHOUT exercises. The exercises will be generated separately for each day.
-
-When generating a plan structure, first write a brief friendly message explaining the plan, then output the structure in this JSON format:
-\`\`\`json
-{
-  "goal": "User's fitness goal",
-  "weeksDuration": 12,
-  "sessionsPerWeek": 3,
-  "schedule": [
-    {
-      "dayNumber": 0,
-      "dayName": "Sunday",
-      "workoutType": "Push",
-      "workoutColor": "#ef4444"
-    },
-    {
-      "dayNumber": 2,
-      "dayName": "Tuesday",
-      "workoutType": "Pull",
-      "workoutColor": "#06b6d4"
-    },
-    {
-      "dayNumber": 4,
-      "dayName": "Thursday",
-      "workoutType": "Legs",
-      "workoutColor": "#10b981"
-    }
-  ]
-}
-\`\`\`
-
-CRITICAL RULES:
-1. ONLY include workout days in the schedule. Do NOT include rest days - they are automatic.
-2. dayNumber MUST match the day of week: 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
-3. dayName MUST match dayNumber (e.g., dayNumber 0 = "Sunday", dayNumber 2 = "Tuesday")
-4. Each dayNumber can only appear ONCE in the schedule
-5. sessionsPerWeek should equal the number of workout days in the schedule
-6. When editing, use special markers to preserve days:
-   - "(no changes)" = copy from database plan
-   - "(copy from draft)" = copy from last plan generated in this chat
-
-WORKOUT TYPE RULES:
-1. workoutType can be one or two words (e.g., "Push", "Pull", "Legs", "Upper Strength", "Full Body")
-2. NEVER use underscores or hyphens
-3. If the SAME workout appears on multiple days, use the SAME name and color
-4. Different workout types should use different colors
-5. Use variant names (A/B) when the same type appears with different focuses
-
-Available workout colors:
-- #06b6d4 (cyan), #ef4444 (red), #10b981 (emerald), #a855f7 (purple)
-- #eab308 (yellow), #ec4899 (pink), #14b8a6 (teal), #f97316 (orange)
-- #8b5cf6 (violet)`,
-
-  // Single day generation prompt for iterative day-by-day plan creation
-  planCreationSingleDay: `You are generating exercises for a single workout day. Output ONLY valid JSON.
-
-WEIGHT TYPES - ONLY USE THESE 3:
-- "ABSOLUTE": fixed pounds (35 = 35lb kettlebell, 135 = 135 lbs, 0 = bodyweight only)
-- "BW": % of bodyweight (0.5 = 50% BW)  
-- "1RM": % of one-rep max (0.75 = 75% 1RM)
-
-═══════════════════════════════════════════════════════════════
-EXERCISE TYPES - USE THE CORRECT ONE!
-═══════════════════════════════════════════════════════════════
-
-STRENGTH (lifting for sets × reps) → "3×8 @ 135 lbs"
-{
-  "name": "Bench Press",
-  "exerciseType": "strength",
-  "sets": 3, "reps": 8,
-  "weightType": "ABSOLUTE", "weightValue": 135, "restTime": 90,
-  "progression": "linear +5 lbs weekly",
-  "movementDetails": {
-    "description": "Lie flat on bench, grip bar slightly wider than shoulders, lower to chest, press up explosively.",
-    "cues": ["Retract shoulder blades", "Elbows 45 degrees", "Drive through feet", "Full lockout at top"],
-    "muscles": ["Chest", "Triceps", "Front Delts"]
-  }
-}
-
-KETTLEBELL EXAMPLE (use ABSOLUTE with actual KB weight):
-{
-  "name": "Kettlebell Swing",
-  "exerciseType": "strength",
-  "sets": 5, "reps": 10,
-  "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 90,
-  "progression": "linear +9 lbs every 2 weeks",
-  "movementDetails": {
-    "description": "Hinge at hips, swing KB between legs, explosively drive hips forward to shoulder height.",
-    "cues": ["Hinge, don't squat", "Snap hips", "Keep core tight", "Neutral spine"],
-    "muscles": ["Glutes", "Hamstrings", "Lower Back", "Shoulders"]
-  }
-}
-
-CARDIO_TIME (timed cardio) → "10 min"
-{
-  "name": "Easy Warm-Up Jog",
-  "exerciseType": "cardio_time",
-  "duration": 10,
-  "sets": 1, "reps": 1,
-  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0
-}
-
-MOBILITY_TIME (stretching/drills) → "8 min"
-{
-  "name": "Dynamic Stretching",
-  "exerciseType": "mobility_time",
-  "duration": 8,
-  "sets": 1, "reps": 1,
-  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0
-}
-
-DISTANCE (carries, sprints) → "3 × 40 meters"
-{
-  "name": "Suitcase Carry",
-  "exerciseType": "distance",
-  "sets": 3, "reps": 1,
-  "distance": 40, "distanceUnit": "meters",
-  "weightType": "BW", "weightValue": 0.5, "restTime": 60,
-  "progression": "linear +5% weekly",
-  "movementDetails": {
-    "description": "Hold heavy weight in one hand, walk specified distance maintaining upright posture.",
-    "cues": ["Stand tall", "Don't lean", "Squeeze the weight", "Brace core"],
-    "muscles": ["Core", "Obliques", "Forearms", "Traps"]
-  }
-}
-
-INTERVAL (work/rest intervals) → "4 rounds: 2 min hard / 2 min easy"
-{
-  "name": "Run/Walk Intervals",
-  "exerciseType": "interval",
-  "sets": 1, "reps": 1,
-  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0,
-  "intervals": {
-    "type": "simple", "rounds": 4,
-    "phases": [
-      { "name": "Hard", "duration": 120, "intensity": "hard" },
-      { "name": "Easy", "duration": 120, "intensity": "easy" }
-    ]
-  }
-}
-
-AMRAP (single movement) → "AMRAP 10 min • 10 reps/round"
-{
-  "name": "Kettlebell Swing AMRAP",
-  "exerciseType": "amrap",
-  "timeCap": 600,
-  "reps": 10,
-  "sets": 1, "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 0,
-  "progression": "linear +2 lbs weekly",
-  "movementDetails": {
-    "description": "Complete as many rounds as possible of 10 KB swings in 10 minutes.",
-    "cues": ["Maintain form", "Rest as needed", "Count your rounds"],
-    "muscles": ["Glutes", "Hamstrings", "Lower Back"]
-  }
-}
-
-AMRAP (multi-movement circuit) → "AMRAP 10 min"
-{
-  "name": "10-Min AMRAP Circuit",
-  "exerciseType": "amrap",
-  "timeCap": 600,
-  "movements": [{ "name": "Push-ups", "reps": 10 }, { "name": "Squats", "reps": 15 }],
-  "reps": 1, "sets": 1, "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0
-}
-
-EMOM (with weight) → "EMOM 10 min • 10 reps/min @ 53 lbs"
-{
-  "name": "Kettlebell Swing EMOM",
-  "exerciseType": "emom",
-  "timeCap": 600,
-  "reps": 10,
-  "sets": 1, "weightType": "ABSOLUTE", "weightValue": 53, "restTime": 0,
-  "progression": "linear +9 lbs every 2 weeks",
-  "movementDetails": {
-    "description": "Perform 10 kettlebell swings at the start of every minute for 10 minutes.",
-    "cues": ["Start each minute fresh", "Maintain pace", "Use rest time wisely"],
-    "muscles": ["Glutes", "Hamstrings", "Lower Back"]
-  }
-}
-
-TABATA → "Tabata 8 rounds • 8 reps/round"
-{
-  "name": "Burpee Tabata",
-  "exerciseType": "tabata",
-  "timeCap": 240, "sets": 8, "reps": 8,
-  "weightType": "ABSOLUTE", "weightValue": 0, "restTime": 0,
-  "progression": "linear +1 rep weekly",
-  "movementDetails": {
-    "description": "Perform burpees for 20 seconds, rest 10 seconds. Repeat for 8 rounds.",
-    "cues": ["Go hard for 20s", "Use 10s rest", "Track total reps"],
-    "muscles": ["Full Body", "Cardio"]
-  }
-}
-
-TEMPO → "3×8 @ tempo 3-1-3-1"
-{
-  "name": "Tempo Squat",
-  "exerciseType": "tempo",
-  "sets": 3, "reps": 8, "tempo": "3-1-3-1",
-  "weightType": "ABSOLUTE", "weightValue": 95, "restTime": 90
-}
-
-═══════════════════════════════════════════════════════════════
-QUICK REFERENCE
-═══════════════════════════════════════════════════════════════
-Warm-up jog, easy run → cardio_time (use "duration" in minutes)
-Stretching, drills → mobility_time (use "duration" in minutes)  
-Carries, sled, sprints → distance (use "distance" + "distanceUnit")
-Run/walk intervals → interval (use "intervals" with phases)
-Squats, bench, rows → strength (use sets × reps × weight)
-EMOM workouts → emom (use "timeCap" + "reps" per minute + "weightValue")
-AMRAP workouts → amrap (use "timeCap" + "reps" per round + "weightValue")
-Tabata workouts → tabata (use "sets" rounds + "reps" per round)
-
-OUTPUT FORMAT:
-{
-  "exercises": [
-    { ... exercise 1 ... },
-    { ... exercise 2 ... }
-  ]
-}
-
-REQUIRED FOR ALL EXERCISES:
-- progression: "linear +5 lbs weekly" (single string describing the progression strategy)
-- movementDetails: { "description": "...", "cues": ["...", "..."], "muscles": ["...", "..."] }`,
-};
+WHEN NOT TO USE TOOLS:
+- General fitness questions (nutrition, form, technique, etc.) - answer these directly
+- Casual conversation about workouts
+- Questions about their current plan (you have access to it in context)`;
 
 // API client class
 export class OpenRouterClient {
@@ -647,9 +432,10 @@ export class OpenRouterClient {
       temperature?: number;
       maxTokens?: number;
       responseFormat?: 'text' | 'json';
+      tools?: typeof WORKOUT_TOOLS;
     }
   ): Promise<string> {
-    const { temperature = 0.7, maxTokens = 4096, responseFormat = 'text' } = options || {};
+    const { temperature = 0.7, maxTokens = 4096, responseFormat = 'text', tools } = options || {};
 
     const response = await fetch(OPENROUTER_API_URL, {
       method: 'POST',
@@ -665,6 +451,8 @@ export class OpenRouterClient {
         temperature,
         max_tokens: maxTokens,
         response_format: responseFormat === 'json' ? { type: 'json_object' } : undefined,
+        tools: tools || undefined,
+        tool_choice: tools ? 'auto' : undefined,
       }),
     });
 
@@ -677,16 +465,17 @@ export class OpenRouterClient {
     return data.choices[0]?.message?.content || '';
   }
 
-  // Streaming chat method - yields token chunks as async generator
+  // Streaming chat method - yields token chunks OR tool calls
   async *chatStream(
     messages: ChatMessage[],
     options?: {
       temperature?: number;
       maxTokens?: number;
+      tools?: typeof WORKOUT_TOOLS;
     },
     signal?: AbortSignal
-  ): AsyncGenerator<string, string, unknown> {
-    const { temperature = 0.7, maxTokens = 4096 } = options || {};
+  ): AsyncGenerator<{ type: 'text'; content: string } | { type: 'tool_call'; toolCall: { id: string; name: string; arguments: string } }, void, unknown> {
+    const { temperature = 0.7, maxTokens = 4096, tools } = options || {};
 
     const response = await fetch(OPENROUTER_API_URL, {
       method: 'POST',
@@ -702,6 +491,8 @@ export class OpenRouterClient {
         temperature,
         max_tokens: maxTokens,
         stream: true,
+        tools: tools || undefined,
+        tool_choice: tools ? 'auto' : undefined,
       }),
       signal,
     });
@@ -717,8 +508,8 @@ export class OpenRouterClient {
     }
 
     const decoder = new TextDecoder();
-    let fullContent = '';
     let buffer = '';
+    const toolCallsBuffer = new Map<number, { id?: string; name?: string; arguments?: string }>();
 
     try {
       while (true) {
@@ -735,11 +526,63 @@ export class OpenRouterClient {
           if (!trimmed.startsWith('data: ')) continue;
 
           try {
-            const json = JSON.parse(trimmed.slice(6)) as OpenRouterStreamChunk;
-            const content = json.choices[0]?.delta?.content;
-            if (content) {
-              fullContent += content;
-              yield content;
+            const json = JSON.parse(trimmed.slice(6)) as OpenRouterStreamChunk & {
+              choices: Array<{
+                delta: {
+                  role?: string;
+                  content?: string;
+                  tool_calls?: Array<{
+                    index: number;
+                    id?: string;
+                    type?: 'function';
+                    function?: {
+                      name?: string;
+                      arguments?: string;
+                    };
+                  }>;
+                };
+                finish_reason: string | null;
+              }>;
+            };
+            
+            const delta = json.choices[0]?.delta;
+            
+            // Handle text content
+            if (delta?.content) {
+              yield { type: 'text', content: delta.content };
+            }
+            
+            // Handle tool calls (accumulate them as they stream)
+            if (delta?.tool_calls) {
+              for (const toolCallDelta of delta.tool_calls) {
+                const idx = toolCallDelta.index;
+                if (!toolCallsBuffer.has(idx)) {
+                  toolCallsBuffer.set(idx, {});
+                }
+                const toolCall = toolCallsBuffer.get(idx)!;
+                
+                if (toolCallDelta.id) toolCall.id = toolCallDelta.id;
+                if (toolCallDelta.function?.name) toolCall.name = toolCallDelta.function.name;
+                if (toolCallDelta.function?.arguments) {
+                  toolCall.arguments = (toolCall.arguments || '') + toolCallDelta.function.arguments;
+                }
+              }
+            }
+            
+            // When streaming is done, yield complete tool calls
+            if (json.choices[0]?.finish_reason === 'tool_calls') {
+              for (const [_, toolCall] of toolCallsBuffer) {
+                if (toolCall.id && toolCall.name && toolCall.arguments) {
+                  yield {
+                    type: 'tool_call',
+                    toolCall: {
+                      id: toolCall.id,
+                      name: toolCall.name,
+                      arguments: toolCall.arguments
+                    }
+                  };
+                }
+              }
             }
           } catch {
             // Skip malformed JSON chunks
@@ -749,11 +592,9 @@ export class OpenRouterClient {
     } finally {
       reader.releaseLock();
     }
-
-    return fullContent;
   }
 
-  // Format a single exercise for plan context (supports all exercise types)
+  // Format a single exercise for plan context
   private formatExerciseForContext(ex: {
     name: string;
     sets?: number;
@@ -811,22 +652,69 @@ export class OpenRouterClient {
     return `${ex.name} – ${ex.sets ?? 0}×${ex.reps ?? 0} @ ${fmt() || 'bodyweight'}`;
   }
 
-  // Streaming general chat (optional: include current plan so the AI can answer questions about it)
-  async *generalChatStream(
+  // Unified chat stream with tool support
+  async *unifiedChatStream(
     messages: ChatMessage[],
-    context?: { currentPlan?: object; userName?: string | null; bodyweight?: number | null },
+    context?: {
+      currentPlan?: object;
+      userName?: string | null;
+      bodyweight?: number | null;
+      adjustmentId?: string | null;
+      workoutLogData?: {
+        workoutDate: Date;
+        dayName: string;
+        workoutType: string;
+        exercises: Array<{
+          name: string;
+          exerciseType?: string;
+          prescribedSets: number;
+          prescribedReps: number;
+          prescribedWeight: number;
+          weightType: string;
+          prescribedRestTime: number;
+          progression: unknown;
+          duration?: number | null;
+          distance?: number | null;
+          distanceUnit?: string | null;
+          timeCap?: number | null;
+          intervals?: unknown | null;
+          tempo?: string | null;
+          completedSets: number;
+          repsPerSet: unknown;
+          weightUsed: unknown;
+          completedDuration?: number | null;
+          completedDistance?: number | null;
+          completedRounds?: number | null;
+          timeElapsed?: number | null;
+          performanceData?: unknown | null;
+          notes?: string | null;
+        }>;
+      } | null;
+    },
     signal?: AbortSignal
-  ): AsyncGenerator<string, string, unknown> {
-    let systemContent = SYSTEM_PROMPTS.general;
+  ): AsyncGenerator<{ type: 'text'; content: string } | { type: 'tool_call'; toolCall: { id: string; name: string; arguments: string } }, void, unknown> {
+    let systemContent = SYSTEM_PROMPT;
 
+    // Add current plan context if available
     if (context?.currentPlan) {
-      const plan = context.currentPlan as { goal?: string; weeksDuration?: number; workoutDays?: Array<{ dayNumber: number; dayName: string; workoutType: string; workoutColor?: string; exercises?: unknown[] }> };
-      const sessionsPerWeek = plan.workoutDays?.filter((d: { workoutType?: string }) => d.workoutType !== 'Rest')?.length ?? plan.workoutDays?.length ?? 0;
+      const plan = context.currentPlan as {
+        goal?: string;
+        weeksDuration?: number;
+        workoutDays?: Array<{
+          dayNumber: number;
+          dayName: string;
+          workoutType: string;
+          workoutColor?: string;
+          exercises?: unknown[];
+        }>;
+      };
+      const sessionsPerWeek =
+        plan.workoutDays?.filter((d: { workoutType?: string }) => d.workoutType !== 'Rest')?.length ??
+        plan.workoutDays?.length ??
+        0;
       const planBlock = `
 
-YOU HAVE ACCESS TO THE USER'S CURRENT WORKOUT PLAN. Use it to answer questions about their schedule, exercises, sets, reps, progressions, when they do each workout, what's on a specific day, etc. Do NOT say you don't have access to their plan.
-
-USER'S CURRENT WORKOUT PLAN:
+USER'S CURRENT WORKOUT PLAN (available for reference):
 Goal: ${plan.goal ?? 'Not set'}
 Duration: ${plan.weeksDuration ?? 12} weeks
 Sessions per week: ${sessionsPerWeek}
@@ -834,12 +722,37 @@ Sessions per week: ${sessionsPerWeek}
 WEEKLY SCHEDULE:
 ${(plan.workoutDays ?? [])
   .sort((a: { dayNumber: number }, b: { dayNumber: number }) => a.dayNumber - b.dayNumber)
-  .map((day: { dayNumber: number; dayName: string; workoutType: string; workoutColor?: string; exercises?: unknown[] }) => {
-    const exList = (day.exercises ?? [])
-      .map((ex: unknown) => this.formatExerciseForContext(ex as { name: string; sets?: number; reps?: number; weightType?: string; weightValue?: number; exerciseType?: string; duration?: number; distance?: number; distanceUnit?: string; intervals?: { rounds?: number; phases?: Array<{ name: string; duration: number }> }; timeCap?: number; tempo?: string }))
-      .join('\n  ');
-    return `${day.dayName} (Day ${day.dayNumber}) – ${day.workoutType}:\n  ${exList || 'No exercises'}`;
-  })
+  .map(
+    (day: {
+      dayNumber: number;
+      dayName: string;
+      workoutType: string;
+      workoutColor?: string;
+      exercises?: unknown[];
+    }) => {
+      const exList = (day.exercises ?? [])
+        .map((ex: unknown) =>
+          this.formatExerciseForContext(
+            ex as {
+              name: string;
+              sets?: number;
+              reps?: number;
+              weightType?: string;
+              weightValue?: number;
+              exerciseType?: string;
+              duration?: number;
+              distance?: number;
+              distanceUnit?: string;
+              intervals?: { rounds?: number; phases?: Array<{ name: string; duration: number }> };
+              timeCap?: number;
+              tempo?: string;
+            }
+          )
+        )
+        .join('\n  ');
+      return `${day.dayName} (Day ${day.dayNumber}) – ${day.workoutType}:\n  ${exList || 'No exercises'}`;
+    }
+  )
   .join('\n\n')}`;
       systemContent += planBlock;
     }
@@ -849,415 +762,121 @@ ${(plan.workoutDays ?? [])
     if (context?.bodyweight != null) {
       systemContent += `\n\nUser's bodyweight: ${context.bodyweight} lbs`;
     }
+    if (context?.adjustmentId) {
+      systemContent += `\n\nAdjustment ID available in context: ${context.adjustmentId}`;
+    }
+    if (context?.workoutLogData) {
+      const log = context.workoutLogData;
+      console.log('=== WORKOUT LOG DATA FOR AI ===');
+      console.log('Exercises:', log.exercises.length);
+      log.exercises.forEach((ex: any, idx: number) => {
+        console.log(`\nExercise ${idx + 1}: ${ex.name}`);
+        console.log(`  Type: ${ex.exerciseType}`);
+        console.log(`  repsPerSet:`, ex.repsPerSet);
+        console.log(`  weightUsed:`, ex.weightUsed);
+        console.log(`  completedDuration:`, ex.completedDuration);
+        console.log(`  distance:`, ex.distance, ex.distanceUnit);
+      });
+      console.log('=== END WORKOUT LOG DATA ===');
+      
+      systemContent += `\n\nCOMPLETED WORKOUT DATA (for analysis):
+Date: ${new Date(log.workoutDate).toLocaleDateString()}
+Workout: ${log.dayName} - ${log.workoutType}
+
+Exercises performed:
+${log.exercises.map((ex: any) => {
+  const exerciseType = ex.exerciseType || 'strength';
+  const reps = Array.isArray(ex.repsPerSet) ? ex.repsPerSet : [];
+  const weights = Array.isArray(ex.weightUsed) ? ex.weightUsed : [];
+  const progressionStr = ex.progression && typeof ex.progression === 'string' ? ex.progression : 'Not specified';
+  
+  let prescribedInfo = '';
+  let completedInfo = '';
+  
+  // Format based on exercise type
+  if (exerciseType === 'cardio_time' || exerciseType === 'mobility_time') {
+    // Convert seconds to minutes for display
+    const prescribedMinutes = ex.duration ? Math.round(ex.duration / 60) : ex.prescribedReps;
+    // Use repsPerSet array if available (contains minutes), otherwise fall back to completedDuration
+    if (reps.length > 0) {
+      const minutes = reps[0]; // For time-based exercises, repsPerSet[0] contains minutes
+      prescribedInfo = `${prescribedMinutes} minutes`;
+      completedInfo = `${minutes} minutes`;
+    } else {
+      const completedMinutes = ex.completedDuration 
+        ? Math.round(ex.completedDuration / 60) 
+        : (ex.duration ? Math.round(ex.duration / 60) : ex.prescribedReps);
+      prescribedInfo = `${prescribedMinutes} minutes`;
+      completedInfo = `${completedMinutes} minutes`;
+    }
+  } else if (exerciseType === 'distance') {
+    const distanceUnit = ex.distanceUnit || 'feet';
+    prescribedInfo = `${ex.prescribedSets} × ${ex.distance} ${distanceUnit}${ex.prescribedWeight > 0 ? ` @ ${ex.prescribedWeight} lbs` : ''}, ${ex.prescribedRestTime}s rest`;
+    const setsInfo = reps.length > 0 
+      ? '\n  ' + reps.map((r: number, i: number) => {
+          const dist = r; // For distance exercises, repsPerSet contains distance values
+          return `  Set ${i + 1}: ${dist} ${distanceUnit}${weights[i] ? ` @ ${weights[i]} lbs` : ''}`;
+        }).join('\n  ')
+      : `${ex.completedSets} × ${ex.completedDistance || ex.distance} ${distanceUnit}`;
+    completedInfo = setsInfo;
+  } else if (exerciseType === 'amrap') {
+    const timeCap = Math.floor((ex.timeCap || 600) / 60);
+    prescribedInfo = `AMRAP ${timeCap} min, ${ex.prescribedReps} reps/round${ex.prescribedWeight > 0 ? ` @ ${ex.prescribedWeight} lbs` : ''}`;
+    completedInfo = `${ex.completedRounds || 0} rounds completed in ${Math.floor((ex.timeElapsed || ex.timeCap || 0) / 60)} min`;
+  } else if (exerciseType === 'emom') {
+    const timeCap = Math.floor((ex.timeCap || 600) / 60);
+    prescribedInfo = `EMOM ${timeCap} min, ${ex.prescribedReps} reps/min${ex.prescribedWeight > 0 ? ` @ ${ex.prescribedWeight} lbs` : ''}`;
+    completedInfo = `${ex.completedRounds || timeCap} rounds completed`;
+  } else if (exerciseType === 'tabata') {
+    prescribedInfo = `Tabata ${ex.prescribedSets} rounds, ${ex.prescribedReps} reps/round${ex.prescribedWeight > 0 ? ` @ ${ex.prescribedWeight} lbs` : ''}`;
+    completedInfo = `${ex.completedRounds || ex.prescribedSets} rounds completed`;
+  } else if (exerciseType === 'interval') {
+    const intervals = ex.intervals as any;
+    if (intervals && intervals.phases) {
+      const formatDuration = (seconds: number) => {
+        if (seconds >= 60) {
+          const mins = Math.floor(seconds / 60);
+          const secs = seconds % 60;
+          return secs > 0 ? `${mins}min ${secs}sec` : `${mins}min`;
+        }
+        return `${seconds}sec`;
+      };
+      const phaseDescription = intervals.phases.map((p: any) => `${formatDuration(p.duration)} ${p.name}`).join(' / ');
+      prescribedInfo = `${intervals.rounds} rounds: ${phaseDescription}`;
+      completedInfo = `${ex.completedRounds || intervals.rounds} rounds completed: ${phaseDescription}`;
+    } else {
+      prescribedInfo = `Interval training`;
+      completedInfo = `Completed`;
+    }
+  } else if (exerciseType === 'tempo') {
+    prescribedInfo = `${ex.prescribedSets}×${ex.prescribedReps} @ tempo ${ex.tempo || '3-1-3-1'}, ${ex.prescribedWeight} lbs`;
+    const setsInfo = reps.length > 0 
+      ? '\n  ' + reps.map((r: number, i: number) => `  Set ${i + 1}: ${r} reps @ ${weights[i] ?? ex.prescribedWeight} lbs`).join('\n  ')
+      : `${ex.completedSets}×${ex.prescribedReps} @ ${ex.prescribedWeight} lbs`;
+    completedInfo = setsInfo;
+  } else {
+    // strength or default
+    prescribedInfo = `${ex.prescribedSets}×${ex.prescribedReps} @ ${ex.prescribedWeight} lbs (${ex.weightType}), ${ex.prescribedRestTime}s rest`;
+    const setsInfo = reps.length > 0 
+      ? '\n  ' + reps.map((r: number, i: number) => `  Set ${i + 1}: ${r} reps @ ${weights[i] ?? ex.prescribedWeight} lbs`).join('\n  ')
+      : `${ex.completedSets} sets completed`;
+    completedInfo = setsInfo;
+  }
+  
+  return `- ${ex.name} (${exerciseType}):
+  Prescribed: ${prescribedInfo}
+  Progression strategy: ${progressionStr}
+  Completed: ${completedInfo}${ex.notes ? `\n  Notes: ${ex.notes}` : ''}`;
+}).join('\n\n')}`;
+    }
 
     const systemMessage: ChatMessage = {
       role: 'system',
       content: systemContent,
     };
 
-    return yield* this.chatStream([systemMessage, ...messages], { temperature: 0.7 }, signal);
+    yield* this.chatStream([systemMessage, ...messages], { temperature: 0.7, tools: WORKOUT_TOOLS }, signal);
   }
-
-  // Streaming plan STRUCTURE generation (no exercises - they're generated day by day)
-  async *generatePlanStructureStream(
-    messages: ChatMessage[],
-    userContext?: {
-      bodyweight?: number;
-      experienceLevel?: string;
-      currentPlan?: any;
-    },
-    signal?: AbortSignal
-  ): AsyncGenerator<string, string, unknown> {
-    // Build detailed current plan summary if editing
-    let currentPlanContext = '';
-    if (userContext?.currentPlan) {
-      const plan = userContext.currentPlan;
-      currentPlanContext = `\n\nUSER'S CURRENT PLAN (from database):
-Goal: ${plan.goal}
-Duration: ${plan.weeksDuration} weeks
-Sessions per week: ${plan.aiContext?.sessionsPerWeek || plan.workoutDays?.length || 'Unknown'}
-
-CURRENT WEEKLY SCHEDULE:
-${plan.workoutDays?.map((day: any) => {
-  const exercisesSummary = day.exercises?.map((ex: any) => {
-    let exStr = `${ex.name}`;
-    if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
-      exStr += ` - ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
-    } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
-      exStr += ` - ${ex.duration || ex.reps} min`;
-    } else if (ex.exerciseType === 'distance') {
-      exStr += ` - ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'}`;
-    }
-    return exStr;
-  }).join('\n  ') || 'No exercises';
-  
-  return `${day.dayName} (Day ${day.dayNumber}) - ${day.workoutType} [${day.workoutColor}]:
-  ${exercisesSummary}`;
-}).join('\n\n') || 'No days configured'}
-
-IMPORTANT: When editing, preserve all existing days and their exercises UNLESS the user explicitly asks to change them. If adding a new day, include it alongside the existing ones.`;
-    }
-    
-    // Check for last generated draft in conversation
-    let lastDraftContext = '';
-    const lastAssistantWithPlan = messages
-      .filter((m: ChatMessage) => m.role === 'assistant')
-      .reverse()
-      .find((m: ChatMessage) => {
-        // Check if message content contains a plan structure JSON
-        try {
-          const jsonMatch = m.content.match(/```(?:json)?\s*([\s\S]*?)```/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[1]);
-            return parsed.schedule && Array.isArray(parsed.schedule);
-          }
-        } catch {
-          return false;
-        }
-        return false;
-      });
-    
-    if (lastAssistantWithPlan) {
-      lastDraftContext = `\n\nLAST PLAN YOU GENERATED IN THIS CHAT (draft):
-You previously generated a plan in this conversation. If the user is asking to modify that draft, use "(copy from draft)" for unchanged days.`;
-    }
-    
-    const systemMessage: ChatMessage = {
-      role: 'system',
-      content: SYSTEM_PROMPTS.planStructure + 
-        (userContext?.bodyweight ? `\n\nUser's bodyweight: ${userContext.bodyweight} lbs` : '') +
-        (userContext?.experienceLevel ? `\nExperience level: ${userContext.experienceLevel}` : '') +
-        currentPlanContext +
-        lastDraftContext,
-    };
-
-    return yield* this.chatStream(
-      [systemMessage, ...messages],
-      { temperature: 0.7, maxTokens: 2048 },
-      signal
-    );
-  }
-
-  // Streaming post-workout analysis
-  async *analyzePostWorkoutStream(
-    workoutData: {
-      workoutType: string;
-      completedDate: Date;
-      nextDate: Date | null;
-      feedback?: { rating: number; notes?: string };
-      exercises: Array<{
-        name: string;
-        exerciseType: string;
-        sets: number;
-        reps: number;
-        weightValue: number;
-        weightType: string;
-        restTime: number;
-        performed: {
-          setsCompleted: number;
-          repsPerSet: number[];
-          weightsPerSet: number[];
-          duration?: number; // Performed duration in seconds
-          distance?: number; // Performed distance
-        };
-        history: Array<{
-          date: Date;
-          sets: number;
-          reps: number;
-          weight: number;
-          setsCompleted: number;
-          avgReps: number;
-        }>;
-        progression?: string;
-        // Prescribed values for non-strength exercises
-        duration?: number;
-        distance?: number;
-        distanceUnit?: string;
-      }>;
-    },
-    chatHistory?: ChatMessage[],
-    signal?: AbortSignal
-  ): AsyncGenerator<string, string, unknown> {
-    const exercisesPrompt = workoutData.exercises.map((ex: any) => {
-      // All weights are already converted to absolute pounds in buildExerciseData
-      let prescribedFormat = '';
-      
-      switch (ex.exerciseType) {
-        case 'cardio_time':
-        case 'mobility_time':
-          prescribedFormat = `${ex.duration || ex.reps} minutes`;
-          break;
-        case 'distance':
-          const distWeight = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
-          prescribedFormat = `${ex.sets} sets × ${ex.distance || 0} ${ex.distanceUnit || 'feet'}${distWeight}`;
-          break;
-        case 'amrap':
-          const amrapWt = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
-          prescribedFormat = `AMRAP ${Math.floor((ex.timeCap || 600) / 60)} minutes • ${ex.reps} reps per round${amrapWt}`;
-          break;
-        case 'emom':
-          const emomWt = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
-          prescribedFormat = `EMOM ${Math.floor((ex.timeCap || 600) / 60)} minutes • ${ex.reps} reps per minute${emomWt}`;
-          break;
-        case 'tabata':
-          const tabataWt = ex.weightValue > 0 ? ` @ ${ex.weightValue} lbs` : '';
-          prescribedFormat = `Tabata ${ex.sets} rounds (20s/10s) • ${ex.reps} reps per round${tabataWt}`;
-          break;
-        case 'tempo':
-          prescribedFormat = `${ex.sets} sets × ${ex.reps} reps @ tempo ${ex.tempo || '3-1-3-1'}, weight: ${ex.weightValue} lbs`;
-          break;
-        case 'interval':
-          prescribedFormat = ex.intervals ? `${ex.intervals.rounds} rounds of intervals` : 'Interval training';
-          break;
-        default: // strength
-          prescribedFormat = `${ex.sets} sets × ${ex.reps} reps @ ${ex.weightValue} lbs`;
-      }
-      
-      return `
-═══════════════════════════════════════════════════════════════
-${ex.name} (${ex.exerciseType})
-═══════════════════════════════════════════════════════════════
-
-📋 PRESCRIBED (What was planned):
-   ${prescribedFormat}
-   Rest Time: ${ex.restTime}s
-
-💪 PERFORMED (What was actually done):
-   ${ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time' 
-     ? `Duration: ${ex.performed.duration ? Math.round(ex.performed.duration / 60) + ' minutes' : ex.performed.repsPerSet[0] + ' minutes'}`
-     : ex.exerciseType === 'distance'
-     ? `Sets completed: ${ex.performed.setsCompleted} of ${ex.sets}${ex.performed.weightsPerSet.length > 0 ? `\n   ${ex.performed.weightsPerSet.map((weight: number, idx: number) => 
-     `Set ${idx + 1}: ${ex.performed.distance || ex.distance || 0} ${ex.distanceUnit || 'feet'} @ ${weight} lbs`
-   ).join('\n   ')}` : ''}`
-     : `Sets completed: ${ex.performed.setsCompleted} of ${ex.sets}\n   ${ex.performed.weightsPerSet.map((weight: number, idx: number) => 
-     `Set ${idx + 1}: ${ex.performed.repsPerSet[idx] || 0} reps @ ${weight} lbs`
-   ).join('\n   ')}`}
-
-📊 PERFORMANCE HISTORY (Last 6 sessions):
-${ex.history.length > 0 ? ex.history.map((h: { date: Date; sets: number; reps: number; weight: number; setsCompleted: number; avgReps: number }) => 
-  `   ${h.date.toLocaleDateString()}: ${h.sets}×${h.reps} @ ${h.weight} lbs - Completed: ${h.setsCompleted} sets, avg ${h.avgReps} reps`
-).join('\n') : '   No previous history'}
-
-🎯 PROGRESSION STRATEGY: ${ex.progression || 'linear +5 lbs per session'}
-`;
-    }).join('\n\n');
-
-    const userMessage = `
-═══════════════════════════════════════════════════════════════
-WORKOUT COMPLETED
-═══════════════════════════════════════════════════════════════
-Workout Type: ${workoutData.workoutType}
-Date Completed: ${workoutData.completedDate.toLocaleDateString()}
-${workoutData.nextDate ? `Next ${workoutData.workoutType} scheduled: ${workoutData.nextDate.toLocaleDateString()}` : 'No future occurrence scheduled'}
-
-Overall Workout Feedback: ${workoutData.feedback?.rating || 'Not provided'}/5 difficulty
-${workoutData.feedback?.notes ? `Notes: ${workoutData.feedback.notes}` : ''}
-
-═══════════════════════════════════════════════════════════════
-EXERCISE PERFORMANCE DATA
-═══════════════════════════════════════════════════════════════
-${exercisesPrompt}
-
-═══════════════════════════════════════════════════════════════
-YOUR TASK
-═══════════════════════════════════════════════════════════════
-Based on this ${workoutData.workoutType} workout data, calculate optimal prescriptions for the NEXT occurrence of this workout.
-
-Key points:
-- DISTANCE: Keep distance same, adjust weight only
-- TIME-BASED: Adjust duration (in "reps" field)
-- STRENGTH/TEMPO: Adjust weight, sets, and/or reps
-- AMRAP/EMOM/TABATA: Can adjust reps per round/minute (in "reps" field) and/or weight
-
-If you need any clarification about how the user performed any exercise, ask them. Otherwise, provide your analysis and suggestions.
-`;
-
-    const systemMessage: ChatMessage = {
-      role: 'system',
-      content: SYSTEM_PROMPTS.postWorkoutAnalysis,
-    };
-
-    // If chat history is provided, use it for conversational context
-    // Otherwise, start fresh with just the workout data
-    const messages: ChatMessage[] = chatHistory && chatHistory.length > 0
-      ? [systemMessage, ...chatHistory]
-      : [systemMessage, { role: 'user', content: userMessage }];
-
-    // If we have chat history, determine if we need to add the workout data context
-    // Only add it on the first analysis (when there are no assistant messages yet)
-    if (chatHistory && chatHistory.length > 0) {
-      const hasAssistantResponse = chatHistory.some(msg => msg.role === 'assistant');
-      // If no assistant has responded yet, this is the first analysis - add workout data
-      // If assistant has already responded, the user is providing follow-up info - don't add data again
-      if (!hasAssistantResponse) {
-        messages.push({ role: 'user', content: userMessage });
-      }
-    }
-
-    return yield* this.chatStream(
-      messages,
-      { temperature: 0.5, maxTokens: 4096 },
-      signal
-    );
-  }
-
-  // Generate a single workout day (for iterative day-by-day generation)
-  async generateDay(
-    planContext: {
-      goal: string;
-      weeksDuration: number;
-      sessionsPerWeek: number;
-      bodyweight?: number;
-      experienceLevel?: string;
-    },
-    dayInfo: {
-      dayNumber: number;
-      dayName: string;
-      workoutType: string;
-      workoutColor: string;
-    },
-    previousDays: Array<{
-      dayName: string;
-      workoutType: string;
-      exerciseNames: string[];
-    }>,
-    options?: {
-      chatHistory?: ChatMessage[];
-      fullGeneratedDays?: WorkoutDayData[];
-      currentPlan?: any; // User's active plan from database
-      lastDraftPlan?: any; // Last generated plan JSON from chat
-    },
-    _signal?: AbortSignal
-  ): Promise<WorkoutDayData | null> {
-    const systemMessage: ChatMessage = {
-      role: 'system',
-      content: SYSTEM_PROMPTS.planCreationSingleDay,
-    };
-
-    // Build messages array with chat history if provided
-    const messages: ChatMessage[] = [systemMessage];
-    
-    // Include full chat history if provided (this includes user's answers about equipment, injuries, etc.)
-    if (options?.chatHistory && options.chatHistory.length > 0) {
-      messages.push(...options.chatHistory);
-    }
-
-    // Build previous days summary with full details if available
-    let previousDaysSummary = 'No previous days generated yet.';
-    if (options?.fullGeneratedDays && options.fullGeneratedDays.length > 0) {
-      previousDaysSummary = options.fullGeneratedDays.map(day => {
-        const exercisesDetail = day.exercises.map(ex => {
-          let detail = ex.name;
-          if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
-            detail += `: ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
-          } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
-            detail += `: ${ex.duration} min`;
-          } else if (ex.exerciseType === 'distance') {
-            detail += `: ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'} @ ${ex.weightValue}${ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
-          } else if (ex.exerciseType === 'amrap' || ex.exerciseType === 'emom') {
-            detail += `: ${ex.timeCap ? Math.floor(ex.timeCap / 60) : 'N/A'} min, ${ex.reps} reps/round`;
-          } else if (ex.exerciseType === 'tabata') {
-            detail += `: ${ex.sets} rounds, ${ex.reps} reps/round`;
-          }
-          return detail;
-        }).join('; ');
-        return `${day.dayName} (${day.workoutType}): ${exercisesDetail}`;
-      }).join('\n\n');
-    } else if (previousDays.length > 0) {
-      // Fallback to simple summary if full days not provided
-      previousDaysSummary = previousDays.map(d => `${d.dayName} (${d.workoutType}): ${d.exerciseNames.join(', ')}`).join('\n');
-    }
-
-    // Add context about current active plan (for "(no changes)" option)
-    let currentPlanContext = '';
-    if (options?.currentPlan) {
-      const plan = options.currentPlan;
-      const dayInPlan = plan.workoutDays?.find((d: any) => d.dayNumber === dayInfo.dayNumber);
-      if (dayInPlan && dayInPlan.exercises && dayInPlan.exercises.length > 0) {
-        currentPlanContext = `\n\nCURRENT ACTIVE PLAN - ${dayInfo.dayName} (from database):
-This is what the user currently has scheduled for ${dayInfo.dayName}:
-${dayInPlan.exercises.map((ex: any) => {
-  let exStr = `- ${ex.name}`;
-  if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
-    exStr += `: ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
-  } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
-    exStr += `: ${ex.duration || ex.reps} min`;
-  } else if (ex.exerciseType === 'distance') {
-    exStr += `: ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'}`;
-  }
-  return exStr;
-}).join('\n')}
-
-IMPORTANT: If the workout type for this day is "(no changes)", you should reference this existing day's exercises.`;
-      }
-    }
-
-    // Add context about last draft plan (for "(copy from draft)" option)
-    let lastDraftContext = '';
-    if (options?.lastDraftPlan) {
-      const draft = options.lastDraftPlan;
-      const dayInDraft = draft.schedule?.find((d: any) => d.dayNumber === dayInfo.dayNumber);
-      if (dayInDraft && dayInDraft.exercises && dayInDraft.exercises.length > 0) {
-        lastDraftContext = `\n\nLAST GENERATED DRAFT - ${dayInfo.dayName} (from chat):
-This is what you previously generated for ${dayInfo.dayName} in this conversation:
-${dayInDraft.exercises.map((ex: any) => {
-  let exStr = `- ${ex.name}`;
-  if (ex.exerciseType === 'strength' || ex.exerciseType === 'tempo') {
-    exStr += `: ${ex.sets}×${ex.reps} @ ${ex.weightValue}${ex.weightType === '1RM' ? '% 1RM' : ex.weightType === 'BW' ? '% BW' : ' lbs'}`;
-  } else if (ex.exerciseType === 'cardio_time' || ex.exerciseType === 'mobility_time') {
-    exStr += `: ${ex.duration || ex.reps} min`;
-  } else if (ex.exerciseType === 'distance') {
-    exStr += `: ${ex.sets}×${ex.distance}${ex.distanceUnit || 'm'}`;
-  }
-  return exStr;
-}).join('\n')}
-
-IMPORTANT: If the workout type for this day is "(copy from draft)", you should reference this draft day's exercises.`;
-      }
-    }
-
-    const userMessage = `
-Plan Context:
-- Goal: ${planContext.goal}
-- Duration: ${planContext.weeksDuration} weeks
-- Sessions per week: ${planContext.sessionsPerWeek}
-${planContext.bodyweight ? `- User bodyweight: ${planContext.bodyweight} lbs` : ''}
-${planContext.experienceLevel ? `- Experience level: ${planContext.experienceLevel}` : ''}
-
-Generate exercises for:
-- Day ${dayInfo.dayNumber}: ${dayInfo.dayName}
-- Workout Type: ${dayInfo.workoutType}
-- Color: ${dayInfo.workoutColor}
-
-Previously generated days this week (with full exercise details):
-${previousDaysSummary}${currentPlanContext}${lastDraftContext}
-
-Output ONLY the JSON with exercises array for this day. No additional text.
-`;
-
-    messages.push({ role: 'user', content: userMessage });
-
-    const response = await this.chat(
-      messages,
-      { temperature: 0.7, maxTokens: 8192 }
-    );
-
-    const parsed = extractJSON<{ exercises: WorkoutDayData['exercises'] }>(response);
-    
-    if (!parsed?.exercises) {
-      console.error('Failed to parse day exercises:', response);
-      return null;
-    }
-
-    return {
-      dayNumber: dayInfo.dayNumber,
-      dayName: dayInfo.dayName,
-      workoutType: dayInfo.workoutType,
-      workoutColor: dayInfo.workoutColor,
-      exercises: parsed.exercises,
-    };
-  }
-
 }
 
 // Singleton instance
@@ -1270,22 +889,19 @@ export function getOpenRouterClient(): OpenRouterClient {
   return openRouterInstance;
 }
 
-// Helper to extract JSON from AI response
+// Helper to extract JSON from AI response (legacy - not used in new tool call system)
 export function extractJSON<T>(response: string): T | null {
   try {
-    // Try to find JSON in code blocks first (with or without 'json' tag)
+    // Try to find JSON in code blocks first
     const codeBlockMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (codeBlockMatch) {
       const jsonStr = codeBlockMatch[1].trim();
-      console.log('Found code block, attempting to parse:', jsonStr.substring(0, 200) + '...');
       return JSON.parse(jsonStr);
     }
 
-    // Try to find raw JSON object (get the first complete object)
+    // Try to find raw JSON object
     const jsonMatch = response.match(/\{[\s\S]*?\}/);
     if (jsonMatch) {
-      console.log('Found JSON object, attempting to parse:', jsonMatch[0].substring(0, 200) + '...');
-      // Try to find the complete object by counting braces
       let depth = 0;
       let start = response.indexOf('{');
       let end = start;
@@ -1304,7 +920,6 @@ export function extractJSON<T>(response: string): T | null {
     }
 
     // Try parsing the whole response
-    console.log('Trying to parse entire response as JSON');
     return JSON.parse(response);
   } catch (e) {
     console.error('JSON extraction failed:', e);
@@ -1315,7 +930,7 @@ export function extractJSON<T>(response: string): T | null {
 // Zod schema for interval phase
 const intervalPhaseSchema = z.object({
   name: z.string(),
-  duration: z.number(), // in seconds
+  duration: z.number(),
   intensity: z.enum(['easy', 'moderate', 'hard']).optional(),
 });
 
@@ -1326,7 +941,7 @@ const intervalStructureSchema = z.object({
   phases: z.array(intervalPhaseSchema),
 });
 
-// Zod schema for validating plan JSON from AI
+// Zod schema for validating plan JSON from AI (legacy - not used in new tool call system)
 export const workoutPlanSchema = z.object({
   goal: z.string(),
   weeksDuration: z.number().optional().default(12),
@@ -1342,22 +957,21 @@ export const workoutPlanSchema = z.object({
           name: z.string(),
           sets: z.number(),
           reps: z.number(),
-          weightType: z.string(), // ONLY use: ABSOLUTE, BW, or 1RM
+          weightType: z.string(),
           weightValue: z.number(),
-          restTime: z.number().optional().default(90), // Rest time in seconds
-          exerciseType: z.string().optional().default('strength'), // strength, cardio_time, mobility_time, distance, interval, amrap, emom, tabata, tempo
+          restTime: z.number().optional().default(90),
+          exerciseType: z.string().optional().default('strength'),
           progression: z.string().optional(),
           movementDetails: z.object({
             description: z.string(),
             cues: z.array(z.string()),
             muscles: z.array(z.string()),
           }).optional(),
-          // Complex exercise type fields
-          distance: z.number().optional(),           // Target distance (e.g., 40 for 40 feet)
-          distanceUnit: z.enum(['feet', 'yards', 'meters']).optional().default('feet'), // Distance unit
-          intervals: intervalStructureSchema.optional(), // Interval structure with phases
-          tempo: z.string().optional(),              // Tempo pattern (e.g., "3-1-3-1")
-          timeCap: z.number().optional(),            // Time cap in seconds for AMRAP/timed exercises
+          distance: z.number().optional(),
+          distanceUnit: z.enum(['feet', 'yards', 'meters']).optional().default('feet'),
+          intervals: intervalStructureSchema.optional(),
+          tempo: z.string().optional(),
+          timeCap: z.number().optional(),
         })
       ),
     })

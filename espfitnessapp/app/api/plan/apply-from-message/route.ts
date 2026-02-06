@@ -47,8 +47,18 @@ export async function POST(request: NextRequest) {
     console.log(`Processing plan from message ${messageId}, action: ${action}`);
     console.log(`Plan has ${planData.schedule.length} days`);
 
-    // Parse date string as local date
-    const startDate = new Date(planData.startDate);
+    // Parse date string as local date, default to today if missing or invalid
+    let startDate: Date;
+    if (planData.startDate) {
+      startDate = new Date(planData.startDate);
+      // Check if date is valid
+      if (isNaN(startDate.getTime())) {
+        startDate = new Date();
+      }
+    } else {
+      startDate = new Date();
+    }
+    
     const today = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
     const dayOfWeek = today.getDay();
     const startOfWeek = new Date(today.getFullYear(), today.getMonth(), today.getDate() - dayOfWeek);

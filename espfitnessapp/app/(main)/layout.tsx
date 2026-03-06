@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { validateSession } from '@/app/lib/auth';
 import { BottomNav } from '@/app/components/BottomNav';
+import { RestTimerBadge } from '@/app/components/RestTimerBadge';
 
 export default async function MainLayout({
   children,
@@ -15,6 +16,7 @@ export default async function MainLayout({
 
   return (
     <div className="bg-background pb-20">
+      <RestTimerBadge />
       {children}
       <BottomNav />
     </div>

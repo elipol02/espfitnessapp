@@ -7,24 +7,23 @@ datasource db {
 }
 
 model User {
-  id                  String              @id @default(cuid())
-  email               String              @unique
+  id                  String           @id @default(cuid())
+  email               String           @unique
   emailVerified       DateTime?
   name                String?
   image               String?
   password            String?
   bodyweight          Float?
-  onboardingCompleted Boolean             @default(false)
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
+  onboardingCompleted Boolean          @default(false)
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
   accounts            Account[]
   chatMessages        ChatMessage[]
   chatSessions        ChatSession[]
-  pendingAdjustments  PendingAdjustment[]
   sessions            Session[]
-  stats               UserStats?
-  workoutLogs         WorkoutLog[]
   workoutPlans        WorkoutPlan[]
+  workoutTypes        WorkoutType[]
+  workoutSessions     WorkoutSession[]
 }
 
 model Account {
@@ -61,131 +60,117 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
-model UserStats {
-  id                 String    @id @default(cuid())
-  userId             String    @unique
-  currentStreak      Int       @default(0)
-  longestStreak      Int       @default(0)
-  personalRecords    Json      @default("{}")
-  progressPercentage Float     @default(0)
-  lastWorkout        DateTime?
-  updatedAt          DateTime  @updatedAt
-  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+// ─── Workout Template Models ────────────────────────────────────────────────
+
+model WorkoutType {
+  id              String             @id @default(cuid())
+  userId          String
+  name            String
+  color           String             @default("#404040")
+  category        String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exercises       Exercise[]
+  dayAssignments  PlanDayAssignment[]
+  workoutSessions WorkoutSession[]
+
+  @@index([userId])
 }
 
+model Exercise {
+  id            String          @id @default(cuid())
+  workoutTypeId String
+  name          String
+  exerciseType  String          @default("strength")
+  config        Json
+  progression   Json?
+  groupTag      String?
+  order         Int             @default(0)
+  notes         String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  workoutType   WorkoutType     @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
+  entries       ExerciseEntry[]
+
+  @@index([workoutTypeId])
+  @@index([order])
+}
+
+// ─── Plan Models ────────────────────────────────────────────────────────────
+
 model WorkoutPlan {
-  id                 String              @id @default(cuid())
-  userId             String
-  goal               String
-  aiContext          Json?
-  status             String              @default("draft")
-  weeksDuration      Int                 @default(1)
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
-  startDate          DateTime?
-  chatMessages       ChatMessage[]
-  pendingAdjustments PendingAdjustment[]
-  workoutDays        WorkoutDay[]
-  workoutLogs        WorkoutLog[]
-  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id              String             @id @default(cuid())
+  userId          String
+  name            String
+  status          String             @default("active")
+  startDate       DateTime?
+  endDate         DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dayAssignments  PlanDayAssignment[]
+  workoutSessions WorkoutSession[]
 
   @@index([userId])
   @@index([status])
 }
 
-model WorkoutDay {
-  id            String       @id @default(cuid())
+model PlanDayAssignment {
+  id            String      @id @default(cuid())
   planId        String
-  dayNumber     Int
-  dayName       String
-  workoutType   String
-  workoutColor  String       @default("#404040")
-  metadata      Json?
-  isGenerated   Boolean      @default(false)
-  scheduledDate DateTime?
-  exercises     Exercise[]
-  plan          WorkoutPlan  @relation(fields: [planId], references: [id], onDelete: Cascade)
-  workoutLogs   WorkoutLog[]
+  dayOfWeek     Int
+  workoutTypeId String
+  plan          WorkoutPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  workoutType   WorkoutType @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
 
+  @@unique([planId, dayOfWeek])
   @@index([planId])
-  @@index([dayNumber])
-  @@index([scheduledDate])
-  @@index([workoutType])
-  @@index([planId, workoutType, scheduledDate])
+  @@index([workoutTypeId])
 }
 
-model Exercise {
-  id              String        @id @default(cuid())
-  dayId           String
-  name            String
-  sets            Int
-  reps            Int
-  weightType      String        @default("ABSOLUTE")
-  weightValue     Float
-  progression     Json?
-  movementDetails Json?
-  order           Int           @default(0)
-  restTime        Int           @default(90)
-  exerciseType    String        @default("strength")
-  distance        Float?
-  distanceUnit    String?       @default("feet")
-  intervals       Json?
-  tempo           String?
-  timeCap         Int?
-  repsMin         Int?
-  setsMin         Int?
-  duration        Int?
-  movements       Json?
-  day             WorkoutDay    @relation(fields: [dayId], references: [id], onDelete: Cascade)
-  exerciseLogs    ExerciseLog[]
+// ─── Completed Workout Models ───────────────────────────────────────────────
 
-  @@index([dayId])
-  @@index([order])
-}
-
-model WorkoutLog {
-  id           String        @id @default(cuid())
-  userId       String
-  planId       String
-  dayId        String
-  workoutDate  DateTime      @default(now())
-  status       String        @default("in_progress")
-  startedAt    DateTime?
-  completedAt  DateTime?
-  feedback     Json?
-  createdAt    DateTime      @default(now())
-  exerciseLogs ExerciseLog[]
-  day          WorkoutDay    @relation(fields: [dayId], references: [id], onDelete: Cascade)
-  plan         WorkoutPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+model WorkoutSession {
+  id            String          @id @default(cuid())
+  userId        String
+  workoutTypeId String
+  planId        String?
+  workoutDate   DateTime
+  status        String          @default("in_progress")
+  startedAt     DateTime?
+  completedAt   DateTime?
+  notes         String?
+  rating        Int?
+  createdAt     DateTime        @default(now())
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workoutType   WorkoutType     @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
+  plan          WorkoutPlan?    @relation(fields: [planId], references: [id], onDelete: SetNull)
+  entries       ExerciseEntry[]
 
   @@index([userId])
+  @@index([workoutTypeId])
   @@index([planId])
-  @@index([dayId])
   @@index([workoutDate])
+  @@index([userId, workoutTypeId, workoutDate])
 }
 
-model ExerciseLog {
-  id            String     @id @default(cuid())
-  logId         String
-  exerciseId    String
-  setsCompleted Int
-  repsPerSet    Json       // Array of reps per set (for strength, AMRAP reps per round, etc.)
-  weightUsed    Json       // Array of weights per set
-  isPR          Boolean    @default(false)
-  notes         String?
-  // Additional fields for different exercise types
-  duration      Int?       // Actual duration completed (seconds) for cardio_time, mobility_time
-  distance      Float?     // Actual distance completed for distance exercises
-  roundsCompleted Int?     // For AMRAP, intervals, etc.
-  timeElapsed   Int?       // Actual time taken (seconds) for AMRAP, EMOM, etc.
-  performanceData Json?    // Flexible field for complex data (interval phases, tabata rounds, etc.)
-  exercise      Exercise   @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
-  log           WorkoutLog @relation(fields: [logId], references: [id], onDelete: Cascade)
+model ExerciseEntry {
+  id         String         @id @default(cuid())
+  sessionId  String
+  exerciseId String
+  data       Json
+  createdAt  DateTime       @default(now())
+  session    WorkoutSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  exercise   Exercise       @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
 
-  @@index([logId])
+  @@unique([sessionId, exerciseId])
+  @@index([sessionId])
   @@index([exerciseId])
 }
+
+// ─── Chat Models ────────────────────────────────────────────────────────────
 
 model ChatSession {
   id        String        @id @default(cuid())
@@ -201,37 +186,18 @@ model ChatSession {
 }
 
 model ChatMessage {
-  id        String       @id @default(cuid())
+  id        String      @id @default(cuid())
   userId    String
-  planId    String?
   role      String
   content   String
   metadata  Json?
-  createdAt DateTime     @default(now())
+  approved  Boolean     @default(false)
+  createdAt DateTime    @default(now())
   sessionId String
-  plan      WorkoutPlan? @relation(fields: [planId], references: [id])
-  session   ChatSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
   @@index([userId])
-  @@index([planId])
   @@index([createdAt])
-}
-
-model PendingAdjustment {
-  id           String      @id @default(cuid())
-  userId       String
-  planId       String
-  workoutLogId String      @unique
-  suggestions  Json
-  status       String      @default("pending")
-  createdAt    DateTime    @default(now())
-  expiresAt    DateTime
-  plan         WorkoutPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
-  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([workoutLogId])
-  @@index([status])
 }

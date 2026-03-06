@@ -1,293 +1,190 @@
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
-import { getUTCDateString } from '@/app/lib/utils';
 import { HomeContent } from './HomeContent';
 import { redirect } from 'next/navigation';
+import { getMotivationalMessage } from '@/app/lib/motivationalMessages';
 
 export const dynamic = 'force-dynamic';
 
 async function getHomeData(userId: string) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  
-  // Get user's active plan with today's workout
-  const activePlan = await prisma.workoutPlan.findFirst({
-    where: {
-      userId,
-      status: 'active',
-    },
-    include: {
-      workoutDays: {
-        include: {
-          exercises: {
-            orderBy: { order: 'asc' },
-          },
-        },
-        orderBy: { dayNumber: 'asc' },
-      },
-    },
-  });
-
-  // Check if plan has started
-  let planHasStarted = true;
-  if (activePlan?.startDate) {
-    const startDate = new Date(activePlan.startDate);
-    startDate.setHours(0, 0, 0, 0);
-    planHasStarted = startDate <= today;
-  }
-
-  // Get current, previous, and next workout days - only if plan has started
-  // This allows the frontend to decide which one is "today" based on local time
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(today.getDate() + 1);
-
-  const currentWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
-    if (!day.scheduledDate) return false;
-    const scheduledDate = new Date(day.scheduledDate);
-    return (
-      scheduledDate.getFullYear() === today.getFullYear() &&
-      scheduledDate.getMonth() === today.getMonth() &&
-      scheduledDate.getDate() === today.getDate()
-    );
-  });
-
-  const previousWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
-    if (!day.scheduledDate) return false;
-    const scheduledDate = new Date(day.scheduledDate);
-    return (
-      scheduledDate.getFullYear() === yesterday.getFullYear() &&
-      scheduledDate.getMonth() === yesterday.getMonth() &&
-      scheduledDate.getDate() === yesterday.getDate()
-    );
-  });
-
-  const nextWorkout = planHasStarted && activePlan?.workoutDays.find((day: any) => {
-    if (!day.scheduledDate) return false;
-    const scheduledDate = new Date(day.scheduledDate);
-    return (
-      scheduledDate.getFullYear() === tomorrow.getFullYear() &&
-      scheduledDate.getMonth() === tomorrow.getMonth() &&
-      scheduledDate.getDate() === tomorrow.getDate()
-    );
-  });
-
-  // Get user stats
-  const userStats = await prisma.userStats.findUnique({
-    where: { userId },
-  });
-
-  // Get user profile
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: {
-      name: true,
-      bodyweight: true,
-      onboardingCompleted: true,
+    select: { name: true, bodyweight: true, onboardingCompleted: true },
+  });
+
+  const activePlan = await prisma.workoutPlan.findFirst({
+    where: { userId, status: 'active' },
+    include: {
+      dayAssignments: {
+        include: {
+          workoutType: {
+            include: {
+              exercises: { orderBy: { order: 'asc' } },
+            },
+          },
+        },
+        orderBy: { dayOfWeek: 'asc' },
+      },
     },
   });
 
-  // Get workout logs for current, previous, and next days
-  const getWorkoutLog = async (workout: any, date: Date) => {
-    if (!workout) return null;
-    return await prisma.workoutLog.findFirst({
-      where: {
-        userId,
-        dayId: workout.id,
-        workoutDate: {
-          gte: date,
-          lt: new Date(date.getTime() + 24 * 60 * 60 * 1000),
-        },
-      },
-    });
-  };
-
-  const [currentLog, previousLog, nextLog] = await Promise.all([
-    getWorkoutLog(currentWorkout, today),
-    getWorkoutLog(previousWorkout, yesterday),
-    getWorkoutLog(nextWorkout, tomorrow),
-  ]);
-
-  // Get workout logs for current week plus one week before and after
-  const oneWeekAgo = new Date(today);
-  oneWeekAgo.setDate(today.getDate() - 7);
+  // Get recent sessions for the week
+  const oneWeekAgo = new Date();
+  oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
   oneWeekAgo.setHours(0, 0, 0, 0);
-  
-  const oneWeekAhead = new Date(today);
-  oneWeekAhead.setDate(today.getDate() + 7);
-  
-  const recentLogs = activePlan ? await prisma.workoutLog.findMany({
-    where: {
-      userId,
-      planId: activePlan.id,
-      workoutDate: {
-        gte: oneWeekAgo,
-        lt: oneWeekAhead,
-      },
-    },
-    select: {
-      id: true,
-      dayId: true,
-      workoutDate: true,
-      status: true,
-    },
-  }) : [];
 
-  // Send all workout days - client will build week preview based on its timezone
-  const allWorkoutDays = activePlan?.workoutDays.map((day: any) => ({
-    id: day.id,
-    dayName: day.dayName,
-    dayNumber: day.dayNumber,
-    workoutType: day.workoutType,
-    workoutColor: day.workoutColor,
-    exerciseCount: day.exercises.length,
-    isGenerated: day.isGenerated,
-    scheduledDate: day.scheduledDate?.toISOString() || null,
-  })) || [];
+  const oneWeekAhead = new Date();
+  oneWeekAhead.setDate(oneWeekAhead.getDate() + 7);
 
-  // Calculate missed workout days and completed workouts
-  let daysMissed = 0;
-  let completedWorkouts = 0;
-  if (activePlan && planHasStarted) {
-    const startDate = new Date(activePlan.startDate!);
-    startDate.setHours(0, 0, 0, 0);
+  const recentSessions = activePlan
+    ? await prisma.workoutSession.findMany({
+        where: {
+          userId,
+          planId: activePlan.id,
+          workoutDate: { gte: oneWeekAgo, lt: oneWeekAhead },
+        },
+        select: {
+          id: true,
+          workoutTypeId: true,
+          workoutDate: true,
+          status: true,
+        },
+      })
+    : [];
 
-    // Get all completed workout logs for this plan
-    const allCompletedLogs = await prisma.workoutLog.findMany({
-      where: {
-        userId,
-        planId: activePlan.id,
-        status: 'completed',
-      },
-      select: {
-        dayId: true,
-        workoutDate: true,
-      },
+  // Count completed workouts for this plan
+  const completedWorkouts = activePlan
+    ? await prisma.workoutSession.count({
+        where: { userId, planId: activePlan.id, status: 'completed' },
+      })
+    : 0;
+
+  const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6 };
+
+  // Compute streak live — walk backwards through scheduled workout days only
+  let currentStreak = 0;
+  if (activePlan) {
+    const assignedDaysSet = new Set(activePlan.dayAssignments.map((d) => d.dayOfWeek));
+    const allCompleted = await prisma.workoutSession.findMany({
+      where: { userId, planId: activePlan.id, status: 'completed' },
+      select: { workoutDate: true },
     });
-
-    // Count total completed workouts
-    completedWorkouts = allCompletedLogs.length;
-
-    // Check each scheduled workout day
-    for (const workoutDay of activePlan.workoutDays) {
-      // Skip if no scheduled date or if it's a rest day
-      const dayScheduledDate = (workoutDay as any).scheduledDate;
-      if (!dayScheduledDate || workoutDay.workoutType.toLowerCase() === 'rest') {
-        continue;
-      }
-
-      const scheduledDate = new Date(dayScheduledDate);
-      scheduledDate.setHours(0, 0, 0, 0);
-
-      // Only count if the day is in the past (before today) and after plan start
-      if (scheduledDate < today && scheduledDate >= startDate) {
-        // Check if there's a completed log for this workout day on this date
-        const hasCompletedLog = allCompletedLogs.some((log: { dayId: string; workoutDate: Date }) => {
-          const logDate = new Date(log.workoutDate);
-          // Use UTC date strings to avoid timezone issues
-          return log.dayId === workoutDay.id && 
-                 getUTCDateString(logDate) === getUTCDateString(scheduledDate);
-        });
-
-        if (!hasCompletedLog) {
-          daysMissed++;
+    const completedDates = new Set(allCompleted.map((s) => s.workoutDate.toISOString().slice(0, 10)));
+    const todayUTC = new Date();
+    todayUTC.setUTCHours(0, 0, 0, 0);
+    const cursor = new Date(todayUTC);
+    for (let i = 0; i < 365; i++) {
+      const dow = DAY_MAP[cursor.getUTCDay()];
+      const dateStr = cursor.toISOString().slice(0, 10);
+      if (assignedDaysSet.has(dow)) {
+        if (completedDates.has(dateStr)) {
+          currentStreak++;
+        } else if (cursor < todayUTC) {
+          break;
         }
       }
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
     }
   }
 
-  // Calculate weeks remaining
-  let weeksRemaining = 0;
-  if (activePlan && planHasStarted && activePlan.startDate) {
-    const startDate = new Date(activePlan.startDate);
-    startDate.setHours(0, 0, 0, 0);
-    
-    const daysPassed = Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
-    const weeksPassed = Math.floor(daysPassed / 7);
-    
-    weeksRemaining = Math.max(0, activePlan.weeksDuration - weeksPassed);
+  // Compute missed workouts + completion rate to date (scheduled so far, not total plan)
+  let missedWorkouts = 0;
+  let completionRateToDate = 0;
+  if (activePlan?.startDate && activePlan.dayAssignments.length > 0) {
+    const allCompleted = await prisma.workoutSession.findMany({
+      where: { userId, planId: activePlan.id, status: 'completed' },
+      select: { workoutDate: true },
+    });
+    const completedDateSet = new Set(allCompleted.map((s) => s.workoutDate.toISOString().slice(0, 10)));
+    const assignedDaySet = new Set(activePlan.dayAssignments.map((d) => d.dayOfWeek));
+    const yesterdayUTC = new Date();
+    yesterdayUTC.setUTCHours(0, 0, 0, 0);
+    yesterdayUTC.setUTCDate(yesterdayUTC.getUTCDate() - 1);
+    const planStart = new Date(activePlan.startDate);
+    planStart.setUTCHours(0, 0, 0, 0);
+    let scheduledSoFar = 0;
+    const missedCursor = new Date(planStart);
+    while (missedCursor <= yesterdayUTC) {
+      const dow = DAY_MAP[missedCursor.getUTCDay()];
+      const dateStr = missedCursor.toISOString().slice(0, 10);
+      if (assignedDaySet.has(dow)) {
+        scheduledSoFar++;
+        if (!completedDateSet.has(dateStr)) missedWorkouts++;
+      }
+      missedCursor.setUTCDate(missedCursor.getUTCDate() + 1);
+    }
+    completionRateToDate = scheduledSoFar > 0
+      ? Math.round(((scheduledSoFar - missedWorkouts) / scheduledSoFar) * 100)
+      : 100;
   }
 
-  const formatWorkout = (workout: any) => {
-    if (!workout) return null;
-    return {
-      id: workout.id,
-      dayName: workout.dayName,
-      workoutType: workout.workoutType,
-      workoutColor: workout.workoutColor,
-      scheduledDate: workout.scheduledDate?.toISOString() || null,
-      exercises: workout.exercises.map((e: any) => ({
-        id: e.id,
-        name: e.name,
-        sets: e.sets,
-        reps: e.reps,
-        restTime: e.restTime,
-        exerciseType: e.exerciseType,
-        duration: e.duration !== null && e.duration !== undefined ? e.duration : null,
-        weightValue: e.weightValue,
-        weightType: e.weightType,
-      })),
-    };
-  };
-
-  const formatLog = (log: any) => {
-    if (!log) return null;
-    return {
-      id: log.id,
-      status: log.status,
-    };
-  };
-
-  // Calculate current week
-  let currentWeek = 1;
-  if (activePlan && planHasStarted && activePlan.startDate) {
-    const startDate = new Date(activePlan.startDate);
-    startDate.setHours(0, 0, 0, 0);
-    const daysPassed = Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
-    currentWeek = Math.floor(daysPassed / 7) + 1;
+  // Compute plan completion percentage when both start and end dates exist
+  let planCompletionPercentage: number | null = null;
+  if (activePlan?.startDate && activePlan?.endDate && activePlan.dayAssignments.length > 0) {
+    const assignedDays = new Set(activePlan.dayAssignments.map((d) => d.dayOfWeek));
+    let totalScheduled = 0;
+    const cursor = new Date(activePlan.startDate);
+    cursor.setHours(0, 0, 0, 0);
+    const end = new Date(activePlan.endDate);
+    end.setHours(0, 0, 0, 0);
+    while (cursor <= end) {
+      if (assignedDays.has(DAY_MAP[cursor.getDay()])) totalScheduled++;
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    planCompletionPercentage = totalScheduled > 0
+      ? Math.min(100, Math.round((completedWorkouts / totalScheduled) * 100))
+      : 0;
   }
 
   return {
     user,
-    userStats,
-    activePlan: activePlan ? {
-      id: activePlan.id,
-      goal: activePlan.goal,
-      status: activePlan.status,
-      startDate: activePlan.startDate?.toISOString() || null,
-      durationWeeks: activePlan.weeksDuration,
-    } : null,
-    // Send current, previous, and next workouts so frontend can decide based on local time
-    currentWorkout: formatWorkout(currentWorkout),
-    previousWorkout: formatWorkout(previousWorkout),
-    nextWorkout: formatWorkout(nextWorkout),
-    currentLog: formatLog(currentLog),
-    previousLog: formatLog(previousLog),
-    nextLog: formatLog(nextLog),
-    // Send all workout days and recent logs - client will build week preview based on its timezone
-    allWorkoutDays,
-    recentLogs: recentLogs.map((log: { id: string; dayId: string; workoutDate: Date; status: string }) => ({
-      id: log.id,
-      dayId: log.dayId,
-      workoutDate: log.workoutDate.toISOString(),
-      status: log.status,
+    currentStreak,
+    activePlan: activePlan
+      ? {
+          id: activePlan.id,
+          name: activePlan.name,
+          status: activePlan.status,
+          startDate: activePlan.startDate?.toISOString() || null,
+          endDate: activePlan.endDate?.toISOString() || null,
+          planCompletionPercentage,
+          dayAssignments: activePlan.dayAssignments.map((da) => ({
+            dayOfWeek: da.dayOfWeek,
+            workoutType: {
+              id: da.workoutType.id,
+              name: da.workoutType.name,
+              color: da.workoutType.color,
+              exerciseCount: da.workoutType.exercises.length,
+              exercises: da.workoutType.exercises.map((e) => ({ id: e.id, name: e.name })),
+            },
+          })),
+        }
+      : null,
+    recentSessions: recentSessions.map((s) => ({
+      id: s.id,
+      workoutTypeId: s.workoutTypeId,
+      workoutDate: s.workoutDate.toISOString(),
+      status: s.status,
     })),
-    daysMissed,
     completedWorkouts,
-    weeksRemaining,
-    currentWeek,
+    missedWorkouts,
+    completionRateToDate,
+    motivationalMessage: (() => {
+      if (!activePlan?.startDate || !activePlan?.endDate) return null;
+      const start = new Date(activePlan.startDate).getTime();
+      const end = new Date(activePlan.endDate).getTime();
+      const now = Date.now();
+      const progressPct = Math.min(100, Math.max(0, Math.round(((now - start) / (end - start)) * 100)));
+      return getMotivationalMessage(progressPct, completionRateToDate);
+    })(),
   };
 }
 
 export default async function HomePage() {
   const { session, error } = await validateSession();
-  
   if (error || !session?.user?.id) {
     redirect('/login');
   }
 
   const data = await getHomeData(session.user.id);
-
   return <HomeContent data={data} />;
 }

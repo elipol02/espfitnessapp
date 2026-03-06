@@ -174,14 +174,13 @@ export default function RegisterPage() {
                 htmlFor="systemPassword"
                 className="block text-sm font-medium text-foreground mb-1.5"
               >
-                System Password
+                System Password (optional)
               </label>
               <input
                 id="systemPassword"
                 type="password"
                 value={systemPassword}
                 onChange={(e) => setSystemPassword(e.target.value)}
-                required
                 autoComplete="off"
                 className="w-full px-4 py-3 rounded-lg bg-surface border border-border 
                          text-foreground placeholder-muted

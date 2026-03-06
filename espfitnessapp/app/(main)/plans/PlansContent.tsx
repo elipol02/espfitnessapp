@@ -1,14 +1,13 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { FileText, Calendar, Clock, CheckCircle, Edit, Trash2 } from 'lucide-react';
+import { FileText, Calendar, CheckCircle, Trash2, Archive } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 
 interface Plan {
   id: string;
-  goal: string;
+  name: string;
   status: string;
-  weeksDuration: number | null;
   startDate: string | null;
   createdAt: string;
   dayCount: number;
@@ -26,18 +25,11 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
             Active
           </span>
         );
-      case 'draft':
+      case 'archived':
         return (
           <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted/20 text-muted text-xs font-medium">
-            <Edit size={12} />
-            Draft
-          </span>
-        );
-      case 'completed':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium">
-            <CheckCircle size={12} />
-            Completed
+            <Archive size={12} />
+            Archived
           </span>
         );
       default:
@@ -46,17 +38,11 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
   };
 
   const formatDate = (dateString: string) => {
-    // Check if it's a date-only string (YYYY-MM-DD) or ISO datetime
     if (dateString.includes('T')) {
-      // ISO datetime - parse normally
-      const date = new Date(dateString);
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    } else {
-      // Date-only string - parse as local date to avoid timezone issues
-      const [year, month, day] = dateString.split('-').map(Number);
-      const date = new Date(year, month - 1, day);
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      return new Date(dateString).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     }
+    const [year, month, day] = dateString.split('-').map(Number);
+    return new Date(year, month - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
   const handleActivate = async (planId: string) => {
@@ -66,32 +52,17 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'active' }),
       });
-
-      if (response.ok) {
-        router.refresh();
-      } else {
-        console.error('Failed to activate plan');
-      }
+      if (response.ok) router.refresh();
     } catch (error) {
       console.error('Error activating plan:', error);
     }
   };
 
   const handleDelete = async (planId: string) => {
-    if (!confirm('Are you sure you want to delete this plan?')) {
-      return;
-    }
-
+    if (!confirm('Are you sure you want to delete this plan?')) return;
     try {
-      const response = await fetch(`/api/plan/${planId}`, {
-        method: 'DELETE',
-      });
-
-      if (response.ok) {
-        router.refresh();
-      } else {
-        console.error('Failed to delete plan');
-      }
+      const response = await fetch(`/api/plan/${planId}`, { method: 'DELETE' });
+      if (response.ok) router.refresh();
     } catch (error) {
       console.error('Error deleting plan:', error);
     }
@@ -99,7 +70,6 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
 
   return (
     <div className="pb-20">
-      {/* Header */}
       <div className="sticky top-0 z-10 bg-background/95 backdrop-blur border-b border-border">
         <div className="px-4 py-4">
           <h1 className="text-2xl font-bold text-foreground">My Plans</h1>
@@ -109,7 +79,6 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
         </div>
       </div>
 
-      {/* Plans List */}
       <div className="px-4 py-4 space-y-3">
         {plans.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -118,9 +87,7 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
             <p className="text-sm text-muted-foreground mb-6 max-w-sm">
               Create your first workout plan by chatting with the AI assistant
             </p>
-            <Button onClick={() => router.push('/chat')}>
-              Create Plan
-            </Button>
+            <Button onClick={() => router.push('/chat')}>Create Plan</Button>
           </div>
         ) : (
           plans.map((plan) => (
@@ -131,30 +98,19 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="flex-1">
-                  <h3 className="font-semibold text-foreground mb-1">{plan.goal}</h3>
+                  <h3 className="font-semibold text-foreground mb-1">{plan.name}</h3>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span className="flex items-center gap-1">
                       <Calendar size={12} />
-                      {plan.dayCount} {plan.dayCount === 1 ? 'day' : 'days'}
+                      {plan.dayCount} training {plan.dayCount === 1 ? 'day' : 'days'}
                     </span>
-                    {plan.weeksDuration && (
-                      <>
-                        <span>•</span>
-                        <span className="flex items-center gap-1">
-                          <Clock size={12} />
-                          {plan.weeksDuration} weeks
-                        </span>
-                      </>
-                    )}
                   </div>
                 </div>
                 {getStatusBadge(plan.status)}
               </div>
 
               <div className="text-xs text-muted-foreground mb-4 space-y-1">
-                {plan.startDate && (
-                  <p>Starts {formatDate(plan.startDate)}</p>
-                )}
+                {plan.startDate && <p>Started {formatDate(plan.startDate)}</p>}
                 <p>Created {formatDate(plan.createdAt)}</p>
               </div>
 
@@ -163,19 +119,13 @@ export function PlansContent({ plans }: { plans: Plan[] }) {
                   <Button
                     size="sm"
                     variant="secondary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleActivate(plan.id);
-                    }}
+                    onClick={(e) => { e.stopPropagation(); handleActivate(plan.id); }}
                   >
                     Make Active
                   </Button>
                 )}
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDelete(plan.id);
-                  }}
+                  onClick={(e) => { e.stopPropagation(); handleDelete(plan.id); }}
                   className="p-2 rounded-lg bg-surface-elevated hover:bg-error/10 hover:text-error transition-colors"
                   title="Delete Plan"
                 >

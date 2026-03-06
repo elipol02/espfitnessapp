@@ -1,1842 +1,1213 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Plus, Minus, Check, Timer, ChevronRight, Play, Edit2, X } from 'lucide-react';
+import {
+  ArrowLeft, ChevronLeft, ChevronRight, Check, Timer,
+  Dumbbell, Footprints, Clock, Play, Pause, RotateCcw, Pencil,
+} from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import { LoadingSpinner } from '@/app/components/LoadingSpinner';
-import { haptic } from '@/app/lib/utils';
+import { startRestTimer, useRestTimer } from '@/app/components/RestTimerBadge';
+import type {
+  ExerciseType,
+  StrengthConfig,
+  DistanceConfig,
+  TimeConfig,
+  AmrapConfig,
+  EmomConfig,
+  RoundBlockConfig,
+  TabataConfig,
+  SuggestionMap,
+  StrengthEntryData,
+  DistanceEntryData,
+  TimeEntryData,
+  RoundsEntryData,
+  ExerciseEntryData,
+} from '@/app/types';
 
-interface IntervalPhase {
-  name: string;
+// ─── Shared helpers ──────────────────────────────────────────────────────────
+
+function formatTime(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+// ─── Interval Timer ──────────────────────────────────────────────────────────
+
+type IntervalTimerConfig =
+  | { kind: 'countdown'; totalSeconds: number }
+  | { kind: 'amrap';     totalSeconds: number }
+  | { kind: 'emom';      totalIntervals: number; intervalSeconds: number }
+  | { kind: 'tabata';    rounds: number; workSeconds: number; restSeconds: number };
+
+interface Segment {
+  label: string;
+  subLabel?: string;
   duration: number;
-  intensity?: 'easy' | 'moderate' | 'hard';
+  phase: 'work' | 'rest' | 'main';
 }
 
-interface IntervalStructure {
-  type: 'simple' | 'complex';
-  rounds: number;
-  phases: IntervalPhase[];
+function buildSegments(config: IntervalTimerConfig): Segment[] {
+  switch (config.kind) {
+    case 'countdown':
+      return [{ label: '', duration: config.totalSeconds, phase: 'main' }];
+    case 'amrap':
+      return [{ label: 'AMRAP', duration: config.totalSeconds, phase: 'main' }];
+    case 'emom':
+      return Array.from({ length: config.totalIntervals }, (_, i) => ({
+        label: `Interval ${i + 1} / ${config.totalIntervals}`,
+        duration: config.intervalSeconds,
+        phase: 'work' as const,
+      }));
+    case 'tabata': {
+      const segs: Segment[] = [];
+      for (let r = 0; r < config.rounds; r++) {
+        segs.push({ label: 'WORK', subLabel: `Round ${r + 1} / ${config.rounds}`, duration: config.workSeconds, phase: 'work' });
+        segs.push({ label: 'REST', subLabel: `Round ${r + 1} / ${config.rounds}`, duration: config.restSeconds, phase: 'rest' });
+      }
+      return segs;
+    }
+  }
 }
 
-interface Exercise {
+type TimerStatus = 'idle' | 'get-ready' | 'active' | 'paused' | 'done';
+
+interface FinishData {
+  elapsedSeconds: number;
+  segmentsCompleted: number;
+}
+
+function IntervalTimer({
+  config,
+  onFinish,
+  resetKey,
+  adjustable = false,
+  onDurationChange,
+}: {
+  config: IntervalTimerConfig;
+  onFinish?: (data: FinishData) => void;
+  resetKey?: number;
+  adjustable?: boolean;
+  onDurationChange?: (seconds: number) => void;
+}) {
+  // Which kinds support adjustable
+  const isAdjustableSingle = adjustable && (config.kind === 'countdown' || config.kind === 'amrap');
+  const isAdjustableEmom   = adjustable && config.kind === 'emom';
+
+  // Local values — only meaningful when adjustable
+  const [localDuration, setLocalDuration] = useState(
+    config.kind === 'countdown' || config.kind === 'amrap' ? config.totalSeconds : 0
+  );
+  const [localIntervals, setLocalIntervals] = useState(
+    config.kind === 'emom' ? config.totalIntervals : 0
+  );
+
+  // Segments rebuild from local values when adjustable (safe — only changes while idle)
+  const segments = useMemo(() => {
+    if (isAdjustableSingle) {
+      const label = config.kind === 'amrap' ? 'AMRAP' : '';
+      return [{ label, duration: localDuration, phase: 'main' as const }];
+    }
+    if (isAdjustableEmom && config.kind === 'emom') {
+      return Array.from({ length: localIntervals }, (_, i) => ({
+        label: `Interval ${i + 1} / ${localIntervals}`,
+        duration: config.intervalSeconds,
+        phase: 'work' as const,
+      })) as Segment[];
+    }
+    return buildSegments(config);
+  }, [config, isAdjustableSingle, isAdjustableEmom, localDuration, localIntervals]);
+
+  const [status, setStatus] = useState<TimerStatus>('idle');
+  const [getReadyCount, setGetReadyCount] = useState(5);
+  const [segIdx, setSegIdx] = useState(0);
+  const [remaining, setRemaining] = useState(segments[0]?.duration ?? 0);
+
+  const segIdxRef             = useRef(0);
+  const pausedRemainingRef    = useRef(segments[0]?.duration ?? 0);
+  const startTimeRef          = useRef(0);
+  const totalElapsedRef       = useRef(0);
+  const segsCompletedRef      = useRef(0);
+  const onFinishRef           = useRef(onFinish);
+  const onDurationChangeRef   = useRef(onDurationChange);
+  onFinishRef.current         = onFinish;
+  onDurationChangeRef.current = onDurationChange;
+
+  const doReset = useCallback((dur?: number) => {
+    const d = dur ?? segments[0]?.duration ?? 0;
+    setStatus('idle');
+    setGetReadyCount(5);
+    segIdxRef.current          = 0;
+    setSegIdx(0);
+    pausedRemainingRef.current = d;
+    setRemaining(d);
+    totalElapsedRef.current    = 0;
+    segsCompletedRef.current   = 0;
+  }, [segments]);
+
+  // Reset when resetKey changes
+  useEffect(() => {
+    doReset();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey]);
+
+  // 5-second get-ready countdown
+  useEffect(() => {
+    if (status !== 'get-ready') return;
+    if (getReadyCount <= 0) {
+      segIdxRef.current          = 0;
+      pausedRemainingRef.current = segments[0].duration;
+      startTimeRef.current       = Date.now();
+      totalElapsedRef.current    = 0;
+      segsCompletedRef.current   = 0;
+      setSegIdx(0);
+      setRemaining(segments[0].duration);
+      setStatus('active');
+      return;
+    }
+    const t = setTimeout(() => setGetReadyCount((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [status, getReadyCount, segments]);
+
+  // Main timer tick
+  useEffect(() => {
+    if (status !== 'active') return;
+    const id = setInterval(() => {
+      const elapsed = (Date.now() - startTimeRef.current) / 1000;
+      const rem = Math.max(0, pausedRemainingRef.current - elapsed);
+      setRemaining(Math.ceil(rem));
+
+      if (rem <= 0) {
+        totalElapsedRef.current += segments[segIdxRef.current].duration;
+        segsCompletedRef.current += 1;
+        const next = segIdxRef.current + 1;
+
+        if (next >= segments.length) {
+          setStatus('done');
+          onFinishRef.current?.({
+            elapsedSeconds: Math.round(totalElapsedRef.current),
+            segmentsCompleted: segsCompletedRef.current,
+          });
+        } else {
+          segIdxRef.current          = next;
+          pausedRemainingRef.current = segments[next].duration;
+          startTimeRef.current       = Date.now();
+          setSegIdx(next);
+          setRemaining(segments[next].duration);
+        }
+      }
+    }, 200);
+    return () => clearInterval(id);
+  }, [status, segments]);
+
+  const handleStart = () => { setGetReadyCount(5); setStatus('get-ready'); };
+
+  const handlePause = () => {
+    const elapsed = (Date.now() - startTimeRef.current) / 1000;
+    pausedRemainingRef.current = Math.max(0, pausedRemainingRef.current - elapsed);
+    setRemaining(Math.ceil(pausedRemainingRef.current));
+    setStatus('paused');
+  };
+
+  const handleResume = () => { startTimeRef.current = Date.now(); setStatus('active'); };
+
+  const handleReset = () => {
+    if (isAdjustableSingle) return doReset(localDuration);
+    if (isAdjustableEmom && config.kind === 'emom') return doReset(config.intervalSeconds);
+    doReset();
+  };
+
+  const adjustDuration = (delta: number) => {
+    const min  = config.kind === 'amrap' ? 60 : 15;
+    const next = Math.max(min, localDuration + delta);
+    setLocalDuration(next);
+    setRemaining(next);
+    pausedRemainingRef.current = next;
+    onDurationChangeRef.current?.(next);
+  };
+
+  const adjustIntervals = (delta: number) => {
+    if (config.kind !== 'emom') return;
+    const next = Math.max(1, localIntervals + delta);
+    setLocalIntervals(next);
+    // remaining stays as intervalSeconds — no change needed
+  };
+
+  const seg = segments[segIdx] ?? segments[0];
+
+  const phaseStyle: Record<Segment['phase'], { border: string; bg: string; text: string }> = {
+    work: { border: 'border-success/40', bg: 'bg-success/8', text: 'text-success'   },
+    rest: { border: 'border-primary/30', bg: 'bg-primary/8', text: 'text-primary'   },
+    main: { border: 'border-border',     bg: 'bg-surface',   text: 'text-foreground' },
+  };
+
+  const activePhase = (status === 'active' || status === 'paused' || status === 'done') ? seg.phase : 'main';
+  const { border, bg, text } = phaseStyle[activePhase];
+  const isMultiSeg = segments.length > 1;
+
+  // Reset button shown whenever the timer has been started
+  const showReset = status !== 'idle';
+
+  return (
+    <div className={`rounded-xl border transition-colors duration-300 ${border} ${bg} p-4 space-y-3`}>
+
+      {/* Phase label (tabata/emom while running) */}
+      {isMultiSeg && (status === 'active' || status === 'paused') && (
+        <div className="text-center leading-tight">
+          {seg.subLabel && <p className="text-xs text-muted-foreground">{seg.subLabel}</p>}
+          <p className={`text-xl font-black tracking-widest uppercase ${text}`}>{seg.label}</p>
+        </div>
+      )}
+
+      {/* Big display */}
+      <div className="flex flex-col items-center py-1">
+        {status === 'get-ready' && (
+          <>
+            <p className="text-xs text-muted-foreground mb-1 font-medium">Get ready…</p>
+            <span className="text-7xl font-black tabular-nums text-warning">{getReadyCount}</span>
+          </>
+        )}
+        {(status === 'active' || status === 'paused') && (
+          <>
+            <span className={`text-7xl font-black tabular-nums tracking-tight ${text}`}>
+              {formatTime(remaining)}
+            </span>
+            {status === 'paused' && <p className="text-xs text-muted-foreground mt-1">Paused</p>}
+          </>
+        )}
+        {status === 'idle' && (
+          <>
+            {/* Countdown / AMRAP adjustable stepper */}
+            {isAdjustableSingle && (
+              <div className="w-full space-y-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => adjustDuration(config.kind === 'amrap' ? -60 : -15)}
+                    className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                  >−</button>
+                  <span className="flex-1 text-center text-5xl font-black tabular-nums text-foreground">
+                    {formatTime(localDuration)}
+                  </span>
+                  <button
+                    onClick={() => adjustDuration(config.kind === 'amrap' ? 60 : 15)}
+                    className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                  >+</button>
+                </div>
+                {config.kind === 'amrap' && (
+                  <p className="text-xs text-muted-foreground text-center">1 min steps</p>
+                )}
+              </div>
+            )}
+
+            {/* EMOM adjustable interval count stepper */}
+            {isAdjustableEmom && config.kind === 'emom' && (
+              <div className="w-full space-y-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => adjustIntervals(-1)}
+                    className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                  >−</button>
+                  <div className="flex-1 text-center">
+                    <div className="text-5xl font-black tabular-nums text-foreground">{localIntervals}</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      intervals · {formatTime(localIntervals * config.intervalSeconds)} total
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => adjustIntervals(1)}
+                    className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                  >+</button>
+                </div>
+                <p className="text-xs text-muted-foreground text-center">
+                  {formatTime(config.intervalSeconds)} each
+                </p>
+              </div>
+            )}
+
+            {/* Non-adjustable idle display */}
+            {!isAdjustableSingle && !isAdjustableEmom && (
+              <>
+                <span className="text-5xl font-bold tabular-nums text-muted-foreground">
+                  {formatTime(segments[0].duration)}
+                </span>
+                {config.kind === 'tabata' && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {config.rounds} rounds · {formatTime(config.workSeconds)} work / {formatTime(config.restSeconds)} rest
+                  </p>
+                )}
+                {config.kind === 'emom' && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {config.totalIntervals} × {formatTime(config.intervalSeconds)}
+                  </p>
+                )}
+              </>
+            )}
+          </>
+        )}
+        {status === 'done' && (
+          <p className={`text-xl font-bold ${text}`}>Complete!</p>
+        )}
+      </div>
+
+      {/* Segment progress dots */}
+      {isMultiSeg && segments.length <= 32 && (status === 'active' || status === 'paused') && (
+        <div className="flex flex-wrap justify-center gap-1">
+          {segments.map((s, i) => (
+            <div
+              key={i}
+              className={`w-2 h-2 rounded-full transition-colors ${
+                i < segIdx
+                  ? 'bg-success'
+                  : i === segIdx
+                  ? s.phase === 'work' ? 'bg-success' : s.phase === 'rest' ? 'bg-primary' : 'bg-foreground'
+                  : 'bg-border'
+              }`}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Controls */}
+      <div className="flex justify-center gap-2">
+        {status === 'idle' && (
+          <button
+            onClick={handleStart}
+            className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-primary text-white font-semibold text-sm"
+          >
+            <Play size={15} fill="currentColor" /> Start
+          </button>
+        )}
+
+        {status === 'get-ready' && (
+          <button
+            onClick={handleReset}
+            className="px-5 py-2.5 rounded-xl bg-background text-muted-foreground font-medium text-sm border border-border"
+          >
+            Cancel
+          </button>
+        )}
+
+        {status === 'active' && (
+          <button
+            onClick={handlePause}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-background text-foreground font-semibold text-sm border border-border"
+          >
+            <Pause size={15} fill="currentColor" /> Pause
+          </button>
+        )}
+
+        {status === 'paused' && (
+          <button
+            onClick={handleResume}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-white font-semibold text-sm"
+          >
+            <Play size={15} fill="currentColor" /> Resume
+          </button>
+        )}
+
+        {/* Restart always visible once timer has started */}
+        {showReset && (
+          <button
+            onClick={handleReset}
+            className="p-2.5 rounded-xl bg-background text-muted-foreground border border-border"
+            aria-label="Restart"
+          >
+            <RotateCcw size={15} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Exercise Records / Props ─────────────────────────────────────────────────
+
+interface ExerciseRecord {
   id: string;
   name: string;
-  sets: number;
-  reps: number;
-  weightType: string;
-  weightValue: number;
-  restTime: number;
   exerciseType: string;
-  // Time-based fields
-  duration?: number; // Duration in minutes (for cardio_time, mobility_time)
-  // Complex exercise type fields
-  distance?: number;
-  distanceUnit?: 'feet' | 'yards' | 'meters';
-  intervals?: IntervalStructure;
-  tempo?: string;
-  timeCap?: number;
+  config: Record<string, unknown>;
+  progression: Record<string, unknown> | null;
+  groupTag: string | null;
+  order: number;
+  notes: string | null;
 }
 
-interface ExerciseLog {
+interface EntryRecord {
   id: string;
   exerciseId: string;
-  setsCompleted: number;
-  repsPerSet: number[] | unknown;
-  weightUsed: number[] | unknown;
+  data: unknown;
 }
 
-interface WorkoutDay {
+interface WorkoutTypeRecord {
   id: string;
-  dayName: string;
-  workoutType: string;
-  workoutColor: string;
+  name: string;
+  color: string;
 }
 
-interface CompletedSet {
-  reps: number;
-  weight: number;
-  distance?: number;
-  time?: number;
+interface Props {
+  sessionId: string;
+  workoutType: WorkoutTypeRecord;
+  exercises: ExerciseRecord[];
+  existingEntries: EntryRecord[];
+  suggestions: SuggestionMap;
+  sessionStatus: string;
+  userBodyweight: number | null;
+  workoutDate: Date;
+  readOnly?: boolean;
 }
+
+// ─── Main LiveWorkoutContent ──────────────────────────────────────────────────
 
 export function LiveWorkoutContent({
-  workoutLogId,
-  workoutDay,
+  sessionId,
+  workoutType,
   exercises,
-  existingLogs,
-  userBodyweight,
-  workoutStatus,
-  pendingAdjustmentId,
-  hasAnalysis,
-  chatSessionId,
-  isPreview = false,
+  existingEntries,
+  suggestions,
+  sessionStatus,
+  userBodyweight: _userBodyweight,
   workoutDate,
-}: {
-  workoutLogId: string;
-  workoutDay: WorkoutDay;
-  exercises: Exercise[];
-  existingLogs: ExerciseLog[];
-  userBodyweight: number | null;
-  workoutStatus: string;
-  pendingAdjustmentId?: string | null;
-  hasAnalysis?: boolean;
-  chatSessionId?: string | null;
-  isPreview?: boolean;
-  workoutDate?: Date | string;
-}) {
+  readOnly = false,
+}: Props) {
   const router = useRouter();
-  
-  // Safety check: if no exercises, redirect to home
-  useEffect(() => {
-    if (!exercises || exercises.length === 0) {
-      console.error('No exercises found in workout');
-      router.push('/home');
-    }
-  }, [exercises, router]);
-  
+
   const [currentExerciseIndex, setCurrentExerciseIndex] = useState(0);
-  const [completedSets, setCompletedSets] = useState<Map<string, CompletedSet[]>>(new Map());
-  const [weight, setWeight] = useState(0);
-  const [reps, setReps] = useState(0);
-  const [distance, setDistance] = useState(0);
+  const [entryDataMap, setEntryDataMap] = useState<Record<string, ExerciseEntryData>>(() => {
+    const initial: Record<string, ExerciseEntryData> = {};
+    for (const entry of existingEntries) {
+      initial[entry.exerciseId] = entry.data as ExerciseEntryData;
+    }
+    return initial;
+  });
   const [saving, setSaving] = useState(false);
-  
-  // Edit mode state
-  const [editingSetIndex, setEditingSetIndex] = useState<number | null>(null);
-  const [editWeight, setEditWeight] = useState(0);
-  const [editReps, setEditReps] = useState(0);
-  const [editDistance, setEditDistance] = useState(0);
-  
-  // Timer state - using start times instead of countdown values
-  const [restTimerStart, setRestTimerStart] = useState<number | null>(null);
-  const [restTimerDuration, setRestTimerDuration] = useState<number>(0);
-  const [cardioTimerStart, setCardioTimerStart] = useState<number | null>(null);
-  const [cardioTimerDuration, setCardioTimerDuration] = useState<number>(0);
-  
-  // Interval state
-  const [intervalRound, setIntervalRound] = useState(0);
-  const [intervalPhaseIndex, setIntervalPhaseIndex] = useState(0);
-  const [intervalTimerStart, setIntervalTimerStart] = useState<number | null>(null);
-  const [intervalTimerDuration, setIntervalTimerDuration] = useState<number>(0);
-  const [intervalRunning, setIntervalRunning] = useState(false);
-  
-  // AMRAP state
-  const [amrapTimerStart, setAmrapTimerStart] = useState<number | null>(null);
-  const [amrapTimerDuration, setAmrapTimerDuration] = useState<number>(0);
-  const [amrapReps, setAmrapReps] = useState(0);
-  const [amrapRunning, setAmrapRunning] = useState(false);
-  
-  // EMOM state
-  const [emomRound, setEmomRound] = useState(0);
-  const [emomTimerStart, setEmomTimerStart] = useState<number | null>(null);
-  const [emomTimerDuration, setEmomTimerDuration] = useState<number>(0);
-  const [emomRunning, setEmomRunning] = useState(false);
-  
-  // Tabata state
-  const [tabataRound, setTabataRound] = useState(0);
-  const [tabataPhase, setTabataPhase] = useState<'work' | 'rest'>('work');
-  const [tabataTimerStart, setTabataTimerStart] = useState<number | null>(null);
-  const [tabataTimerDuration, setTabataTimerDuration] = useState<number>(0);
-  const [tabataRunning, setTabataRunning] = useState(false);
-  
-  // Current timer values (calculated from start times)
-  const [restTimer, setRestTimer] = useState<number | null>(null);
-  const [cardioTimer, setCardioTimer] = useState<number | null>(null);
-  const [intervalTimer, setIntervalTimer] = useState<number | null>(null);
-  const [amrapTimer, setAmrapTimer] = useState<number | null>(null);
-  const [emomTimer, setEmomTimer] = useState<number | null>(null);
-  const [tabataTimer, setTabataTimer] = useState<number | null>(null);
+  const [finishing, setFinishing] = useState(false);
+  const [workoutCompleted, setWorkoutCompleted] = useState(sessionStatus === 'completed' || readOnly);
 
   const currentExercise = exercises[currentExerciseIndex];
+  const isFirst = currentExerciseIndex === 0;
+  const isLast  = currentExerciseIndex === exercises.length - 1;
 
-  // Early return if no exercises or invalid index
-  if (!exercises || exercises.length === 0 || !currentExercise) {
+  const allExercisesComplete = useMemo(() => {
+    if (exercises.length === 0) return false;
+    return exercises.every((ex) => {
+      const data = entryDataMap[ex.id];
+      if (!data) return false;
+      const type = ex.exerciseType as ExerciseType;
+      if (type === 'strength' || type === 'distance' || type === 'time') {
+        const d = data as StrengthEntryData | DistanceEntryData | TimeEntryData;
+        return 'sets' in d && d.sets.length > 0 && d.sets.every((s: { completed?: boolean }) => s.completed);
+      }
+      if (type === 'amrap' || type === 'emom' || type === 'round_block' || type === 'tabata') {
+        const d = data as RoundsEntryData;
+        return d.roundsCompleted > 0;
+      }
+      return false;
+    });
+  }, [exercises, entryDataMap]);
+
+  const saveEntry = useCallback(async (exerciseId: string, data: ExerciseEntryData) => {
+    setSaving(true);
+    try {
+      await fetch('/api/workout/live/add-set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, exerciseId, data }),
+      });
+      setEntryDataMap((prev) => ({ ...prev, [exerciseId]: data }));
+    } catch (error) {
+      console.error('Error saving entry:', error);
+    } finally {
+      setSaving(false);
+    }
+  }, [sessionId]);
+
+  const finishWorkout = useCallback(async () => {
+    setFinishing(true);
+    try {
+      const res = await fetch('/api/workout/live/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        setWorkoutCompleted(true);
+        router.push('/home');
+      }
+    } catch (error) {
+      console.error('Error finishing workout:', error);
+    } finally {
+      setFinishing(false);
+    }
+  }, [sessionId, router]);
+
+  if (!currentExercise) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <p className="text-muted-foreground">No exercises found</p>
-        </div>
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <p className="text-muted-foreground">No exercises in this workout.</p>
       </div>
     );
   }
 
-  // Helper functions
-  const calculateTargetWeight = useCallback((type: string, value: number, bodyweight: number | null): number => {
-    switch (type) {
-      case 'BW':
-        return bodyweight ? Math.round(value * bodyweight) : 0;
-      case '1RM':
-        // For 1RM, we'd need the user's 1RM for this exercise
-        // For now, use value as a multiplier (value should be a percentage like 0.8 for 80%)
-        return Math.round(value * 100);
-      case 'ABSOLUTE':
-        return value;
-      default:
-        // Default to absolute value
-        return value;
-    }
-  }, []);
-
-  const [workoutCompleted, setWorkoutCompleted] = useState(workoutStatus === 'completed');
-  const [adjustmentIdForChat, setAdjustmentIdForChat] = useState<string | null>(pendingAdjustmentId || null);
-
-  // localStorage key for this workout's timer state
-  const timerStateKey = `workout-timers-${workoutLogId}`;
-
-  // Load timer state from localStorage on mount
-  useEffect(() => {
-    const savedState = localStorage.getItem(timerStateKey);
-    if (savedState) {
-      try {
-        const state = JSON.parse(savedState);
-        if (state.restTimerStart) {
-          setRestTimerStart(state.restTimerStart);
-          setRestTimerDuration(state.restTimerDuration || 0);
-        }
-        if (state.cardioTimerStart) {
-          setCardioTimerStart(state.cardioTimerStart);
-          setCardioTimerDuration(state.cardioTimerDuration || 0);
-        }
-        if (state.intervalTimerStart) {
-          setIntervalTimerStart(state.intervalTimerStart);
-          setIntervalTimerDuration(state.intervalTimerDuration || 0);
-          setIntervalRunning(state.intervalRunning || false);
-          setIntervalRound(state.intervalRound || 0);
-          setIntervalPhaseIndex(state.intervalPhaseIndex || 0);
-        }
-        if (state.amrapTimerStart) {
-          setAmrapTimerStart(state.amrapTimerStart);
-          setAmrapTimerDuration(state.amrapTimerDuration || 0);
-          setAmrapRunning(state.amrapRunning || false);
-          setAmrapReps(state.amrapReps || 0);
-        }
-        if (state.emomTimerStart) {
-          setEmomTimerStart(state.emomTimerStart);
-          setEmomTimerDuration(state.emomTimerDuration || 0);
-          setEmomRunning(state.emomRunning || false);
-          setEmomRound(state.emomRound || 0);
-        }
-        if (state.tabataTimerStart) {
-          setTabataTimerStart(state.tabataTimerStart);
-          setTabataTimerDuration(state.tabataTimerDuration || 0);
-          setTabataRunning(state.tabataRunning || false);
-          setTabataRound(state.tabataRound || 0);
-          setTabataPhase(state.tabataPhase || 'work');
-        }
-      } catch (error) {
-        console.error('Failed to load timer state:', error);
-      }
-    }
-  }, [timerStateKey]);
-
-  // Save timer state to localStorage whenever it changes
-  useEffect(() => {
-    const state = {
-      restTimerStart,
-      restTimerDuration,
-      cardioTimerStart,
-      cardioTimerDuration,
-      intervalTimerStart,
-      intervalTimerDuration,
-      intervalRunning,
-      intervalRound,
-      intervalPhaseIndex,
-      amrapTimerStart,
-      amrapTimerDuration,
-      amrapRunning,
-      amrapReps,
-      emomTimerStart,
-      emomTimerDuration,
-      emomRunning,
-      emomRound,
-      tabataTimerStart,
-      tabataTimerDuration,
-      tabataRunning,
-      tabataRound,
-      tabataPhase,
-    };
-    localStorage.setItem(timerStateKey, JSON.stringify(state));
-  }, [
-    timerStateKey,
-    restTimerStart,
-    restTimerDuration,
-    cardioTimerStart,
-    cardioTimerDuration,
-    intervalTimerStart,
-    intervalTimerDuration,
-    intervalRunning,
-    intervalRound,
-    intervalPhaseIndex,
-    amrapTimerStart,
-    amrapTimerDuration,
-    amrapRunning,
-    amrapReps,
-    emomTimerStart,
-    emomTimerDuration,
-    emomRunning,
-    emomRound,
-    tabataTimerStart,
-    tabataTimerDuration,
-    tabataRunning,
-    tabataRound,
-    tabataPhase,
-  ]);
-
-  // Clear timer state from localStorage when workout is completed
-  useEffect(() => {
-    if (workoutCompleted) {
-      localStorage.removeItem(timerStateKey);
-    }
-  }, [workoutCompleted, timerStateKey]);
-
-  const finishWorkout = useCallback(async () => {
-    if (saving) return;
-    setSaving(true);
-
-    try {
-      const response = await fetch('/api/workout/live/finish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          feedback: null,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (result.redirectToChat && result.pendingAdjustmentId) {
-        // Don't navigate immediately - just set state to show button
-        setWorkoutCompleted(true);
-        setAdjustmentIdForChat(result.pendingAdjustmentId);
-        setSaving(false);
-        // Refresh router cache so calendar shows updated completion status
-        router.refresh();
-      } else {
-        // No analysis available, just go home
-        router.push('/home');
-      }
-    } catch (error) {
-      console.error('Failed to finish workout:', error);
-      setSaving(false);
-    }
-  }, [saving, workoutLogId, router]);
-
-  // Initialize completed sets from existing logs
-  useEffect(() => {
-    const setsMap = new Map<string, CompletedSet[]>();
-    for (const log of existingLogs) {
-      const repsArray = Array.isArray(log.repsPerSet) ? log.repsPerSet : [];
-      const weightsArray = Array.isArray(log.weightUsed) ? log.weightUsed : [];
-      const sets: CompletedSet[] = repsArray.map((reps, index) => ({
-        reps: Number(reps),
-        weight: Number(weightsArray[index] || 0),
-      }));
-      setsMap.set(log.exerciseId, sets);
-    }
-    setCompletedSets(setsMap);
-  }, [existingLogs]);
-
-  // Set initial weight/reps/distance when exercise changes
-  useEffect(() => {
-    if (currentExercise) {
-      const targetWeight = calculateTargetWeight(
-        currentExercise.weightType,
-        currentExercise.weightValue,
-        userBodyweight
-      );
-      console.log('Setting weight for exercise:', {
-        name: currentExercise.name,
-        weightType: currentExercise.weightType,
-        weightValue: currentExercise.weightValue,
-        userBodyweight,
-        calculatedWeight: targetWeight
-      });
-      setWeight(targetWeight);
-      setReps(currentExercise.reps);
-      setDistance(currentExercise.distance || 0);
-      
-      // Reset all timer states when changing exercises
-      setIntervalRound(0);
-      setIntervalPhaseIndex(0);
-      setIntervalTimerStart(null);
-      setIntervalTimerDuration(0);
-      setIntervalTimer(null);
-      setIntervalRunning(false);
-      setAmrapTimerStart(null);
-      setAmrapTimerDuration(0);
-      setAmrapTimer(null);
-      setAmrapReps(0);
-      setAmrapRunning(false);
-      setEmomRound(0);
-      setEmomTimerStart(null);
-      setEmomTimerDuration(0);
-      setEmomTimer(null);
-      setEmomRunning(false);
-      setTabataRound(0);
-      setTabataPhase('work');
-      setTabataTimerStart(null);
-      setTabataTimerDuration(0);
-      setTabataTimer(null);
-      setTabataRunning(false);
-    }
-  }, [currentExercise, userBodyweight, calculateTargetWeight]);
-
-  // Rest timer - calculate remaining time based on start time
-  useEffect(() => {
-    if (restTimerStart === null) {
-      setRestTimer(null);
-      return;
-    }
-
-    const updateTimer = () => {
-      const elapsed = Math.floor((Date.now() - restTimerStart) / 1000);
-      const remaining = Math.max(0, restTimerDuration - elapsed);
-      
-      if (remaining <= 0) {
-        setRestTimer(null);
-        setRestTimerStart(null);
-        setRestTimerDuration(0);
-        haptic('medium');
-      } else {
-        setRestTimer(remaining);
-      }
-    };
-
-    // Update immediately
-    updateTimer();
-
-    // Update every 100ms for smooth display
-    const interval = setInterval(updateTimer, 100);
-    return () => clearInterval(interval);
-  }, [restTimerStart, restTimerDuration]);
-
-  // Cardio timer - calculate remaining time based on start time
-  useEffect(() => {
-    if (cardioTimerStart === null) {
-      setCardioTimer(null);
-      return;
-    }
-
-    const updateTimer = () => {
-      const elapsed = Math.floor((Date.now() - cardioTimerStart) / 1000);
-      const remaining = Math.max(0, cardioTimerDuration - elapsed);
-      
-      if (remaining <= 0) {
-        setCardioTimer(null);
-        setCardioTimerStart(null);
-        setCardioTimerDuration(0);
-        haptic('medium');
-      } else {
-        setCardioTimer(remaining);
-      }
-    };
-
-    updateTimer();
-    const interval = setInterval(updateTimer, 100);
-    return () => clearInterval(interval);
-  }, [cardioTimerStart, cardioTimerDuration]);
-
-  // Interval timer - calculate remaining time based on start time
-  useEffect(() => {
-    if (intervalTimerStart === null || !intervalRunning || !currentExercise?.intervals) {
-      setIntervalTimer(null);
-      return;
-    }
-
-    const updateTimer = () => {
-      const elapsed = Math.floor((Date.now() - intervalTimerStart) / 1000);
-      const remaining = Math.max(0, intervalTimerDuration - elapsed);
-      
-      if (remaining <= 0) {
-        haptic('medium');
-        const intervals = currentExercise.intervals;
-        if (!intervals) return;
-        
-        const nextPhaseIndex = intervalPhaseIndex + 1;
-        
-        if (nextPhaseIndex >= intervals.phases.length) {
-          // End of round
-          const nextRound = intervalRound + 1;
-          if (nextRound >= intervals.rounds) {
-            // All rounds complete
-            setIntervalRunning(false);
-            setIntervalTimer(null);
-            setIntervalTimerStart(null);
-            setIntervalTimerDuration(0);
-            completeIntervalExercise();
-          } else {
-            // Next round
-            setIntervalRound(nextRound);
-            setIntervalPhaseIndex(0);
-            const newDuration = intervals.phases[0].duration;
-            setIntervalTimerStart(Date.now());
-            setIntervalTimerDuration(newDuration);
-          }
-        } else {
-          // Next phase
-          setIntervalPhaseIndex(nextPhaseIndex);
-          const newDuration = intervals.phases[nextPhaseIndex].duration;
-          setIntervalTimerStart(Date.now());
-          setIntervalTimerDuration(newDuration);
-        }
-      } else {
-        setIntervalTimer(remaining);
-      }
-    };
-
-    updateTimer();
-    const interval = setInterval(updateTimer, 100);
-    return () => clearInterval(interval);
-  }, [intervalTimerStart, intervalTimerDuration, intervalRunning, intervalPhaseIndex, intervalRound, currentExercise]);
-
-  // AMRAP timer - calculate remaining time based on start time
-  useEffect(() => {
-    if (amrapTimerStart === null || !amrapRunning) {
-      setAmrapTimer(null);
-      return;
-    }
-
-    const updateTimer = () => {
-      const elapsed = Math.floor((Date.now() - amrapTimerStart) / 1000);
-      const remaining = Math.max(0, amrapTimerDuration - elapsed);
-      
-      if (remaining <= 0) {
-        haptic('medium');
-        setAmrapRunning(false);
-        setAmrapTimer(null);
-        setAmrapTimerStart(null);
-        setAmrapTimerDuration(0);
-        completeAmrapExercise();
-      } else {
-        setAmrapTimer(remaining);
-      }
-    };
-
-    updateTimer();
-    const interval = setInterval(updateTimer, 100);
-    return () => clearInterval(interval);
-  }, [amrapTimerStart, amrapTimerDuration, amrapRunning]);
-
-  // EMOM timer - calculate remaining time based on start time
-  useEffect(() => {
-    if (emomTimerStart === null || !emomRunning || !currentExercise) {
-      setEmomTimer(null);
-      return;
-    }
-
-    const updateTimer = () => {
-      const elapsed = Math.floor((Date.now() - emomTimerStart) / 1000);
-      const remaining = Math.max(0, emomTimerDuration - elapsed);
-      
-      if (remaining <= 0) {
-        haptic('medium');
-        const nextRound = emomRound + 1;
-        const totalRounds = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets;
-        if (nextRound >= totalRounds) {
-          // All rounds complete
-          setEmomRunning(false);
-          setEmomTimer(null);
-          setEmomTimerStart(null);
-          setEmomTimerDuration(0);
-          completeEmomExercise();
-        } else {
-          // Next minute
-          setEmomRound(nextRound);
-          setEmomTimerStart(Date.now());
-          setEmomTimerDuration(60);
-        }
-      } else {
-        setEmomTimer(remaining);
-      }
-    };
-
-    updateTimer();
-    const interval = setInterval(updateTimer, 100);
-    return () => clearInterval(interval);
-  }, [emomTimerStart, emomTimerDuration, emomRunning, emomRound, currentExercise]);
-
-  // Tabata timer - calculate remaining time based on start time
-  useEffect(() => {
-    if (tabataTimerStart === null || !tabataRunning || !currentExercise) {
-      setTabataTimer(null);
-      return;
-    }
-
-    const updateTimer = () => {
-      const elapsed = Math.floor((Date.now() - tabataTimerStart) / 1000);
-      const remaining = Math.max(0, tabataTimerDuration - elapsed);
-      
-      if (remaining <= 0) {
-        haptic('light');
-        if (tabataPhase === 'work') {
-          // Switch to rest
-          setTabataPhase('rest');
-          setTabataTimerStart(Date.now());
-          setTabataTimerDuration(10);
-        } else {
-          // Switch to work or finish
-          const nextRound = tabataRound + 1;
-          if (nextRound >= currentExercise.sets) {
-            // All rounds complete
-            haptic('medium');
-            setTabataRunning(false);
-            setTabataTimer(null);
-            setTabataTimerStart(null);
-            setTabataTimerDuration(0);
-            completeTabataExercise();
-          } else {
-            setTabataRound(nextRound);
-            setTabataPhase('work');
-            setTabataTimerStart(Date.now());
-            setTabataTimerDuration(20);
-          }
-        }
-      } else {
-        setTabataTimer(remaining);
-      }
-    };
-
-    updateTimer();
-    const interval = setInterval(updateTimer, 100);
-    return () => clearInterval(interval);
-  }, [tabataTimerStart, tabataTimerDuration, tabataRunning, tabataPhase, tabataRound, currentExercise]);
-
-  // Auto-finish workout when all exercises are complete (only for in_progress workouts)
-  useEffect(() => {
-    // Skip auto-finish if workout is already completed
-    if (workoutCompleted) return;
-
-    const allComplete = exercises.every((exercise) => {
-      const sets = completedSets.get(exercise.id) || [];
-      // Single-completion exercises: interval, amrap, emom, tabata
-      const isSingleCompletion = ['interval', 'amrap', 'emom', 'tabata'].includes(exercise.exerciseType);
-      // For single-completion types, just check if there's any logged data
-      // For all other types (including distance), check if all sets are complete
-      return isSingleCompletion ? sets.length > 0 : sets.length >= exercise.sets;
-    });
-
-    if (allComplete && exercises.length > 0 && !saving) {
-      // Automatically finish workout without modal
-      finishWorkout();
-    }
-  }, [completedSets, exercises, saving, finishWorkout, workoutCompleted]);
-
-  const currentSets = completedSets.get(currentExercise?.id) || [];
-  const exerciseType = currentExercise?.exerciseType || 'strength';
-  const isTimeBased = exerciseType === 'cardio_time' || exerciseType === 'mobility_time';
-  const isDistanceBased = exerciseType === 'distance';
-  const isIntervalBased = exerciseType === 'interval';
-  const isAmrap = exerciseType === 'amrap';
-  const isEmom = exerciseType === 'emom';
-  const isTabata = exerciseType === 'tabata';
-  const isTempo = exerciseType === 'tempo';
-  // Only interval, amrap, emom, and tabata are single-completion exercises
-  const isSingleCompletionType = isIntervalBased || isAmrap || isEmom || isTabata;
-
-  // For single-completion types, just check if there's any data
-  // For all other types (including distance and time-based), check if all sets are complete
-  const isExerciseComplete = isSingleCompletionType 
-    ? currentSets.length > 0 
-    : currentSets.length >= (currentExercise?.sets || 0);
-
-  // Format exercise target description
-  const getTargetDescription = () => {
-    if (!currentExercise) return '';
-    
-    switch (exerciseType) {
-      case 'cardio_time':
-      case 'mobility_time':
-        return `Target: ${currentExercise.duration || currentExercise.reps} min`;
-      case 'distance':
-        return `Target: ${currentExercise.sets} × ${currentExercise.distance || 0} ${currentExercise.distanceUnit || 'feet'}`;
-      case 'interval':
-        if (currentExercise.intervals) {
-          const { rounds, phases } = currentExercise.intervals;
-          const phaseDesc = phases.map(p => `${Math.floor(p.duration / 60)}:${(p.duration % 60).toString().padStart(2, '0')} ${p.name}`).join(' / ');
-          return `${rounds} rounds: ${phaseDesc}`;
-        }
-        return 'Interval training';
-      case 'amrap':
-        const timeCap = currentExercise.timeCap || 600;
-        return `AMRAP ${Math.floor(timeCap / 60)} min • ${currentExercise.reps} reps/round`;
-      case 'emom':
-        const emomMinutes = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : 10;
-        return `EMOM ${emomMinutes} min: ${currentExercise.reps} reps/min`;
-      case 'tabata':
-        return `Tabata: ${currentExercise.sets} rounds (20s work / 10s rest) • ${currentExercise.reps} reps/round`;
-      case 'tempo':
-        return `Target: ${currentExercise.sets} × ${currentExercise.reps} @ tempo ${currentExercise.tempo}`;
-      default:
-        return `Target: ${currentExercise.sets} sets × ${currentExercise.reps} reps`;
-    }
-  };
-
-  const startCardioTimer = () => {
-    if (!currentExercise) return;
-    const durationMinutes = currentExercise.duration || currentExercise.reps; // Use duration field, fall back to reps
-    const durationSeconds = durationMinutes * 60;
-    setCardioTimerStart(Date.now());
-    setCardioTimerDuration(durationSeconds);
-  };
-
-  const completeTimeBasedExercise = async () => {
-    if (!currentExercise || isPreview) return;
-
-    haptic('light');
-
-    // Always log the full duration (whether timer completed naturally or was skipped)
-    const fullDurationMinutes = currentExercise.duration || currentExercise.reps;
-    const fullDurationSeconds = fullDurationMinutes * 60;
-    
-    const newSets = [{ reps: fullDurationMinutes, weight: 0 }];
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, newSets);
-    setCompletedSets(newMap);
-
-    // Save to database
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          sets: newSets,
-          duration: fullDurationSeconds, // Store full duration in seconds
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save set:', error);
-    }
-
-    // Reset timer
-    setCardioTimerStart(null);
-    setCardioTimerDuration(0);
-    setCardioTimer(null);
-  };
-
-  // Distance-based exercise completion
-  const logDistanceSet = async () => {
-    if (!currentExercise || isPreview) return;
-
-    haptic('light');
-
-    // For distance exercises, store distance in the reps field so repsPerSet contains distance values
-    const newSets = [...currentSets, { reps: distance, weight, distance }];
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, newSets);
-    setCompletedSets(newMap);
-
-    // Start rest timer immediately (while save runs in background) - but not if this was the last set
-    const isLastSet = newSets.length >= currentExercise.sets;
-    if (!isLastSet) {
-      setRestTimerStart(Date.now());
-      setRestTimerDuration(currentExercise.restTime);
-    }
-
-    // Save to database (fire-and-forget; timer already running)
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          // For distance exercises, reps contains the distance value per set
-          sets: newSets.map(s => ({ reps: s.reps, weight: s.weight })),
-          distance: distance, // Also send last distance for backward compatibility
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save set:', error);
-    }
-  };
-
-  // Interval exercise completion
-  const completeIntervalExercise = async () => {
-    if (!currentExercise || isPreview) return;
-
-    haptic('light');
-
-    const totalDuration = currentExercise.intervals 
-      ? currentExercise.intervals.rounds * currentExercise.intervals.phases.reduce((sum, p) => sum + p.duration, 0)
-      : 0;
-    
-    const newSets = [{ reps: 1, weight, time: totalDuration }];
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, newSets);
-    setCompletedSets(newMap);
-
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          sets: newSets,
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save interval:', error);
-    }
-  };
-
-  // Start interval workout
-  const startInterval = () => {
-    if (!currentExercise?.intervals) return;
-    setIntervalRound(0);
-    setIntervalPhaseIndex(0);
-    setIntervalTimerStart(Date.now());
-    setIntervalTimerDuration(currentExercise.intervals.phases[0].duration);
-    setIntervalRunning(true);
-  };
-
-  // AMRAP exercise completion
-  const completeAmrapExercise = async () => {
-    if (!currentExercise || isPreview) return;
-
-    haptic('light');
-
-    const newSets = [{ reps: amrapReps, weight }];
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, newSets);
-    setCompletedSets(newMap);
-
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          sets: newSets,
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save AMRAP:', error);
-    }
-  };
-
-  // Start AMRAP workout
-  const startAmrap = () => {
-    if (!currentExercise?.timeCap) return;
-    setAmrapTimerStart(Date.now());
-    setAmrapTimerDuration(currentExercise.timeCap);
-    setAmrapReps(0);
-    setAmrapRunning(true);
-  };
-
-  // EMOM exercise completion
-  const completeEmomExercise = async () => {
-    if (!currentExercise || isPreview) return;
-
-    haptic('light');
-
-    const totalRounds = currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets;
-    const newSets = [{ reps: totalRounds, weight }];
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, newSets);
-    setCompletedSets(newMap);
-
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          sets: newSets,
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save EMOM:', error);
-    }
-  };
-
-  // Start EMOM workout
-  const startEmom = () => {
-    setEmomRound(0);
-    setEmomTimerStart(Date.now());
-    setEmomTimerDuration(60);
-    setEmomRunning(true);
-  };
-
-  // Tabata exercise completion
-  const completeTabataExercise = async () => {
-    if (!currentExercise || isPreview) return;
-
-    haptic('light');
-
-    const newSets = [{ reps: currentExercise.sets, weight }];
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, newSets);
-    setCompletedSets(newMap);
-
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          sets: newSets,
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save Tabata:', error);
-    }
-  };
-
-  // Start Tabata workout
-  const startTabata = () => {
-    setTabataRound(0);
-    setTabataPhase('work');
-    setTabataTimerStart(Date.now());
-    setTabataTimerDuration(20);
-    setTabataRunning(true);
-  };
-
-  const logSet = async () => {
-    if (!currentExercise || isPreview) return;
-
-    haptic('light');
-
-    const newSets = [...currentSets, { reps, weight }];
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, newSets);
-    setCompletedSets(newMap);
-
-    // Start rest timer immediately (while save runs in background) - but not if this was the last set
-    const isLastSet = newSets.length >= currentExercise.sets;
-    if (!isLastSet) {
-      setRestTimerStart(Date.now());
-      setRestTimerDuration(currentExercise.restTime);
-    }
-
-    // Save to database (fire-and-forget; timer already running)
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          sets: newSets,
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save set:', error);
-    }
-  };
-
-  const startEditSet = (index: number, set: CompletedSet) => {
-    setEditingSetIndex(index);
-    setEditWeight(set.weight);
-    setEditReps(set.reps);
-    setEditDistance(set.distance || 0);
-  };
-
-  const cancelEditSet = () => {
-    setEditingSetIndex(null);
-    setEditWeight(0);
-    setEditReps(0);
-    setEditDistance(0);
-  };
-
-  const saveEditSet = async () => {
-    if (!currentExercise || editingSetIndex === null || isPreview) return;
-
-    haptic('light');
-
-    // Update the set in the completedSets map
-    const updatedSets = [...currentSets];
-    // For distance exercises, store distance in the reps field
-    updatedSets[editingSetIndex] = {
-      reps: isDistanceBased ? editDistance : editReps,
-      weight: editWeight,
-      distance: isDistanceBased ? editDistance : updatedSets[editingSetIndex].distance,
-      time: updatedSets[editingSetIndex].time,
-    };
-
-    const newMap = new Map(completedSets);
-    newMap.set(currentExercise.id, updatedSets);
-    setCompletedSets(newMap);
-
-    // Save to database
-    try {
-      await fetch('/api/workout/live/add-set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutLogId,
-          exerciseId: currentExercise.id,
-          // For distance exercises, reps contains the distance value per set
-          sets: updatedSets.map(s => ({ reps: s.reps, weight: s.weight })),
-          distance: isDistanceBased ? editDistance : undefined,
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to update set:', error);
-    }
-
-    // Exit edit mode
-    setEditingSetIndex(null);
-    setEditWeight(0);
-    setEditReps(0);
-    setEditDistance(0);
-  };
-
-  const formatTime = useCallback((seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  }, []);
-
-  if (!currentExercise) {
-    return null;
-  }
+  const exerciseType  = currentExercise.exerciseType as ExerciseType;
+  const config        = currentExercise.config;
+  const suggestion    = suggestions[currentExercise.id];
+  const currentEntryData = entryDataMap[currentExercise.id];
+  const restRemaining = useRestTimer();
+  const timerRunning  = restRemaining !== null && restRemaining > 0;
+  const strengthConfig = exerciseType === 'strength' ? config as unknown as StrengthConfig : null;
+  const strengthSets   = exerciseType === 'strength' ? ((currentEntryData as StrengthEntryData | undefined)?.sets ?? []) : [];
+  const showRestButton = !!(strengthConfig && strengthConfig.restSeconds > 0 && strengthSets.length > 0 && !timerRunning);
 
   return (
-    <div className="fixed inset-0 flex flex-col bg-background">
-      {/* Loading overlay when finishing workout */}
-      {saving && (
-        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 pb-16">
-          <div className="flex flex-col items-center gap-4">
-            <LoadingSpinner size="lg" className="text-primary" />
-            <p className="text-muted-foreground">Finishing workout...</p>
-          </div>
-        </div>
-      )}
-      
+    <div className="min-h-screen bg-background flex flex-col">
       {/* Header */}
       <div className="flex-shrink-0 bg-background border-b border-border px-4 py-3">
         <div className="flex items-center justify-between">
-          <button
-            onClick={() => router.back()}
-            className="p-2 -ml-2 text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ArrowLeft size={20} />
+          <button onClick={() => router.back()} className="p-2 -ml-2">
+            <ArrowLeft size={20} className="text-foreground" />
           </button>
-
           <div className="text-center">
+            <h1 className="text-sm font-bold text-foreground">{workoutType.name}</h1>
             <p className="text-xs text-muted-foreground">
-              {workoutDate 
-                ? new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-                : new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-              }
+              {new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
             </p>
-            <h1
-              className="font-bold capitalize"
-              style={{ color: workoutDay.workoutColor }}
-            >
-              {workoutDay.workoutType}
-            </h1>
+            {readOnly && <span className="text-xs text-primary font-medium">Upcoming</span>}
           </div>
-
-           <div className="w-9"></div>
+          {/* Wide spacer keeps center aligned and gives room for rest-timer badge */}
+          <div className="w-16" />
         </div>
-
-        {/* Exercise Tabs */}
-        <div className="mt-3 flex gap-2 overflow-x-auto scrollbar-hide">
-          {exercises.map((exercise, index) => {
-            const sets = completedSets.get(exercise.id) || [];
-            // Only interval, amrap, emom, tabata are single-completion exercises
-            const isSingleCompletion = ['interval', 'amrap', 'emom', 'tabata'].includes(exercise.exerciseType);
-            const isComplete = isSingleCompletion ? sets.length > 0 : sets.length >= exercise.sets;
-            const isCurrent = index === currentExerciseIndex;
-            
+        {/* Progress bar */}
+        <div className="flex gap-1 mt-2">
+          {exercises.map((ex, idx) => {
+            const hasData = !!entryDataMap[ex.id];
             return (
               <button
-                key={exercise.id}
-                onClick={() => {
-                  setCurrentExerciseIndex(index);
-                  setRestTimerStart(null);
-                  setRestTimerDuration(0);
-                  setRestTimer(null);
-                }}
-                className={`
-                  flex-shrink-0 px-3 py-2 rounded-lg transition-colors text-left relative
-                  ${isCurrent 
-                    ? 'bg-primary text-white' 
-                    : isComplete
-                    ? 'bg-success/20 text-success'
-                    : 'bg-surface text-muted-foreground hover:text-foreground'
-                  }
-                `}
-              >
-                <div className="flex items-center gap-1.5">
-                  <div className="text-xs font-medium">{index + 1}</div>
-                  {isComplete && (
-                    <Check size={12} className={isCurrent ? 'text-white' : 'text-success'} />
-                  )}
-                </div>
-                <div className="text-[10px] leading-tight mt-0.5 opacity-80 max-w-[80px] truncate">
-                  {exercise.name}
-                </div>
-              </button>
+                key={ex.id}
+                onClick={() => setCurrentExerciseIndex(idx)}
+                className={`flex-1 h-1.5 rounded-full transition-colors ${
+                  idx === currentExerciseIndex ? 'bg-primary' : hasData ? 'bg-success' : 'bg-border'
+                }`}
+              />
             );
           })}
         </div>
       </div>
 
-      {/* Preview Mode Banner */}
-      {isPreview && (
-        <div className="flex-shrink-0 bg-primary/10 border-b border-primary/20 px-4 py-3">
-          <p className="text-center text-sm text-primary font-medium">
-            Preview Mode - This workout cannot be logged yet
+      {/* Exercise content */}
+      <div className="flex-1 overflow-y-auto px-4 py-4 pb-32">
+        <div className="flex items-center gap-2 mb-1">
+          <ExerciseIcon type={exerciseType} />
+          <h2 className="text-xl font-bold text-foreground flex-1">{currentExercise.name}</h2>
+          {showRestButton && (
+            <button
+              onClick={() => startRestTimer(strengthConfig!.restSeconds)}
+              className="flex items-center gap-1 text-xs text-primary font-medium px-2 py-1 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors"
+            >
+              <Timer size={12} /> Rest
+            </button>
+          )}
+        </div>
+        <p className="text-sm text-muted-foreground mb-4 capitalize">{exerciseType.replace('_', ' ')}</p>
+
+        {suggestion && (
+          <div className="bg-primary/10 border border-primary/20 rounded-lg p-3 mb-4">
+            <p className="text-sm text-primary font-medium">{suggestion.display}</p>
+          </div>
+        )}
+        {currentExercise.notes && (
+          <div className="bg-surface rounded-lg p-3 mb-4">
+            <p className="text-sm text-muted-foreground">{currentExercise.notes}</p>
+          </div>
+        )}
+
+        {exerciseType === 'strength' && (
+          <StrengthLogger
+            key={currentExercise.id}
+            config={config as unknown as StrengthConfig}
+            data={currentEntryData as StrengthEntryData | undefined}
+            onSave={(data) => saveEntry(currentExercise.id, data)}
+            saving={saving}
+            completed={workoutCompleted}
+          />
+        )}
+        {exerciseType === 'distance' && (
+          <DistanceLogger
+            config={config as unknown as DistanceConfig}
+            data={currentEntryData as DistanceEntryData | undefined}
+            onSave={(data) => saveEntry(currentExercise.id, data)}
+            saving={saving}
+            completed={workoutCompleted}
+          />
+        )}
+        {exerciseType === 'time' && (
+          <TimeLogger
+            config={config as unknown as TimeConfig}
+            data={currentEntryData as TimeEntryData | undefined}
+            onSave={(data) => saveEntry(currentExercise.id, data)}
+            saving={saving}
+            completed={workoutCompleted}
+          />
+        )}
+        {(exerciseType === 'amrap' || exerciseType === 'emom' || exerciseType === 'round_block' || exerciseType === 'tabata') && (
+          <RoundsLogger
+            exerciseType={exerciseType}
+            config={config as unknown as AmrapConfig | EmomConfig | RoundBlockConfig | TabataConfig}
+            data={currentEntryData as RoundsEntryData | undefined}
+            onSave={(data) => saveEntry(currentExercise.id, data)}
+            saving={saving}
+            completed={workoutCompleted}
+          />
+        )}
+      </div>
+
+      {/* Navigation + Finish */}
+      <div className="fixed bottom-16 left-0 right-0 bg-background border-t border-border px-4 py-3 z-20">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setCurrentExerciseIndex((i) => Math.max(0, i - 1))}
+            disabled={isFirst}
+            className="p-2 rounded-lg bg-surface disabled:opacity-30"
+          >
+            <ChevronLeft size={20} className="text-foreground" />
+          </button>
+
+          <div className="flex-1 text-center">
+            <p className="text-sm text-muted-foreground">
+              {currentExerciseIndex + 1} / {exercises.length}
+            </p>
+          </div>
+
+          {isLast && allExercisesComplete && !workoutCompleted ? (
+            <Button onClick={finishWorkout} disabled={finishing}>
+              {finishing ? <LoadingSpinner size="sm" /> : <Check size={18} />}
+              <span className="ml-1">Finish Workout</span>
+            </Button>
+          ) : (
+            <button
+              onClick={() => setCurrentExerciseIndex((i) => Math.min(exercises.length - 1, i + 1))}
+              disabled={isLast}
+              className="p-2 rounded-lg bg-surface disabled:opacity-30"
+            >
+              <ChevronRight size={20} className="text-foreground" />
+            </button>
+          )}
+        </div>
+
+        {allExercisesComplete && !workoutCompleted && !isLast && (
+          <Button onClick={finishWorkout} disabled={finishing} fullWidth className="mt-2">
+            {finishing ? <LoadingSpinner size="sm" /> : <Check size={18} />}
+            <span className="ml-1">Finish Workout</span>
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExerciseIcon({ type }: { type: ExerciseType }) {
+  switch (type) {
+    case 'strength': return <Dumbbell  size={20} className="text-primary" />;
+    case 'distance': return <Footprints size={20} className="text-primary" />;
+    case 'time':     return <Clock     size={20} className="text-primary" />;
+    default:         return <Timer     size={20} className="text-primary" />;
+  }
+}
+
+// ─── Strength Logger ──────────────────────────────────────────────────────────
+
+function SetStepper({ label, value, onChange, min = 1, step = 1 }: {
+  label: string; value: number; onChange: (v: number) => void; min?: number; step?: number;
+}) {
+  return (
+    <div>
+      <label className="text-xs text-muted-foreground block mb-1 text-center">{label}</label>
+      <div className="flex items-center gap-2">
+        <button onClick={() => onChange(Math.max(min, value - step))} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
+        <span className="flex-1 text-center text-lg font-bold text-foreground">{value}</span>
+        <button onClick={() => onChange(value + step)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
+      </div>
+    </div>
+  );
+}
+
+function StrengthLogger({
+  config, data, onSave, saving, completed,
+}: {
+  config: StrengthConfig;
+  data: StrengthEntryData | undefined;
+  onSave: (data: StrengthEntryData) => void;
+  saving: boolean;
+  completed: boolean;
+}) {
+  const targetSets = config.sets;
+  const sets = data?.sets || [];
+  const [reps,   setReps]   = useState(config.repsMin);
+  const [weight, setWeight] = useState(config.baseWeight);
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editReps,   setEditReps]   = useState(0);
+  const [editWeight, setEditWeight] = useState(0);
+  const restRemaining = useRestTimer();
+  const timerRunning = restRemaining !== null && restRemaining > 0;
+
+  const logSet = () => {
+    onSave({ sets: [...sets, { reps, weight, weightUnit: config.weightUnit, completed: true }] });
+    if (config.restSeconds > 0) startRestTimer(config.restSeconds);
+  };
+
+  const startEdit = (idx: number) => {
+    setEditingIdx(idx);
+    setEditReps(sets[idx].reps);
+    setEditWeight(sets[idx].weight);
+  };
+
+  const saveEdit = () => {
+    if (editingIdx === null) return;
+    const updated = sets.map((s, i) =>
+      i === editingIdx ? { ...s, reps: editReps, weight: editWeight } : s
+    );
+    onSave({ sets: updated });
+    setEditingIdx(null);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-surface rounded-lg p-3">
+        <p className="text-xs text-muted-foreground mb-1">
+          Target: {targetSets} sets × {config.repsMin}{config.repsMin !== config.repsMax ? `-${config.repsMax}` : ''} reps @ {config.weightType === 'bodyweight' || (config.weightType === 'absolute' && config.baseWeight === 0) ? 'BW' : config.weightType === 'percentage_1rm' ? `${config.baseWeight}% 1RM` : `${config.baseWeight} ${config.weightUnit}`}
+        </p>
+        {config.restSeconds > 0 && (
+          <p className="text-xs text-muted-foreground flex items-center gap-1">
+            <Timer size={11} /> Rest: {formatTime(config.restSeconds)}
+          </p>
+        )}
+      </div>
+
+      {sets.length > 0 && (
+        <div className="space-y-2">
+          {sets.map((s, idx) => (
+            <div key={idx}>
+              {editingIdx === idx ? (
+                <div className="bg-surface rounded-xl p-4 space-y-3">
+                  <p className="text-sm font-semibold text-foreground">Edit Set {idx + 1}</p>
+                  <div className="space-y-3 max-w-xs mx-auto">
+                    <SetStepper label="Reps" value={editReps} onChange={setEditReps} min={1} />
+                    <SetStepper label={`Weight (${s.weightUnit})`} value={editWeight} onChange={setEditWeight} min={0} step={5} />
+                  </div>
+                  <div className="flex gap-2 max-w-xs mx-auto w-full">
+                    <button onClick={() => setEditingIdx(null)} className="flex-1 py-2 rounded-lg bg-background text-sm text-muted-foreground font-medium">Cancel</button>
+                    <button onClick={saveEdit} disabled={saving} className="flex-1 py-2 rounded-lg bg-primary text-white text-sm font-medium disabled:opacity-50">
+                      {saving ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 bg-surface rounded-lg p-3">
+                  <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+                    <Check size={14} className="text-success" />
+                  </div>
+                  <p className="text-sm font-medium text-foreground flex-1">
+                    Set {idx + 1}: {s.reps} reps @ {s.weight} {s.weightUnit}
+                  </p>
+                  <button
+                    onClick={() => startEdit(idx)}
+                    className="w-7 h-7 rounded-lg bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <Pencil size={13} />
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {sets.length < targetSets && !completed && (
+        <div className="bg-surface rounded-xl p-4 space-y-4">
+          <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
+          <div className="space-y-3 max-w-xs mx-auto">
+            <SetStepper label="Reps" value={reps} onChange={setReps} min={1} />
+            <SetStepper label={`Weight (${config.weightUnit})`} value={weight} onChange={setWeight} min={0} step={5} />
+          </div>
+          <div className="max-w-xs mx-auto w-full">
+            <Button onClick={logSet} disabled={saving || timerRunning} fullWidth>
+              {saving ? <LoadingSpinner size="sm" /> : 'Log Set'}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {sets.length >= targetSets && (
+        <div className="text-center py-4 text-success font-medium">All sets completed</div>
+      )}
+    </div>
+  );
+}
+
+// ─── Distance Logger ──────────────────────────────────────────────────────────
+
+function DistanceLogger({
+  config, data, onSave, saving, completed,
+}: {
+  config: DistanceConfig;
+  data: DistanceEntryData | undefined;
+  onSave: (data: DistanceEntryData) => void;
+  saving: boolean;
+  completed: boolean;
+}) {
+  const targetSets = config.sets;
+  const sets = data?.sets || [];
+  const [distance, setDistance] = useState(config.distanceTarget);
+
+  const logSet = () => {
+    onSave({ sets: [...sets, { distance, distanceUnit: config.distanceUnit, completed: true }] });
+    if (config.restSeconds > 0) startRestTimer(config.restSeconds);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-surface rounded-lg p-3">
+        <p className="text-xs text-muted-foreground mb-1">
+          Target: {targetSets} sets × {config.distanceTarget} {config.distanceUnit}
+        </p>
+        {config.restSeconds > 0 && (
+          <p className="text-xs text-muted-foreground flex items-center gap-1">
+            <Timer size={11} /> Rest: {formatTime(config.restSeconds)}
+          </p>
+        )}
+      </div>
+
+      {sets.length > 0 && (
+        <div className="space-y-2">
+          {sets.map((s, idx) => (
+            <div key={idx} className="flex items-center gap-3 bg-surface rounded-lg p-3">
+              <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+                <Check size={14} className="text-success" />
+              </div>
+              <p className="text-sm font-medium text-foreground">
+                Set {idx + 1}: {s.distance} {s.distanceUnit}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {sets.length < targetSets && !completed && (
+        <div className="bg-surface rounded-xl p-4 space-y-4">
+          <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Distance ({config.distanceUnit})</label>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setDistance((d) => Math.max(0, d - 5))} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
+              <span className="flex-1 text-center text-lg font-bold text-foreground">{distance}</span>
+              <button onClick={() => setDistance((d) => d + 5)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
+            </div>
+          </div>
+          <Button onClick={logSet} disabled={saving} fullWidth>
+            {saving ? <LoadingSpinner size="sm" /> : 'Log Set'}
+          </Button>
+        </div>
+      )}
+
+      {sets.length >= targetSets && (
+        <div className="text-center py-4 text-success font-medium">All sets completed</div>
+      )}
+    </div>
+  );
+}
+
+// ─── Time Logger ──────────────────────────────────────────────────────────────
+
+function TimeLogger({
+  config, data, onSave, saving, completed,
+}: {
+  config: TimeConfig;
+  data: TimeEntryData | undefined;
+  onSave: (data: TimeEntryData) => void;
+  saving: boolean;
+  completed: boolean;
+}) {
+  const targetSets = config.sets;
+  const sets = data?.sets || [];
+  const [timerDone,      setTimerDone]      = useState(false);
+  const [actualDuration, setActualDuration] = useState(config.durationSeconds);
+
+  const logSet = () => {
+    onSave({ sets: [...sets, { durationSeconds: actualDuration, completed: true }] });
+    setTimerDone(false);
+    if (config.restSeconds > 0) startRestTimer(config.restSeconds);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-surface rounded-lg p-3">
+        <p className="text-xs text-muted-foreground mb-1">
+          Target: {targetSets} sets × {formatTime(config.durationSeconds)}
+        </p>
+        {config.restSeconds > 0 && (
+          <p className="text-xs text-muted-foreground flex items-center gap-1">
+            <Timer size={11} /> Rest: {formatTime(config.restSeconds)}
+          </p>
+        )}
+      </div>
+
+      {sets.length > 0 && (
+        <div className="space-y-2">
+          {sets.map((s, idx) => (
+            <div key={idx} className="flex items-center gap-3 bg-surface rounded-lg p-3">
+              <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+                <Check size={14} className="text-success" />
+              </div>
+              <p className="text-sm font-medium text-foreground">
+                Set {idx + 1}: {formatTime(s.durationSeconds)}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {sets.length < targetSets && !completed && (
+        <div className="space-y-3">
+          <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
+          <IntervalTimer
+            config={{ kind: 'countdown', totalSeconds: actualDuration }}
+            onFinish={() => setTimerDone(true)}
+            resetKey={sets.length}
+            adjustable
+            onDurationChange={(s) => setActualDuration(s)}
+          />
+          <Button
+            onClick={logSet}
+            disabled={saving}
+            fullWidth
+            variant={timerDone ? 'primary' : 'secondary'}
+          >
+            {saving ? <LoadingSpinner size="sm" /> : timerDone ? '✓ Submit Set' : 'Log Set'}
+          </Button>
+        </div>
+      )}
+
+      {sets.length >= targetSets && (
+        <div className="text-center py-4 text-success font-medium">All sets completed</div>
+      )}
+    </div>
+  );
+}
+
+// ─── Rounds Logger (AMRAP, EMOM, Round Block, Tabata) ─────────────────────────
+
+function RoundsLogger({
+  exerciseType, config, data, onSave, saving, completed,
+}: {
+  exerciseType: ExerciseType;
+  config: AmrapConfig | EmomConfig | RoundBlockConfig | TabataConfig;
+  data: RoundsEntryData | undefined;
+  onSave: (data: RoundsEntryData) => void;
+  saving: boolean;
+  completed: boolean;
+}) {
+  const [rounds,      setRounds]      = useState(data?.roundsCompleted || 0);
+  const [timeElapsed, setTimeElapsed] = useState(data?.timeElapsed || 0);
+  const [timerDone,   setTimerDone]   = useState(false);
+  const isLogged = data && data.roundsCompleted > 0;
+
+  const label = exerciseType === 'amrap' ? 'AMRAP'
+    : exerciseType === 'emom'        ? 'EMOM'
+    : exerciseType === 'tabata'      ? 'Tabata'
+    : 'Round Block';
+
+  const configDesc = (() => {
+    if ('timeCap'       in config) return `${formatTime(config.timeCap)} cap`;
+    if ('totalMinutes'  in config) return `${config.totalMinutes} min`;
+    if ('rounds'        in config) return `${config.rounds} rounds`;
+    return '';
+  })();
+
+  const movements = 'movements' in config ? config.movements : [];
+
+  // Build timer config (null for round_block — no fixed time)
+  const timerConfig = ((): IntervalTimerConfig | null => {
+    if (exerciseType === 'amrap' && 'timeCap' in config)
+      return { kind: 'amrap', totalSeconds: config.timeCap };
+    if (exerciseType === 'emom' && 'totalMinutes' in config && 'intervalSeconds' in config)
+      return { kind: 'emom', totalIntervals: config.totalMinutes, intervalSeconds: (config as EmomConfig).intervalSeconds };
+    if (exerciseType === 'tabata' && 'rounds' in config && 'workSeconds' in config)
+      return { kind: 'tabata', rounds: (config as TabataConfig).rounds, workSeconds: (config as TabataConfig).workSeconds, restSeconds: (config as TabataConfig).restSeconds };
+    return null;
+  })();
+
+  const handleTimerFinish = ({ elapsedSeconds, segmentsCompleted }: FinishData) => {
+    setTimerDone(true);
+    setTimeElapsed(elapsedSeconds);
+    if (exerciseType === 'tabata') {
+      setRounds(Math.floor(segmentsCompleted / 2));
+    } else if (exerciseType === 'emom') {
+      setRounds(segmentsCompleted);
+    }
+  };
+
+  // ── Round Block per-round countdown state ────────────────────────────────
+  const rbTotalRounds  = 'rounds' in config && exerciseType === 'round_block' ? (config as RoundBlockConfig).rounds : 0;
+  const rbRest         = 'restBetweenRounds' in config ? (config as RoundBlockConfig).restBetweenRounds : 0;
+  const [rbCurrent,    setRbCurrent]    = useState(1);
+  const [rbRoundTimes, setRbRoundTimes] = useState<number[]>([]);
+  // Duration the user sets before each round (seconds); default 5 min
+  const [rbRoundDuration, setRbRoundDuration] = useState(300);
+  // timerKey forces IntervalTimer to remount (reset) for each new round
+  const [rbTimerKey,   setRbTimerKey]   = useState(0);
+  const [rbTimerDone,  setRbTimerDone]  = useState(false);
+
+  const handleRoundBlockComplete = () => {
+    const newTimes = [...rbRoundTimes, rbRoundDuration];
+    setRbRoundTimes(newTimes);
+
+    if (rbCurrent >= rbTotalRounds) {
+      onSave({ roundsCompleted: rbTotalRounds, timeElapsed: newTimes.reduce((a, b) => a + b, 0) });
+    } else {
+      if (rbRest > 0) startRestTimer(rbRest);
+      setRbCurrent((r) => r + 1);
+      setRbTimerDone(false);
+      setRbTimerKey((k) => k + 1);
+    }
+  };
+
+  const logResult = () => {
+    onSave({ roundsCompleted: rounds, timeElapsed });
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Config card */}
+      <div className="bg-surface rounded-lg p-3">
+        <p className="text-xs text-muted-foreground mb-1">{label}: {configDesc}</p>
+        {exerciseType === 'tabata' && 'workSeconds' in config && (
+          <p className="text-xs text-muted-foreground">
+            {formatTime((config as TabataConfig).workSeconds)} work / {formatTime((config as TabataConfig).restSeconds)} rest
+          </p>
+        )}
+        {exerciseType === 'emom' && 'intervalSeconds' in config && (
+          <p className="text-xs text-muted-foreground">
+            {formatTime((config as EmomConfig).intervalSeconds)} intervals
+          </p>
+        )}
+        {movements.length > 0 && (
+          <div className="space-y-0.5 mt-2">
+            {movements.map((m, idx) => (
+              <p key={idx} className="text-sm text-foreground">
+                {m.reps && `${m.reps}× `}{m.name}{m.weight ? ` @ ${m.weight} ${m.weightUnit || 'lbs'}` : ''}
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Already logged result */}
+      {isLogged && (
+        <div className="flex items-center gap-3 bg-surface rounded-lg p-3">
+          <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+            <Check size={14} className="text-success" />
+          </div>
+          <p className="text-sm font-medium text-foreground">
+            {data.roundsCompleted} rounds{data.timeElapsed > 0 ? ` in ${formatTime(data.timeElapsed)}` : ''}
           </p>
         </div>
       )}
 
-      {/* Main Content */}
-      <div className="flex-1 overflow-y-auto px-5 py-6 pb-24 space-y-6">
-        {/* Exercise Name */}
-        <div className="text-center">
-          <h2 className="text-2xl font-bold text-foreground">{currentExercise.name}</h2>
-          <p className="text-muted-foreground mt-1">{getTargetDescription()}</p>
-          {isTempo && currentExercise.tempo && (
-            <p className="text-sm text-primary mt-1">
-              Tempo: {currentExercise.tempo.split('-').join('s - ')}s
-            </p>
-          )}
-          {/* Show weight type info for BW and 1RM exercises */}
-          {currentExercise.weightType === 'BW' && currentExercise.weightValue > 0 && (
-            <p className="text-xs text-muted-foreground mt-1">
-              {Math.round(currentExercise.weightValue * 100)}% of bodyweight
-              {userBodyweight ? ` (${userBodyweight} lbs)` : ' (bodyweight not set)'}
-            </p>
-          )}
-          {currentExercise.weightType === '1RM' && (
-            <p className="text-xs text-muted-foreground mt-1">
-              {Math.round(currentExercise.weightValue * 100)}% of 1RM
-            </p>
-          )}
-          {currentExercise.weightType === 'BW' && !userBodyweight && (
-            <p className="text-xs text-yellow-500 mt-1">
-              ⚠️ Set your bodyweight in profile for accurate weight calculation
-            </p>
-          )}
-        </div>
-
-        {/* Completed Sets */}
-        {currentSets.length > 0 && (
-          <div className="space-y-2">
-            {currentSets.map((set, i) => {
-              const getSetDisplay = () => {
-                if (isTimeBased) return `${set.reps} min`;
-                if (isDistanceBased) return `${set.distance} ${currentExercise.distanceUnit || 'feet'} @ ${set.weight} lbs`;
-                if (isIntervalBased) return set.weight > 0 ? `${Math.floor((set.time || 0) / 60)} min @ ${set.weight} lbs` : `${Math.floor((set.time || 0) / 60)} min completed`;
-                if (isAmrap) return set.weight > 0 ? `${set.reps} rounds @ ${set.weight} lbs` : `${set.reps} rounds completed`;
-                if (isEmom) return set.weight > 0 ? `${set.reps} rounds @ ${set.weight} lbs` : `${set.reps} rounds completed`;
-                if (isTabata) return set.weight > 0 ? `${set.reps} rounds @ ${set.weight} lbs` : `${set.reps} rounds completed`;
-                return `${set.weight} lbs × ${set.reps}`;
-              };
-
-              const getSetLabel = () => {
-                if (isTimeBased || isIntervalBased || isAmrap || isEmom || isTabata) return 'Completed';
-                return `Set ${i + 1}`;
-              };
-
-              // Don't allow editing single-completion exercises
-              const canEdit = !isSingleCompletionType && !isPreview;
-
-              // If this set is being edited, show edit interface
-              if (editingSetIndex === i) {
-                return (
-                  <div key={i} className="bg-surface rounded-lg p-4 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-foreground">{getSetLabel()}</span>
-                      <button
-                        onClick={cancelEditSet}
-                        className="p-1 text-muted-foreground hover:text-foreground transition-colors"
-                      >
-                        <X size={18} />
-                      </button>
-                    </div>
-
-                    {/* Weight Input */}
-                    {!isTimeBased && (
-                      <div className="space-y-2">
-                        <label className="text-xs text-muted-foreground text-center block">
-                          Weight (lbs)
-                        </label>
-                        <div className="flex items-center justify-center gap-3">
-                          <button
-                            onClick={() => setEditWeight(Math.max(0, editWeight - 5))}
-                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
-                          >
-                            <Minus size={16} />
-                          </button>
-                          <input
-                            type="number"
-                            value={editWeight}
-                            onChange={(e) => setEditWeight(Number(e.target.value))}
-                            className="w-20 text-center text-2xl font-bold bg-transparent text-foreground focus:outline-none"
-                          />
-                          <button
-                            onClick={() => setEditWeight(editWeight + 5)}
-                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
-                          >
-                            <Plus size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Reps Input */}
-                    {!isTimeBased && !isDistanceBased && (
-                      <div className="space-y-2">
-                        <label className="text-xs text-muted-foreground text-center block">
-                          Reps
-                        </label>
-                        <div className="flex items-center justify-center gap-3">
-                          <button
-                            onClick={() => setEditReps(Math.max(0, editReps - 1))}
-                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
-                          >
-                            <Minus size={16} />
-                          </button>
-                          <input
-                            type="number"
-                            value={editReps}
-                            onChange={(e) => setEditReps(Number(e.target.value))}
-                            className="w-20 text-center text-2xl font-bold bg-transparent text-foreground focus:outline-none"
-                          />
-                          <button
-                            onClick={() => setEditReps(editReps + 1)}
-                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
-                          >
-                            <Plus size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Distance Input */}
-                    {isDistanceBased && (
-                      <div className="space-y-2">
-                        <label className="text-xs text-muted-foreground text-center block">
-                          Distance ({currentExercise.distanceUnit || 'feet'})
-                        </label>
-                        <div className="flex items-center justify-center gap-3">
-                          <button
-                            onClick={() => setEditDistance(Math.max(0, editDistance - 5))}
-                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
-                          >
-                            <Minus size={16} />
-                          </button>
-                          <input
-                            type="number"
-                            value={editDistance}
-                            onChange={(e) => setEditDistance(Number(e.target.value))}
-                            className="w-20 text-center text-2xl font-bold bg-transparent text-foreground focus:outline-none"
-                          />
-                          <button
-                            onClick={() => setEditDistance(editDistance + 5)}
-                            className="w-10 h-10 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors"
-                          >
-                            <Plus size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Save Button */}
-                    <Button onClick={saveEditSet} fullWidth size="sm">
-                      Save Changes
-                    </Button>
+      {/* ── Round Block: per-round countdown timer ── */}
+      {!isLogged && !completed && exerciseType === 'round_block' && (
+        <div className="space-y-3">
+          {/* Completed rounds */}
+          {rbRoundTimes.length > 0 && (
+            <div className="space-y-2">
+              {rbRoundTimes.map((t, idx) => (
+                <div key={idx} className="flex items-center gap-3 bg-surface rounded-lg p-3">
+                  <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+                    <Check size={14} className="text-success" />
                   </div>
-                );
-              }
-
-              return (
-                <div
-                  key={i}
-                  className="flex items-center justify-between p-3 bg-surface rounded-lg"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
-                      <Check size={16} className="text-success" />
-                    </div>
-                    <span className="font-medium text-foreground">{getSetLabel()}</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-muted-foreground">{getSetDisplay()}</span>
-                    {canEdit && (
-                      <button
-                        onClick={() => startEditSet(i, set)}
-                        className="p-1.5 text-muted-foreground hover:text-primary transition-colors"
-                      >
-                        <Edit2 size={16} />
-                      </button>
-                    )}
-                  </div>
+                  <p className="text-sm font-medium text-foreground">
+                    Round {idx + 1}: {formatTime(t)}
+                  </p>
                 </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Rest Timer */}
-        {restTimer !== null && (
-          <div className="bg-surface rounded-xl p-8 text-center space-y-3">
-            <div className="flex items-center justify-center gap-2 text-primary">
-              <Timer size={20} />
-              <span className="text-sm font-medium">Rest</span>
+              ))}
             </div>
-            <p className="text-4xl font-bold text-foreground">{formatTime(restTimer)}</p>
+          )}
+
+          {/* Current round */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between px-1">
+              <p className="text-sm font-semibold text-foreground">Round {rbCurrent} / {rbTotalRounds}</p>
+              {rbRest > 0 && (
+                <p className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Timer size={10} /> {formatTime(rbRest)} rest after
+                </p>
+              )}
+            </div>
+
+              <IntervalTimer
+              key={rbTimerKey}
+              config={{ kind: 'countdown', totalSeconds: rbRoundDuration }}
+              onFinish={() => setRbTimerDone(true)}
+              resetKey={rbTimerKey}
+              adjustable
+              onDurationChange={(s) => setRbRoundDuration(s)}
+            />
+
             <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setRestTimerStart(null);
-                setRestTimerDuration(0);
-                setRestTimer(null);
-              }}
+              onClick={handleRoundBlockComplete}
+              fullWidth
+              variant={rbTimerDone ? 'primary' : 'secondary'}
             >
-              Skip
+              {rbCurrent >= rbTotalRounds
+                ? rbTimerDone ? '✓ Finish Last Round' : 'Finish Last Round'
+                : rbTimerDone ? `✓ Complete Round ${rbCurrent}` : `Complete Round ${rbCurrent}`}
             </Button>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Current Set Entry */}
-        {!isExerciseComplete && restTimer === null && (
-          <div className="bg-surface rounded-xl p-7 space-y-6">
-            {isTimeBased ? (
-              // Time-based exercise interface
-              <>
-                {cardioTimer === null ? (
-                  <>
-                    <div className="text-center">
-                      <p className="text-sm text-muted-foreground">Ready to start</p>
-                    </div>
-                    <Button onClick={startCardioTimer} fullWidth size="lg" disabled={isPreview}>
-                      {isPreview ? 'Preview Only' : 'Start Timer'}
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-center space-y-3">
-                      <div className="flex items-center justify-center gap-2 text-primary">
-                        <Timer size={20} />
-                        <span className="text-sm font-medium">Time Remaining</span>
-                      </div>
-                      <p className="text-5xl font-bold text-foreground">{formatTime(cardioTimer)}</p>
-                    </div>
-                    <Button onClick={completeTimeBasedExercise} fullWidth size="lg" disabled={isPreview}>
-                      {isPreview ? 'Preview Only' : 'Complete'}
-                    </Button>
-                  </>
-                )}
-              </>
-            ) : isDistanceBased ? (
-              // Distance-based exercise interface
-              <>
-                <div className="text-center">
-                  <p className="text-sm text-muted-foreground">Set {currentSets.length + 1} of {currentExercise.sets}</p>
+      {/* ── AMRAP / EMOM / Tabata: interval timer + log ── */}
+      {!isLogged && !completed && exerciseType !== 'round_block' && timerConfig && (
+        <div className="space-y-3">
+          <IntervalTimer
+            config={timerConfig}
+            onFinish={handleTimerFinish}
+            adjustable={exerciseType === 'amrap' || exerciseType === 'emom'}
+          />
+
+          {/* Rounds input — always visible for AMRAP, shown after timer for EMOM/Tabata */}
+          {(exerciseType === 'amrap' || timerDone) && (
+            <div className="bg-surface rounded-xl p-4 space-y-3">
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">
+                  {exerciseType === 'amrap' ? 'Rounds completed' : 'Rounds / intervals completed'}
+                </label>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setRounds((r) => Math.max(0, r - 1))} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
+                  <span className="flex-1 text-center text-lg font-bold text-foreground">{rounds}</span>
+                  <button onClick={() => setRounds((r) => r + 1)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
                 </div>
-
-                {/* Distance Input */}
-                <div className="space-y-2">
-                  <label className="text-sm text-muted-foreground text-center block">
-                    Distance ({currentExercise.distanceUnit || 'feet'})
-                  </label>
-                  <div className="flex items-center justify-center gap-4">
-                    <button
-                      onClick={() => setDistance(Math.max(0, distance - 5))}
-                      className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                    >
-                      <Minus size={20} />
-                    </button>
-                    <input
-                      type="number"
-                      value={distance}
-                      onChange={(e) => setDistance(Number(e.target.value))}
-                      className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                    />
-                    <button
-                      onClick={() => setDistance(distance + 5)}
-                      className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                    >
-                      <Plus size={20} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Weight Input (if carrying weight) */}
-                {currentExercise.weightValue > 0 && (
-                  <div className="space-y-2">
-                    <label className="text-sm text-muted-foreground text-center block">
-                      Weight (lbs)
-                    </label>
-                    <div className="flex items-center justify-center gap-4">
-                      <button
-                        onClick={() => setWeight(Math.max(0, weight - 5))}
-                        className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                      >
-                        <Minus size={20} />
-                      </button>
-                      <input
-                        type="number"
-                        value={weight}
-                        onChange={(e) => setWeight(Number(e.target.value))}
-                        className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                      />
-                      <button
-                        onClick={() => setWeight(weight + 5)}
-                        className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                      >
-                        <Plus size={20} />
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <Button onClick={logDistanceSet} fullWidth size="lg" disabled={isPreview}>
-                  {isPreview ? 'Preview Only' : 'Log Set'}
-                </Button>
-              </>
-            ) : isIntervalBased ? (
-              // Interval training interface
-              <>
-                {!intervalRunning && intervalTimer === null ? (
-                  <>
-                    <div className="text-center space-y-2">
-                      <p className="text-sm text-muted-foreground">Ready to start intervals</p>
-                      {currentExercise.intervals && (
-                        <div className="space-y-1">
-                          {currentExercise.intervals.phases.map((phase, i) => (
-                            <div key={i} className="flex items-center justify-center gap-2 text-sm">
-                              <span className={`w-2 h-2 rounded-full ${
-                                phase.intensity === 'hard' ? 'bg-red-500' :
-                                phase.intensity === 'moderate' ? 'bg-yellow-500' :
-                                'bg-green-500'
-                              }`} />
-                              <span className="text-foreground">{phase.name}: {formatTime(phase.duration)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Weight Input (if exercise has weight) */}
-                    {currentExercise.weightValue > 0 && (
-                      <div className="space-y-2">
-                        <label className="text-sm text-muted-foreground text-center block">
-                          Weight (lbs)
-                        </label>
-                        <div className="flex items-center justify-center gap-4">
-                          <button
-                            onClick={() => setWeight(Math.max(0, weight - 5))}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Minus size={20} />
-                          </button>
-                          <input
-                            type="number"
-                            value={weight}
-                            onChange={(e) => setWeight(Number(e.target.value))}
-                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                          />
-                          <button
-                            onClick={() => setWeight(weight + 5)}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Plus size={20} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <Button onClick={startInterval} fullWidth size="lg" disabled={isPreview}>
-                      <Play size={20} className="mr-2" />
-                      {isPreview ? 'Preview Only' : 'Start Intervals'}
-                    </Button>
-              </>
-            ) : (
-                  <>
-                    <div className="text-center space-y-3">
-                      <p className="text-sm text-muted-foreground">
-                        Round {intervalRound + 1} of {currentExercise.intervals?.rounds || 0}
-                      </p>
-                      <div className={`inline-block px-4 py-1 rounded-full text-sm font-medium ${
-                        currentExercise.intervals?.phases[intervalPhaseIndex]?.intensity === 'hard' 
-                          ? 'bg-red-500/20 text-red-400'
-                          : currentExercise.intervals?.phases[intervalPhaseIndex]?.intensity === 'moderate'
-                          ? 'bg-yellow-500/20 text-yellow-400'
-                          : 'bg-green-500/20 text-green-400'
-                      }`}>
-                        {currentExercise.intervals?.phases[intervalPhaseIndex]?.name || 'Phase'}
-                      </div>
-                      <p className="text-5xl font-bold text-foreground">{formatTime(intervalTimer || 0)}</p>
-                    </div>
-                    <div className="flex gap-3">
-                      <Button 
-                        variant="secondary" 
-                        onClick={() => {
-                          setIntervalRunning(false);
-                          setIntervalTimerStart(null);
-                          setIntervalTimerDuration(0);
-                          setIntervalTimer(null);
-                        }} 
-                        fullWidth
-                      >
-                        Stop
-                      </Button>
-                      <Button onClick={completeIntervalExercise} fullWidth>
-                        Complete Early
-                      </Button>
-                    </div>
-                  </>
-                )}
-              </>
-            ) : isAmrap ? (
-              // AMRAP interface
-              <>
-                {!amrapRunning && amrapTimer === null ? (
-                  <>
-                    <div className="text-center">
-                      <p className="text-sm text-muted-foreground">AMRAP: As Many Rounds As Possible</p>
-                      <p className="text-sm text-muted-foreground">{currentExercise.reps} reps/round × {formatTime(currentExercise.timeCap || 600)}</p>
-                    </div>
-
-                    {/* Weight Input (if exercise has weight) */}
-                    {currentExercise.weightValue > 0 && (
-                      <div className="space-y-2">
-                        <label className="text-sm text-muted-foreground text-center block">
-                          Weight (lbs)
-                        </label>
-                        <div className="flex items-center justify-center gap-4">
-                          <button
-                            onClick={() => setWeight(Math.max(0, weight - 5))}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Minus size={20} />
-                          </button>
-                          <input
-                            type="number"
-                            value={weight}
-                            onChange={(e) => setWeight(Number(e.target.value))}
-                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                          />
-                          <button
-                            onClick={() => setWeight(weight + 5)}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Plus size={20} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <Button onClick={startAmrap} fullWidth size="lg" disabled={isPreview}>
-                      <Play size={20} className="mr-2" />
-                      {isPreview ? 'Preview Only' : 'Start Timer'}
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-center space-y-3">
-                      <div className="flex items-center justify-center gap-2 text-primary">
-                        <Timer size={20} />
-                        <span className="text-sm font-medium">Time Remaining</span>
-                      </div>
-                      <p className="text-5xl font-bold text-foreground">{formatTime(amrapTimer || 0)}</p>
-                    </div>
-
-                    {/* Round Counter */}
-                    <div className="space-y-2">
-                      <label className="text-sm text-muted-foreground text-center block">
-                        Rounds Completed
-                      </label>
-                      <div className="flex items-center justify-center gap-4">
-                        <button
-                          onClick={() => setAmrapReps(Math.max(0, amrapReps - 1))}
-                          className="w-14 h-14 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                        >
-                          <Minus size={24} />
-                        </button>
-                        <span className="text-4xl font-bold text-foreground w-20 text-center">{amrapReps}</span>
-                        <button
-                          onClick={() => {
-                            setAmrapReps(amrapReps + 1);
-                            haptic('light');
-                          }}
-                          className="w-14 h-14 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/80 transition-colors touch-target"
-                        >
-                          <Plus size={24} />
-                        </button>
-                      </div>
-                    </div>
-
-                    <Button onClick={completeAmrapExercise} fullWidth size="lg">
-                      Complete AMRAP
-                    </Button>
-                  </>
-                )}
-              </>
-            ) : isEmom ? (
-              // EMOM interface
-              <>
-                {!emomRunning && emomTimer === null ? (
-                  <>
-                    <div className="text-center space-y-2">
-                      <p className="text-sm text-muted-foreground">EMOM: Every Minute On the Minute</p>
-                      <p className="text-sm text-muted-foreground">{currentExercise.reps} reps/min × {currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets} minutes</p>
-                    </div>
-
-                    {/* Weight Input (if exercise has weight) */}
-                    {currentExercise.weightValue > 0 && (
-                      <div className="space-y-2">
-                        <label className="text-sm text-muted-foreground text-center block">
-                          Weight (lbs)
-                        </label>
-                        <div className="flex items-center justify-center gap-4">
-                          <button
-                            onClick={() => setWeight(Math.max(0, weight - 5))}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Minus size={20} />
-                          </button>
-                          <input
-                            type="number"
-                            value={weight}
-                            onChange={(e) => setWeight(Number(e.target.value))}
-                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                          />
-                          <button
-                            onClick={() => setWeight(weight + 5)}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Plus size={20} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <Button onClick={startEmom} fullWidth size="lg" disabled={isPreview}>
-                      <Play size={20} className="mr-2" />
-                      {isPreview ? 'Preview Only' : 'Start Timer'}
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-center space-y-3">
-                      <p className="text-sm text-muted-foreground">
-                        Minute {emomRound + 1} of {currentExercise.timeCap ? Math.floor(currentExercise.timeCap / 60) : currentExercise.sets} • {currentExercise.reps} reps
-                      </p>
-                      <div className="flex items-center justify-center gap-2 text-primary">
-                        <Timer size={20} />
-                        <span className="text-sm font-medium">Time Remaining</span>
-                      </div>
-                      <p className="text-5xl font-bold text-foreground">{formatTime(emomTimer || 0)}</p>
-                    </div>
-                    <Button onClick={completeEmomExercise} fullWidth size="lg">
-                      Complete EMOM
-                    </Button>
-                  </>
-                )}
-              </>
-            ) : isTabata ? (
-              // Tabata interface
-              <>
-                {!tabataRunning && tabataTimer === null ? (
-                  <>
-                    <div className="text-center space-y-2">
-                      <p className="text-sm text-muted-foreground">Tabata: High Intensity Interval Training</p>
-                      <p className="text-lg text-foreground">20 seconds work / 10 seconds rest</p>
-                      <p className="text-sm text-muted-foreground">{currentExercise.sets} rounds</p>
-                    </div>
-
-                    {/* Weight Input (if exercise has weight) */}
-                    {currentExercise.weightValue > 0 && (
-                      <div className="space-y-2">
-                        <label className="text-sm text-muted-foreground text-center block">
-                          Weight (lbs)
-                        </label>
-                        <div className="flex items-center justify-center gap-4">
-                          <button
-                            onClick={() => setWeight(Math.max(0, weight - 5))}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Minus size={20} />
-                          </button>
-                          <input
-                            type="number"
-                            value={weight}
-                            onChange={(e) => setWeight(Number(e.target.value))}
-                            className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                          />
-                          <button
-                            onClick={() => setWeight(weight + 5)}
-                            className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                          >
-                            <Plus size={20} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <Button onClick={startTabata} fullWidth size="lg" disabled={isPreview}>
-                      <Play size={20} className="mr-2" />
-                      {isPreview ? 'Preview Only' : 'Start Timer'}
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-center space-y-3">
-                      <p className="text-sm text-muted-foreground">
-                        Round {tabataRound + 1} of {currentExercise.sets}
-                      </p>
-                      <div className={`inline-block px-6 py-2 rounded-full text-lg font-bold ${
-                        tabataPhase === 'work' 
-                          ? 'bg-green-500/20 text-green-400'
-                          : 'bg-yellow-500/20 text-yellow-400'
-                      }`}>
-                        {tabataPhase === 'work' ? 'WORK!' : 'REST'}
-                      </div>
-                      <p className="text-6xl font-bold text-foreground">{tabataTimer}</p>
-                    </div>
-                    <Button onClick={completeTabataExercise} fullWidth size="lg">
-                      Complete Tabata
-                    </Button>
-                  </>
-                )}
-              </>
-            ) : (
-              // Strength exercise interface (including tempo)
-              <>
-                <div className="text-center">
-                  <p className="text-sm text-muted-foreground">Set {currentSets.length + 1} of {currentExercise.sets}</p>
-                  {isTempo && currentExercise.tempo && (
-                    <p className="text-xs text-primary mt-1">
-                      Remember: {currentExercise.tempo.split('-').map((t, i) => 
-                        i === 0 ? `${t}s down` : i === 1 ? `${t}s pause` : i === 2 ? `${t}s up` : `${t}s pause`
-                      ).join(' → ')}
-                    </p>
-                  )}
-                </div>
-
-                {/* Weight Input */}
-                <div className="space-y-2">
-                  <label className="text-sm text-muted-foreground text-center block">
-                    Weight (lbs)
-                  </label>
-                  <div className="flex items-center justify-center gap-4">
-                    <button
-                      onClick={() => setWeight(Math.max(0, weight - 5))}
-                      className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                    >
-                      <Minus size={20} />
-                    </button>
-                    <input
-                      type="number"
-                      value={weight}
-                      onChange={(e) => setWeight(Number(e.target.value))}
-                      className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                    />
-                    <button
-                      onClick={() => setWeight(weight + 5)}
-                      className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                    >
-                      <Plus size={20} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Reps Input */}
-                <div className="space-y-2">
-                  <label className="text-sm text-muted-foreground text-center block">
-                    Reps
-                  </label>
-                  <div className="flex items-center justify-center gap-4">
-                    <button
-                      onClick={() => setReps(Math.max(0, reps - 1))}
-                      className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                    >
-                      <Minus size={20} />
-                    </button>
-                    <input
-                      type="number"
-                      value={reps}
-                      onChange={(e) => setReps(Number(e.target.value))}
-                      className="w-24 text-center text-3xl font-bold bg-transparent text-foreground focus:outline-none"
-                    />
-                    <button
-                      onClick={() => setReps(reps + 1)}
-                      className="w-12 h-12 rounded-full bg-background flex items-center justify-center text-foreground hover:bg-surface-elevated transition-colors touch-target"
-                    >
-                      <Plus size={20} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Log Set Button */}
-                <Button onClick={logSet} fullWidth size="lg" disabled={isPreview}>
-                  {isPreview ? 'Preview Only' : 'Log Set'}
-                </Button>
-              </>
-            )}
-          </div>
-        )}
-
-         {/* All sets complete for this exercise */}
-         {isExerciseComplete && (
-           <div className={`rounded-xl p-4 space-y-3 ${
-             workoutCompleted || workoutStatus === 'completed' ? 'bg-primary/10' : 'bg-success/10'
-           }`}>
-             <div className={`flex items-center justify-center gap-2 ${
-               workoutCompleted || workoutStatus === 'completed' ? 'text-primary' : 'text-success'
-             }`}>
-               <div className="text-2xl">✓</div>
-               <p className="font-medium">
-                 {workoutCompleted || workoutStatus === 'completed' ? 'Workout Complete!' : 'Exercise Complete!'}
-               </p>
-             </div>
-             {/* Show Next button only if not on last exercise AND workout not completed */}
-             {currentExerciseIndex < exercises.length - 1 && !workoutCompleted && workoutStatus !== 'completed' ? (
+              </div>
+              {timerDone && timeElapsed > 0 && (
+                <p className="text-xs text-muted-foreground text-center">
+                  Time: {formatTime(timeElapsed)}
+                </p>
+              )}
               <Button
-                onClick={() => {
-                  setCurrentExerciseIndex(currentExerciseIndex + 1);
-                  setRestTimerStart(null);
-                  setRestTimerDuration(0);
-                  setRestTimer(null);
-                }}
-                 fullWidth
-                 size="lg"
-               >
-                 <span className="flex items-center justify-center gap-2">
-                   Next
-                   <ChevronRight size={20} />
-                 </span>
-               </Button>
-             ) : (
-               // Show analysis button if workout is completed and has adjustment
-               (workoutCompleted && adjustmentIdForChat || workoutStatus === 'completed' && pendingAdjustmentId) && (
-                 <Button
-                   onClick={() => {
-                     const adjId = adjustmentIdForChat || pendingAdjustmentId;
-                     // If analysis exists and we have a chat session, go to that session
-                     // Otherwise, create new analysis
-                     if (hasAnalysis && chatSessionId) {
-                       router.push(`/chat?session=${chatSessionId}`);
-                     } else {
-                       router.push(`/chat?adjustmentId=${adjId}`);
-                     }
-                   }}
-                   fullWidth
-                   size="lg"
-                 >
-                   {hasAnalysis ? 'View Workout Analysis' : 'Generate Analysis'}
-                 </Button>
-               )
-             )}
-           </div>
-         )}
-       </div>
+                onClick={logResult}
+                disabled={saving || rounds === 0}
+                fullWidth
+                variant={timerDone ? 'primary' : 'secondary'}
+              >
+                {saving ? <LoadingSpinner size="sm" /> : timerDone ? '✓ Log Result' : 'Log Result'}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

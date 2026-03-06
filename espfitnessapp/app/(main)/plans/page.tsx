@@ -5,55 +5,36 @@ import { redirect } from 'next/navigation';
 
 async function getPlans(userId: string) {
   const plans = await prisma.workoutPlan.findMany({
-    where: { 
-      userId,
-      status: {
-        not: 'draft'
-      }
-    },
+    where: { userId },
     orderBy: { createdAt: 'desc' },
     select: {
       id: true,
-      goal: true,
+      name: true,
       status: true,
-      weeksDuration: true,
       startDate: true,
       createdAt: true,
-      workoutDays: {
-        select: {
-          id: true,
-          dayName: true,
-          workoutType: true,
-        },
-      },
       _count: {
-        select: {
-          workoutDays: true,
-        },
+        select: { dayAssignments: true },
       },
     },
   });
 
-  type PlanRow = { id: string; goal: string; status: string; weeksDuration: number; startDate: Date | null; createdAt: Date; _count: { workoutDays: number } };
-  return plans.map((plan: PlanRow) => ({
+  return plans.map((plan) => ({
     id: plan.id,
-    goal: plan.goal,
+    name: plan.name,
     status: plan.status,
-    weeksDuration: plan.weeksDuration,
     startDate: plan.startDate ? plan.startDate.toISOString().split('T')[0] : null,
     createdAt: plan.createdAt.toISOString(),
-    dayCount: plan._count.workoutDays,
+    dayCount: plan._count.dayAssignments,
   }));
 }
 
 export default async function PlansPage() {
   const { session, error } = await validateSession();
-
   if (error || !session?.user?.id) {
     redirect('/login');
   }
 
   const plans = await getPlans(session.user.id);
-
   return <PlansContent plans={plans} />;
 }

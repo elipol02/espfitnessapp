@@ -3,32 +3,208 @@ import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import {
   getOpenRouterClient,
+  buildSystemMessage,
+  WORKOUT_TOOLS,
   type ChatMessage,
   type SSEEvent,
-  type WorkoutDayData,
+  type AskUserQuestion,
 } from '@/app/lib/openrouter';
 
-// Set timeout to 5 minutes for streaming AI responses
 export const maxDuration = 300;
 
-// Helper to encode SSE events
 function encodeSSE(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
 
+async function executeTool(
+  toolCall: { id: string; name: string; arguments: Record<string, unknown> },
+  userId: string,
+): Promise<{ result: Record<string, unknown>; metadata?: Record<string, unknown> }> {
+  if (toolCall.name === 'create_workout_plan') {
+    const args = toolCall.arguments as {
+      name: string;
+      schedule: Array<{
+        dayOfWeek: number;
+        dayName: string;
+        workoutTypeName: string;
+        workoutTypeColor: string;
+        workoutTypeCategory?: string;
+        exercises: Array<{
+          name: string;
+          exerciseType: string;
+          config: Record<string, unknown>;
+          progression?: Record<string, unknown>;
+          groupTag?: string;
+          order: number;
+          notes?: string;
+        }>;
+      }>;
+    };
+
+    const planData = { name: args.name, schedule: args.schedule };
+    return {
+      result: { success: true, planData },
+      metadata: { type: 'plan_preview', planData },
+    };
+  }
+
+  if (toolCall.name === 'edit_workout_plan') {
+    const args = toolCall.arguments as {
+      workoutTypeId: string;
+      name?: string;
+      color?: string;
+      exercises?: Array<{
+        id?: string;
+        name: string;
+        exerciseType: string;
+        config: Record<string, unknown>;
+        progression?: Record<string, unknown>;
+        groupTag?: string;
+        order: number;
+        notes?: string;
+      }>;
+      deleteExerciseIds?: string[];
+    };
+
+    const workoutType = await prisma.workoutType.findFirst({
+      where: { id: args.workoutTypeId, userId },
+      include: { exercises: { orderBy: { order: 'asc' } } },
+    });
+
+    if (!workoutType) {
+      throw new Error('Workout type not found');
+    }
+
+    // Build proposed state without saving to DB — user must confirm first
+    const deleteIds = new Set(args.deleteExerciseIds || []);
+    const remainingExercises = workoutType.exercises.filter((e) => !deleteIds.has(e.id));
+
+    const proposedExercises = remainingExercises.map((e) => {
+      const update = (args.exercises || []).find((u) => u.id === e.id);
+      if (update) {
+        return {
+          id: e.id,
+          name: update.name,
+          exerciseType: update.exerciseType,
+          config: update.config,
+          progression: update.progression ?? null,
+          groupTag: update.groupTag ?? null,
+          order: update.order,
+          notes: update.notes ?? null,
+        };
+      }
+      return {
+        id: e.id,
+        name: e.name,
+        exerciseType: e.exerciseType,
+        config: e.config as Record<string, unknown>,
+        progression: e.progression as Record<string, unknown> | null,
+        groupTag: e.groupTag,
+        order: e.order,
+        notes: e.notes,
+      };
+    });
+
+    const newExercises = (args.exercises || [])
+      .filter((e) => !e.id)
+      .map((e) => ({
+        id: null,
+        name: e.name,
+        exerciseType: e.exerciseType,
+        config: e.config,
+        progression: e.progression ?? null,
+        groupTag: e.groupTag ?? null,
+        order: e.order,
+        notes: e.notes ?? null,
+      }));
+
+    const allProposed = [...proposedExercises, ...newExercises].sort(
+      (a, b) => a.order - b.order,
+    );
+
+    const currentState = {
+      id: workoutType.id,
+      name: workoutType.name,
+      color: workoutType.color,
+      exercises: workoutType.exercises.map((e) => ({
+        id: e.id,
+        name: e.name,
+        exerciseType: e.exerciseType,
+        config: e.config as Record<string, unknown>,
+        progression: e.progression as Record<string, unknown> | null,
+        groupTag: e.groupTag,
+        order: e.order,
+        notes: e.notes,
+      })),
+    };
+
+    const proposedState = {
+      id: workoutType.id,
+      name: args.name || workoutType.name,
+      color: args.color || workoutType.color,
+      exercises: allProposed,
+    };
+
+    const editPreview = {
+      workoutTypeId: args.workoutTypeId,
+      editArgs: args,
+      currentState,
+      proposedState,
+    };
+
+    return {
+      result: { success: true, preview: true, editPreview },
+      metadata: { type: 'edit_preview', ...editPreview },
+    };
+  }
+
+  if (toolCall.name === 'get_workout_history') {
+    const args = toolCall.arguments as {
+      workoutTypeId: string;
+      limit?: number;
+    };
+
+    const sessions = await prisma.workoutSession.findMany({
+      where: {
+        workoutTypeId: args.workoutTypeId,
+        userId,
+        status: 'completed',
+      },
+      orderBy: { workoutDate: 'desc' },
+      take: args.limit || 10,
+      include: {
+        entries: {
+          include: { exercise: true },
+        },
+      },
+    });
+
+    const formatted = sessions.map((s) => ({
+      date: s.workoutDate,
+      rating: s.rating,
+      notes: s.notes,
+      exercises: s.entries.map((e) => ({
+        name: e.exercise.name,
+        exerciseType: e.exercise.exerciseType,
+        data: e.data,
+      })),
+    }));
+
+    return { result: { success: true, sessions: formatted } };
+  }
+
+  throw new Error(`Unknown tool: ${toolCall.name}`);
+}
+
 export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
-  
-  // Create a TransformStream for SSE
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
-  
-  // Helper to send SSE events
+
   const sendEvent = async (event: SSEEvent) => {
     await writer.write(encoder.encode(encodeSSE(event)));
   };
 
-  // Process the request in the background
   (async () => {
     try {
       const { session, error } = await validateSession();
@@ -40,9 +216,8 @@ export async function POST(request: NextRequest) {
 
       const userId = session.user.id;
       const body = await request.json();
-      const { sessionId, message, planId, context } = body;
+      const { sessionId, message, displayMessage, planId, context } = body;
 
-      // Verify session belongs to user
       const chatSession = await prisma.chatSession.findUnique({
         where: { id: sessionId, userId },
       });
@@ -53,27 +228,23 @@ export async function POST(request: NextRequest) {
         return;
       }
 
-      // Save user message (only if message is not empty)
       if (message && message.trim()) {
         await prisma.chatMessage.create({
           data: {
             sessionId,
             userId,
-            planId: planId || null,
             role: 'user',
-            content: message,
+            content: displayMessage?.trim() || message.trim(),
             metadata: {},
           },
         });
       }
 
-      // Update session updatedAt
       await prisma.chatSession.update({
         where: { id: sessionId },
         data: { updatedAt: new Date() },
       });
 
-      // Get recent conversation history for context
       const recentMessages = await prisma.chatMessage.findMany({
         where: { sessionId },
         orderBy: { createdAt: 'desc' },
@@ -82,334 +253,191 @@ export async function POST(request: NextRequest) {
 
       const chatHistory: ChatMessage[] = recentMessages
         .reverse()
-        .filter((m: { role: string; content: string }) => m.role !== 'system')
-        .map((m: { role: string; content: string }) => ({
+        .filter((m) => m.role !== 'system')
+        .map((m) => ({
           role: m.role as 'user' | 'assistant',
           content: m.content,
         }));
 
-      // Get OpenRouter client
-      const openRouter = getOpenRouterClient();
-      let fullResponse = '';
-      let toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
+      if (displayMessage && message && chatHistory.length > 0) {
+        const lastIdx = chatHistory.length - 1;
+        if (chatHistory[lastIdx].role === 'user') {
+          chatHistory[lastIdx] = { ...chatHistory[lastIdx], content: message.trim() };
+        }
+      }
 
-      // Get current plan for context
       let currentPlan = null;
       if (planId) {
         currentPlan = await prisma.workoutPlan.findUnique({
           where: { id: planId },
           include: {
-            workoutDays: {
-              include: { exercises: true },
-              orderBy: { dayNumber: 'asc' },
-            },
-          },
-        });
-      }
-
-      // Check if this chat session has an associated pending adjustment
-      // First check if adjustmentId was passed in context, otherwise look for one in previous messages
-      let adjustmentId = context?.adjustmentId || null;
-      
-      if (!adjustmentId) {
-        // Look for adjustment metadata in previous messages
-        // Get recent messages and check their metadata in JavaScript (Prisma JSON queries can be tricky)
-        const recentMsgs = await prisma.chatMessage.findMany({
-          where: { sessionId },
-          orderBy: { createdAt: 'desc' },
-          take: 20,
-          select: { metadata: true },
-        });
-
-        for (const msg of recentMsgs) {
-          if (msg.metadata && typeof msg.metadata === 'object') {
-            const metadata = msg.metadata as { adjustmentId?: string };
-            if (metadata.adjustmentId) {
-              adjustmentId = metadata.adjustmentId;
-              break;
-            }
-          }
-        }
-      }
-
-      // If still no adjustmentId but we have a planId, check for any pending adjustments for this plan
-      if (!adjustmentId && planId) {
-        const pendingAdj = await prisma.pendingAdjustment.findFirst({
-          where: {
-            userId,
-            planId,
-            status: 'pending',
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (pendingAdj) {
-          adjustmentId = pendingAdj.id;
-        }
-      }
-
-      // Log adjustmentId for debugging
-      if (adjustmentId) {
-        console.log('Passing adjustmentId to AI context:', adjustmentId);
-      }
-
-      // Fetch workout log data if adjustmentId is present
-      let workoutLogData = null;
-      if (adjustmentId) {
-        const pendingAdj = await prisma.pendingAdjustment.findUnique({
-          where: { id: adjustmentId },
-          select: { workoutLogId: true },
-        });
-
-        if (pendingAdj?.workoutLogId) {
-          const workoutLog = await prisma.workoutLog.findUnique({
-            where: { id: pendingAdj.workoutLogId },
-            include: {
-              day: true,
-              exerciseLogs: {
-                include: {
-                  exercise: true,
+            dayAssignments: {
+              include: {
+                workoutType: {
+                  include: {
+                    exercises: { orderBy: { order: 'asc' } },
+                  },
                 },
               },
+              orderBy: { dayOfWeek: 'asc' },
             },
-          });
-
-          if (workoutLog) {
-            workoutLogData = {
-              workoutDate: workoutLog.workoutDate,
-              dayName: workoutLog.day.dayName,
-              workoutType: workoutLog.day.workoutType,
-              exercises: workoutLog.exerciseLogs.map((exLog) => ({
-                name: exLog.exercise.name,
-                exerciseType: exLog.exercise.exerciseType,
-                prescribedSets: exLog.exercise.sets,
-                prescribedReps: exLog.exercise.reps,
-                prescribedWeight: exLog.exercise.weightValue,
-                weightType: exLog.exercise.weightType,
-                prescribedRestTime: exLog.exercise.restTime,
-                progression: exLog.exercise.progression,
-                // Time-based fields
-                duration: exLog.exercise.duration,
-                // Distance fields
-                distance: exLog.exercise.distance,
-                distanceUnit: exLog.exercise.distanceUnit,
-                // AMRAP/EMOM/Tabata fields
-                timeCap: exLog.exercise.timeCap,
-                intervals: exLog.exercise.intervals,
-                tempo: exLog.exercise.tempo,
-                // Completed data
-                completedSets: exLog.setsCompleted,
-                repsPerSet: exLog.repsPerSet,
-                weightUsed: exLog.weightUsed,
-                completedDuration: exLog.duration,
-                completedDistance: exLog.distance,
-                completedRounds: exLog.roundsCompleted,
-                timeElapsed: exLog.timeElapsed,
-                performanceData: exLog.performanceData,
-                notes: exLog.notes,
-              })),
-            };
-          }
-        }
+          },
+        });
       }
 
-      // Stream the unified chat with tool support
-      const chatGenerator = openRouter.unifiedChatStream(
-        chatHistory,
-        {
-          currentPlan: currentPlan || undefined,
-          userName: context?.userName,
-          bodyweight: context?.bodyweight,
-          adjustmentId: adjustmentId || undefined,
-          workoutLogData: workoutLogData || undefined,
-        }
-      );
+      const systemMessage = buildSystemMessage({
+        currentPlan: currentPlan
+          ? {
+              id: currentPlan.id,
+              name: currentPlan.name,
+              dayAssignments: currentPlan.dayAssignments.map((da) => ({
+                dayOfWeek: da.dayOfWeek,
+                workoutType: {
+                  id: da.workoutType.id,
+                  name: da.workoutType.name,
+                  color: da.workoutType.color,
+                  exercises: da.workoutType.exercises.map((ex) => ({
+                    id: ex.id,
+                    name: ex.name,
+                    exerciseType: ex.exerciseType,
+                    config: ex.config as Record<string, unknown>,
+                    progression: ex.progression as Record<string, unknown> | null,
+                    order: ex.order,
+                  })),
+                },
+              })),
+            }
+          : null,
+        userName: context?.userName,
+        bodyweight: context?.bodyweight,
+      });
 
-      for await (const chunk of chatGenerator) {
-        if (chunk.type === 'text') {
-          fullResponse += chunk.content;
-          await sendEvent({ type: 'text-chunk', content: chunk.content });
-        } else if (chunk.type === 'tool_call') {
-          // Parse tool call arguments
-          try {
-            const args = JSON.parse(chunk.toolCall.arguments);
-            toolCalls.push({
-              id: chunk.toolCall.id,
-              name: chunk.toolCall.name,
-              arguments: args,
-            });
-            
-            // Send tool-call event
+      const llmMessages: ChatMessage[] = [systemMessage, ...chatHistory];
+      const openRouter = getOpenRouterClient();
+      let fullResponse = '';
+      let metadata: Record<string, unknown> | undefined;
+      const allToolCallNames: string[] = [];
+
+      const MAX_TOOL_ROUNDS = 5;
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        let roundText = '';
+        const roundToolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
+
+        const generator = openRouter.chatStream(
+          llmMessages,
+          { temperature: 0.7, tools: WORKOUT_TOOLS },
+        );
+
+        for await (const chunk of generator) {
+          if (chunk.type === 'text') {
+            roundText += chunk.content;
+            fullResponse += chunk.content;
+            await sendEvent({ type: 'text-chunk', content: chunk.content });
+          } else if (chunk.type === 'tool_call_start') {
             await sendEvent({
               type: 'tool-call',
-              toolCall: {
+              toolCall: { id: '', name: chunk.name, arguments: {} },
+            });
+          } else if (chunk.type === 'tool_call') {
+            try {
+              const args = JSON.parse(chunk.toolCall.arguments);
+              roundToolCalls.push({
                 id: chunk.toolCall.id,
                 name: chunk.toolCall.name,
                 arguments: args,
-              },
-            });
-          } catch (e) {
-            console.error('Failed to parse tool call arguments:', e);
+              });
+            } catch (e) {
+              console.error('Failed to parse tool call arguments:', e);
+            }
           }
         }
-      }
 
-      await sendEvent({ type: 'text-done' });
+        if (roundToolCalls.length === 0) break;
 
-      // Execute tool calls and send results
-      let metadata: Record<string, unknown> | undefined = undefined;
+        llmMessages.push({
+          role: 'assistant',
+          content: roundText || null,
+          tool_calls: roundToolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+          })),
+        });
 
-      for (const toolCall of toolCalls) {
-        try {
-          if (toolCall.name === 'create_workout_plan') {
-            // Handle plan creation/editing
-            const args = toolCall.arguments as {
-              goal: string;
-              weeksDuration?: number;
-              sessionsPerWeek?: number;
-              schedule: Array<{
-                dayNumber: number;
-                dayName: string;
-                workoutType: string;
-                workoutColor: string;
-                exercises: WorkoutDayData['exercises'];
-              }>;
-              isEdit?: boolean;
-            };
+        let breakAfterTools = false;
 
-            // Create plan data structure
-            const planData = {
-              goal: args.goal,
-              weeksDuration: args.weeksDuration || 12,
-              sessionsPerWeek: args.sessionsPerWeek || args.schedule.length,
-              schedule: args.schedule,
-            };
+        for (const toolCall of roundToolCalls) {
+          allToolCallNames.push(toolCall.name);
 
-            metadata = {
-              type: 'plan_preview',
-              planData,
-            };
+          if (toolCall.name === 'ask_user') {
+            const args = toolCall.arguments as { questions: AskUserQuestion[] };
+            await sendEvent({ type: 'ask-user', questions: args.questions });
 
-            // Send tool result
+            llmMessages.push({
+              role: 'tool',
+              content: JSON.stringify({ status: 'questions_sent' }),
+              tool_call_id: toolCall.id,
+            });
+
+            breakAfterTools = true;
+            break;
+          }
+
+          try {
+            const { result, metadata: toolMeta } = await executeTool(toolCall, userId);
+            if (toolMeta) metadata = toolMeta;
+
             await sendEvent({
               type: 'tool-result',
-              toolResult: {
-                toolCallId: toolCall.id,
-                result: { success: true, planData },
-              },
+              toolResult: { toolCallId: toolCall.id, result },
             });
-          } else if (toolCall.name === 'analyze_workout') {
-            // Handle workout analysis
-            const args = toolCall.arguments as {
-              adjustmentId: string;
-              summary: string;
-              exercises: Array<{
-                name: string;
-                exerciseType?: string;
-                currentWeight: number;
-                currentSets: number;
-                currentReps: number;
-                currentRepsPerSet?: number[];
-                currentWeightsUsed?: number[];
-                currentDistanceUnit?: string;
-                currentRestTime?: number;
-                currentIntervalStructure?: string;
-                nextWeight: number;
-                nextSets: number;
-                nextReps: number;
-                nextDistanceUnit?: string;
-                nextRestTime?: number;
-                nextIntervalStructure?: string;
-                nextProgression?: string;
-                reasoning: string;
-              }>;
-            };
 
-            // Log the raw arguments for debugging
-            console.log('analyze_workout tool call arguments:', JSON.stringify(args, null, 2));
+            llmMessages.push({
+              role: 'tool',
+              content: JSON.stringify(result),
+              tool_call_id: toolCall.id,
+            });
 
-            // Validate adjustmentId format (should be a CUID, not a long string with text)
-            const adjId = args.adjustmentId?.trim();
-            if (!adjId || adjId.length > 30 || adjId.includes(' ')) {
-              console.error('Invalid adjustmentId format:', adjId);
-              throw new Error(`Invalid adjustmentId format. Expected a short ID string, got: "${adjId?.substring(0, 50)}...". Please use the exact adjustmentId from the system context.`);
+            if (toolCall.name === 'create_workout_plan' || toolCall.name === 'edit_workout_plan') {
+              breakAfterTools = true;
             }
+          } catch (error) {
+            console.error(`Tool execution error (${toolCall.name}):`, error);
+            const errorMsg = error instanceof Error ? error.message : 'Unknown error';
 
-            // Verify pending adjustment exists
-            const pendingAdj = await prisma.pendingAdjustment.findUnique({
-              where: { id: adjId },
-            });
-
-            if (!pendingAdj) {
-              throw new Error(`Pending adjustment ${adjId} not found. Cannot analyze workout without an adjustment record.`);
-            }
-
-            // Update pending adjustment with suggestions
-            await prisma.pendingAdjustment.update({
-              where: { id: adjId },
-              data: {
-                suggestions: args.exercises,
-              },
-            });
-
-            metadata = {
-              type: 'adjustment_preview',
-              adjustmentId: adjId,
-              adjustmentData: {
-                summary: args.summary,
-                exercises: args.exercises,
-              },
-            };
-            
-            // Store adjustmentId for future messages in this session
-            adjustmentId = adjId;
-
-            // Send tool result with adjustmentId
             await sendEvent({
-              type: 'tool-result',
-              toolResult: {
-                toolCallId: toolCall.id,
-                result: { 
-                  success: true, 
-                  adjustmentData: metadata.adjustmentData,
-                  adjustmentId: adjId,
-                },
-              },
+              type: 'error',
+              error: `Failed to execute ${toolCall.name}: ${errorMsg}`,
+            });
+
+            llmMessages.push({
+              role: 'tool',
+              content: JSON.stringify({ success: false, error: errorMsg }),
+              tool_call_id: toolCall.id,
             });
           }
-        } catch (error) {
-          console.error(`Tool execution error (${toolCall.name}):`, error);
-          await sendEvent({
-            type: 'error',
-            error: `Failed to execute ${toolCall.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          });
         }
+
+        if (breakAfterTools) break;
       }
 
       await sendEvent({ type: 'done' });
 
-      // Save assistant message
-      // If we have an adjustmentId and no specific metadata, include it
-      const messageMetadata = metadata || (adjustmentId ? { adjustmentId } : undefined);
-      
       await prisma.chatMessage.create({
         data: {
           sessionId,
           userId,
-          planId: planId || undefined,
           role: 'assistant',
           content: fullResponse,
-          metadata: messageMetadata as any,
+          metadata: (metadata as object) || undefined,
         },
       });
 
-      // Update session after assistant response
       const updatedSession = await prisma.chatSession.update({
         where: { id: sessionId },
         data: { updatedAt: new Date() },
       });
 
-      // Set title based on first message if no title exists
       if (!updatedSession.title) {
         const messageCount = await prisma.chatMessage.count({
           where: { sessionId },
@@ -417,12 +445,10 @@ export async function POST(request: NextRequest) {
 
         if (messageCount >= 2) {
           let title = 'General Chat';
-
-          // Determine title based on tool calls or content
-          if (toolCalls.some(tc => tc.name === 'create_workout_plan')) {
+          if (allToolCallNames.some((n) => n === 'create_workout_plan')) {
             title = 'Create Workout Plan';
-          } else if (toolCalls.some(tc => tc.name === 'analyze_workout')) {
-            title = 'Workout Analysis';
+          } else if (allToolCallNames.some((n) => n === 'edit_workout_plan')) {
+            title = 'Edit Workout Plan';
           }
 
           await prisma.chatSession.update({
@@ -446,7 +472,7 @@ export async function POST(request: NextRequest) {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+      Connection: 'keep-alive',
     },
   });
 }

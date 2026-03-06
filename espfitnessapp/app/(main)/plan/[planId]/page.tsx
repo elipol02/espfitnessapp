@@ -3,82 +3,93 @@ import { prisma } from '@/app/lib/db';
 import { notFound, redirect } from 'next/navigation';
 import { PlanViewerContent } from './PlanViewerContent';
 
-// Helper to migrate old progression object format to new string format
-function migrateProgression(prog: unknown): string | null {
-  if (!prog) return null;
-  if (typeof prog === 'string') return prog;
-  if (typeof prog === 'object' && prog !== null) {
-    const p = prog as { type?: string; increment?: number | string; frequency?: string };
-    if (p.type || p.increment || p.frequency) {
-      // Convert old object format to string
-      const type = p.type || 'linear';
-      let increment = '';
-      if (p.increment !== undefined) {
-        if (typeof p.increment === 'number') {
-          increment = p.increment < 1 
-            ? `+${(p.increment * 100).toFixed(0)}%`
-            : `+${p.increment} lbs`;
-        } else {
-          increment = String(p.increment);
-        }
-      }
-      const frequency = p.frequency || 'weekly';
-      return `${type} ${increment} ${frequency}`.trim();
-    }
-  }
-  return null;
-}
-
-async function getPlanData(planId: string, userId: string) {
-  const plan = await prisma.workoutPlan.findUnique({
-    where: { id: planId, userId },
-    include: {
-      workoutDays: {
-        include: {
-          exercises: {
-            orderBy: { order: 'asc' },
-          },
-        },
-        orderBy: { dayNumber: 'asc' },
-      },
-    },
-  });
-
-  if (!plan) return null;
-
-  // Serialize the plan data for client component and migrate progression fields
-  return {
-    ...plan,
-    startDate: plan.startDate ? plan.startDate.toISOString() : null,
-    createdAt: plan.createdAt.toISOString(),
-    updatedAt: plan.updatedAt.toISOString(),
-    workoutDays: plan.workoutDays.map((day: any) => ({
-      ...day,
-      exercises: day.exercises.map((ex: any) => ({
-        ...ex,
-        progression: migrateProgression(ex.progression),
-      })),
-    })),
-  };
-}
-
 export default async function PlanViewerPage({
   params,
 }: {
   params: Promise<{ planId: string }>;
 }) {
   const { session, error } = await validateSession();
-
   if (error || !session?.user?.id) {
     redirect('/login');
   }
 
   const { planId } = await params;
-  const plan = await getPlanData(planId, session.user.id);
+
+  const plan = await prisma.workoutPlan.findFirst({
+    where: { id: planId, userId: session.user.id },
+    include: {
+      dayAssignments: {
+        include: {
+          workoutType: {
+            include: {
+              exercises: { orderBy: { order: 'asc' } },
+            },
+          },
+        },
+        orderBy: { dayOfWeek: 'asc' },
+      },
+    },
+  });
 
   if (!plan) {
     notFound();
   }
 
-  return <PlanViewerContent plan={plan as any} />;
+  const allExerciseIds = plan.dayAssignments.flatMap((da) =>
+    da.workoutType.exercises.map((ex) => ex.id)
+  );
+
+  const recentEntries = await prisma.exerciseEntry.findMany({
+    where: { exerciseId: { in: allExerciseIds } },
+    orderBy: { createdAt: 'desc' },
+    select: { exerciseId: true, data: true },
+  });
+
+  const lastLiftedWeights: Record<string, { weight: number; weightUnit: string }> = {};
+  for (const entry of recentEntries) {
+    if (lastLiftedWeights[entry.exerciseId]) continue;
+    const data = entry.data as {
+      sets?: Array<{ weight?: number; weightUnit?: string; completed?: boolean }>;
+    };
+    if (data.sets && Array.isArray(data.sets)) {
+      const completedSets = data.sets.filter((s) => s.completed && s.weight != null);
+      if (completedSets.length > 0) {
+        const lastSet = completedSets[completedSets.length - 1];
+        lastLiftedWeights[entry.exerciseId] = {
+          weight: lastSet.weight!,
+          weightUnit: lastSet.weightUnit ?? 'lbs',
+        };
+      }
+    }
+  }
+
+  const serialized = {
+    id: plan.id,
+    name: plan.name,
+    status: plan.status,
+    startDate: plan.startDate ? plan.startDate.toISOString() : null,
+    endDate: plan.endDate ? plan.endDate.toISOString() : null,
+    dayAssignments: plan.dayAssignments.map((da) => ({
+      id: da.id,
+      dayOfWeek: da.dayOfWeek,
+      workoutType: {
+        id: da.workoutType.id,
+        name: da.workoutType.name,
+        color: da.workoutType.color,
+        category: da.workoutType.category,
+        exercises: da.workoutType.exercises.map((ex) => ({
+          id: ex.id,
+          name: ex.name,
+          exerciseType: ex.exerciseType,
+          config: ex.config as Record<string, unknown>,
+          progression: ex.progression as Record<string, unknown> | null,
+          groupTag: ex.groupTag,
+          order: ex.order,
+          notes: ex.notes,
+        })),
+      },
+    })),
+  };
+
+  return <PlanViewerContent plan={serialized} lastLiftedWeights={lastLiftedWeights} />;
 }

@@ -1,45 +1,252 @@
-// Workout Types
-export type WorkoutType = 'legs' | 'push' | 'pull' | 'full-body' | 'arms' | 'upper' | 'lower' | 'cardio' | 'core' | 'rest';
+// ─── Exercise Types ─────────────────────────────────────────────────────────
 
-export type WeightType = 'BW' | '1RM' | 'ABSOLUTE';
+export type ExerciseType =
+  | 'strength'
+  | 'distance'
+  | 'time'
+  | 'amrap'
+  | 'emom'
+  | 'round_block'
+  | 'tabata';
 
-export type PlanStatus = 'draft' | 'active' | 'completed' | 'archived';
+export type WeightType = 'absolute' | 'bodyweight' | 'percentage_1rm';
+export type WeightUnit = 'lbs' | 'kg';
+export type DistanceUnit = 'feet' | 'yards' | 'meters' | 'miles' | 'km';
 
-export type WorkoutLogStatus = 'in_progress' | 'completed' | 'skipped';
+// ─── Exercise Config (discriminated by exerciseType) ────────────────────────
 
-export type ChatRole = 'user' | 'assistant' | 'system';
+export interface StrengthConfig {
+  sets: number;
+  repsMin: number;
+  repsMax: number;
+  weightType: WeightType;
+  baseWeight: number;
+  weightUnit: WeightUnit;
+  restSeconds: number;
+  tempo?: string;
+}
 
-// Exercise Types - all supported exercise formats
-export type ExerciseType = 
-  | 'strength'      // Traditional sets x reps with weight
-  | 'cardio_time'   // Time-based cardio (duration in minutes)
-  | 'mobility_time' // Time-based mobility/stretching
-  | 'distance'      // Distance-based (e.g., suitcase carry 3x40ft)
-  | 'interval'      // Interval training (work/rest periods)
-  | 'amrap'         // As Many Reps/Rounds As Possible
-  | 'emom'          // Every Minute On the Minute
-  | 'tabata'        // 20s work, 10s rest intervals
-  | 'tempo';        // Tempo-controlled strength training
+export interface DistanceConfig {
+  sets: number;
+  distanceTarget: number;
+  distanceUnit: DistanceUnit;
+  restSeconds: number;
+  weight?: number;
+  weightUnit?: WeightUnit;
+}
 
-export type DistanceUnit = 'feet' | 'yards' | 'meters';
+export interface TimeConfig {
+  sets: number;
+  durationSeconds: number;
+  restSeconds: number;
+}
 
-export type IntervalIntensity = 'easy' | 'moderate' | 'hard';
-
-// Interval phase for complex interval workouts
-export interface IntervalPhase {
+export interface MovementDef {
   name: string;
-  duration: number; // in seconds
-  intensity?: IntervalIntensity;
+  reps?: number;
+  duration?: number;
+  weight?: number;
+  weightUnit?: WeightUnit;
 }
 
-// Interval structure for interval-type exercises
-export interface IntervalStructure {
-  type: 'simple' | 'complex';
+export interface AmrapConfig {
+  timeCap: number;
+  movements: MovementDef[];
+}
+
+export interface EmomConfig {
+  intervalSeconds: number;
+  totalMinutes: number;
+  movements: MovementDef[];
+}
+
+export interface RoundBlockConfig {
   rounds: number;
-  phases: IntervalPhase[];
+  restBetweenRounds: number;
+  movements: MovementDef[];
 }
 
-// User
+export interface TabataConfig {
+  rounds: number;
+  workSeconds: number;
+  restSeconds: number;
+  movements: MovementDef[];
+}
+
+export type ExerciseConfig =
+  | StrengthConfig
+  | DistanceConfig
+  | TimeConfig
+  | AmrapConfig
+  | EmomConfig
+  | RoundBlockConfig
+  | TabataConfig;
+
+// ─── Progression Rules ──────────────────────────────────────────────────────
+
+export interface LinearProgression {
+  type: 'linear';
+  incrementValue: number;
+  incrementUnit: string;
+}
+
+export interface DoubleProgression {
+  type: 'double_progression';
+  repsMin: number;
+  repsMax: number;
+  weightIncrement: number;
+  weightIncrementUnit: WeightUnit;
+}
+
+export interface NoProgression {
+  type: 'none';
+}
+
+export type ProgressionRule = LinearProgression | DoubleProgression | NoProgression;
+
+// ─── Template Models ────────────────────────────────────────────────────────
+
+export interface WorkoutType {
+  id: string;
+  userId: string;
+  name: string;
+  color: string;
+  category: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  exercises: Exercise[];
+}
+
+export interface Exercise {
+  id: string;
+  workoutTypeId: string;
+  name: string;
+  exerciseType: ExerciseType;
+  config: ExerciseConfig;
+  progression: ProgressionRule | null;
+  groupTag: string | null;
+  order: number;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ─── Plan Models ────────────────────────────────────────────────────────────
+
+export type PlanStatus = 'active' | 'archived';
+
+export interface WorkoutPlan {
+  id: string;
+  userId: string;
+  name: string;
+  status: PlanStatus;
+  startDate: Date | null;
+  endDate: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  dayAssignments: PlanDayAssignment[];
+}
+
+export interface PlanDayAssignment {
+  id: string;
+  planId: string;
+  dayOfWeek: number;
+  workoutTypeId: string;
+  workoutType: WorkoutType;
+}
+
+// ─── Session / Completed Workout Models ─────────────────────────────────────
+
+export type SessionStatus = 'in_progress' | 'completed';
+
+export interface WorkoutSession {
+  id: string;
+  userId: string;
+  workoutTypeId: string;
+  planId: string | null;
+  workoutDate: Date;
+  status: SessionStatus;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  notes: string | null;
+  rating: number | null;
+  createdAt: Date;
+  entries: ExerciseEntry[];
+}
+
+// ─── Exercise Entry Data (discriminated by exerciseType) ────────────────────
+
+export interface StrengthSetData {
+  reps: number;
+  weight: number;
+  weightUnit: WeightUnit;
+  completed: boolean;
+}
+
+export interface DistanceSetData {
+  distance: number;
+  distanceUnit: DistanceUnit;
+  durationSeconds?: number;
+  completed: boolean;
+}
+
+export interface TimeSetData {
+  durationSeconds: number;
+  completed: boolean;
+}
+
+export interface StrengthEntryData {
+  sets: StrengthSetData[];
+}
+
+export interface DistanceEntryData {
+  sets: DistanceSetData[];
+}
+
+export interface TimeEntryData {
+  sets: TimeSetData[];
+}
+
+export interface RoundsEntryData {
+  roundsCompleted: number;
+  timeElapsed: number;
+}
+
+export type ExerciseEntryData =
+  | StrengthEntryData
+  | DistanceEntryData
+  | TimeEntryData
+  | RoundsEntryData;
+
+export interface ExerciseEntry {
+  id: string;
+  sessionId: string;
+  exerciseId: string;
+  data: ExerciseEntryData;
+  createdAt: Date;
+  exercise?: Exercise;
+}
+
+// ─── Progression Suggestions ────────────────────────────────────────────────
+
+export interface ProgressionSuggestion {
+  exerciseId: string;
+  lastWeight?: number;
+  lastReps?: number;
+  lastDistance?: number;
+  lastDuration?: number;
+  suggestedWeight?: number;
+  suggestedReps?: number;
+  suggestedDistance?: number;
+  suggestedDuration?: number;
+  unit: string;
+  display: string;
+}
+
+export type SuggestionMap = Record<string, ProgressionSuggestion>;
+
+// ─── User ───────────────────────────────────────────────────────────────────
+
 export interface User {
   id: string;
   email: string;
@@ -49,220 +256,68 @@ export interface User {
   createdAt: Date;
 }
 
-// User Stats
-export interface UserStats {
-  id: string;
-  userId: string;
-  currentStreak: number;
-  longestStreak: number;
-  personalRecords: Record<string, PersonalRecord>;
-  progressPercentage: number;
-  lastWorkout: Date | null;
-  updatedAt: Date;
-}
 
-export interface PersonalRecord {
-  exercise: string;
-  weight: number;
-  reps: number;
-  date: Date;
-}
+// ─── Chat ───────────────────────────────────────────────────────────────────
 
-// Workout Plan
-export interface WorkoutPlan {
-  id: string;
-  userId: string;
-  goal: string;
-  aiContext: AIContext | null;
-  status: PlanStatus;
-  weeksDuration: number;
-  createdAt: Date;
-  workoutDays: WorkoutDay[];
-}
+export type ChatRole = 'user' | 'assistant' | 'system';
 
-export interface AIContext {
-  sessionLength?: number;
-  sessionsPerWeek?: number;
-  experienceLevel?: string;
-  equipment?: string[];
-  conversationHistory?: string[];
-}
-
-// Workout Day
-export interface WorkoutDay {
-  id: string;
-  planId: string;
-  dayNumber: number;
-  dayName: string;
-  workoutType: WorkoutType;
-  workoutColor: string;
-  metadata: Record<string, unknown> | null;
-  exercises: Exercise[];
-}
-
-// Exercise
-export interface Exercise {
-  id: string;
-  dayId: string;
-  name: string;
-  exerciseType: ExerciseType;
-  order: number;
-  
-  // Strength exercise fields (sets x reps with weight)
-  sets: number;
-  reps: number;
-  weightType: WeightType;
-  weightValue: number;
-  restTime: number;
-  
-  // Time-based exercise fields (cardio_time, mobility_time)
-  duration?: number;           // Duration in minutes
-  
-  // Distance-based exercise fields
-  distance?: number;           // Target distance (e.g., 40)
-  distanceUnit?: DistanceUnit; // feet, yards, meters
-  
-  // Interval exercise fields
-  intervals?: IntervalStructure; // { type, rounds, phases[] }
-  
-  // Tempo exercise fields  
-  tempo?: string;              // Tempo pattern (e.g., "3-1-3-1")
-  
-  // AMRAP/EMOM/Tabata fields
-  timeCap?: number;            // Time cap in seconds
-  movements?: Movement[];      // List of movements for complex workouts
-  
-  // Common fields
-  progression: ProgressionStrategy | null;
-  movementDetails: MovementDetails | null;
-}
-
-// Movement within AMRAP/EMOM/Tabata
-export interface Movement {
-  name: string;
-  reps?: number;               // Reps per round/minute
-  duration?: number;           // Duration in seconds (alternative to reps)
-  weight?: number;             // Weight if applicable
-  weightType?: WeightType;
-}
-
-export type ProgressionStrategy = string; // e.g., "linear +5 lbs weekly", "add 1 rep each session", "wave loading", etc.
-
-export interface MovementDetails {
-  description: string;
-  cues: string[];
-  muscles: string[];
-  videoUrl?: string;
-}
-
-// Workout Log
-export interface WorkoutLog {
-  id: string;
-  userId: string;
-  planId: string;
-  dayId: string;
-  workoutDate: Date;
-  status: WorkoutLogStatus;
-  startedAt: Date | null;
-  completedAt: Date | null;
-  feedback: WorkoutFeedback | null;
-  createdAt: Date;
-  exerciseLogs: ExerciseLog[];
-}
-
-export interface WorkoutFeedback {
-  rating: 1 | 2 | 3 | 4 | 5;
-  notes?: string;
-  difficulty?: 'easy' | 'moderate' | 'hard' | 'very_hard';
-}
-
-// Exercise Log
-export interface ExerciseLog {
-  id: string;
-  logId: string;
-  exerciseId: string;
-  setsCompleted: number;
-  repsPerSet: number[];
-  weightUsed: number[]; // Array of weights, one per set
-  isPR: boolean;
-  notes: string | null;
-}
-
-// Chat Message
 export interface ChatMessage {
   id: string;
   userId: string;
-  planId: string | null;
   role: ChatRole;
   content: string;
   metadata: ChatMetadata | null;
+  approved: boolean;
   createdAt: Date;
 }
 
 export interface ChatMetadata {
-  type?: 'plan_preview' | 'approval_request' | 'workout_summary' | 'feedback_request';
-  planData?: Partial<WorkoutPlan>;
-  actionButtons?: ActionButton[];
+  type?: 'plan_preview';
+  planData?: PlanData;
 }
 
-export interface ActionButton {
-  id: string;
-  label: string;
-  action: string;
-  variant?: 'primary' | 'secondary' | 'ghost';
+export interface PlanData {
+  name: string;
+  schedule: PlanDayData[];
 }
 
-// API Response Types
+export interface PlanDayData {
+  dayOfWeek: number;
+  dayName: string;
+  workoutTypeName: string;
+  workoutTypeColor: string;
+  workoutTypeCategory?: string;
+  exercises: PlanExerciseData[];
+}
+
+export interface PlanExerciseData {
+  name: string;
+  exerciseType: ExerciseType;
+  config: ExerciseConfig;
+  progression?: ProgressionRule;
+  groupTag?: string;
+  order: number;
+  notes?: string;
+}
+
+// ─── API Response Types ─────────────────────────────────────────────────────
+
 export interface APIResponse<T> {
   success: boolean;
   data?: T;
   error?: string;
 }
 
-// Calendar Types
-export interface CalendarDay {
-  date: Date;
-  workoutDay: WorkoutDay | null;
-  workoutLog: WorkoutLog | null;
-  isToday: boolean;
-  isCurrentMonth: boolean;
-}
+// ─── SSE Streaming Types ────────────────────────────────────────────────────
 
-// Live Workout Types
-export interface LiveWorkoutState {
-  workoutLogId: string;
-  planId: string;
-  dayId: string;
-  currentExerciseIndex: number;
-  exercises: LiveExercise[];
-  startedAt: Date;
-  restTimerEnd: Date | null;
-}
-
-export interface LiveExercise {
-  exercise: Exercise;
-  completedSets: CompletedSet[];
-  targetSets: number;
-  targetReps: number;
-  targetWeight: number;
-}
-
-export interface CompletedSet {
-  setNumber: number;
-  reps: number;
-  weight: number;
-  completedAt: Date;
-}
-
-// SSE Streaming Types
-export type SSEEventType = 
-  | 'text-chunk'           // Token from conversational response
-  | 'text-done'            // Conversational text complete
-  | 'tool-call'            // Tool call detected (includes tool name and args)
-  | 'tool-result'          // Tool execution result
-  | 'error'                // Something went wrong
-  | 'done'                 // Generation complete
-  | 'cancelled';           // User stopped generation
+export type SSEEventType =
+  | 'text-chunk'
+  | 'text-done'
+  | 'tool-call'
+  | 'tool-result'
+  | 'error'
+  | 'done'
+  | 'cancelled';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -277,51 +332,31 @@ export interface SSEEvent {
     result: unknown;
   };
   error?: string;
-  progress?: {
-    current: number;
-    total: number;
-    label: string;
-  };
 }
 
-export interface StreamingWorkoutDay {
-  dayNumber: number;
-  dayName: string;
-  workoutType: string;
-  workoutColor: string;
-  exercises: Array<{
-    name: string;
-    sets: number;
-    reps: number;
-    weightType: string;
-    weightValue: number;
-    restTime?: number;
-    exerciseType?: string;
-    progression?: string;
-    movementDetails?: {
-      description: string;
-      cues: string[];
-      muscles: string[];
-    };
-    distance?: number;
-    distanceUnit?: string;
-    intervals?: object;
-    tempo?: string;
-    timeCap?: number;
-  }>;
+// ─── Calendar Types ─────────────────────────────────────────────────────────
+
+export interface CalendarDay {
+  date: Date;
+  workoutType: WorkoutType | null;
+  session: WorkoutSession | null;
+  isToday: boolean;
+  isCurrentMonth: boolean;
 }
 
-export interface StreamingExerciseAdjustment {
-  name: string;
-  currentWeight: number;
-  currentSets: number;
-  currentReps: number;
-  currentRestTime?: number;
-  currentProgression?: string;
-  nextWeight: number;
-  nextSets: number;
-  nextReps: number;
-  nextRestTime?: number;
-  nextProgression?: string;
-  reasoning: string;
+// ─── Live Workout Types ─────────────────────────────────────────────────────
+
+export interface LiveWorkoutState {
+  sessionId: string;
+  workoutTypeId: string;
+  planId: string | null;
+  currentExerciseIndex: number;
+  exercises: LiveExercise[];
+  startedAt: Date;
+}
+
+export interface LiveExercise {
+  exercise: Exercise;
+  entryData: ExerciseEntryData | null;
+  suggestion: ProgressionSuggestion | null;
 }

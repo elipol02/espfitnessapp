@@ -70,17 +70,6 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Create initial user stats
-    await prisma.userStats.create({
-      data: {
-        userId: user.id,
-        currentStreak: 0,
-        longestStreak: 0,
-        personalRecords: {},
-        progressPercentage: 0,
-      },
-    });
-
     return NextResponse.json({
       success: true,
       data: {

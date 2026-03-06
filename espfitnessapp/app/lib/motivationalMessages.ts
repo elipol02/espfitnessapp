@@ -298,6 +298,27 @@ const MESSAGE_POOL: MessageConfig[] = [
  * @param progressPercentage - How far through the program (0-100%)
  * @param completionRate - Percentage of scheduled workouts completed (0-100%)
  */
+/**
+ * Deterministic pseudo-random number in [0, 1) seeded by an integer.
+ * Uses a simple xorshift to spread values across the range.
+ */
+function seededRandom(seed: number): number {
+  let s = seed ^ (seed << 13);
+  s ^= s >> 7;
+  s ^= s << 17;
+  return (s >>> 0) / 0x100000000;
+}
+
+/**
+ * Returns a stable seed based on today's date + the current progress values.
+ * The message stays the same all day but changes when progress/completion changes.
+ */
+function dailySeed(progressPercentage: number, completionRate: number): number {
+  const today = new Date();
+  const datePart = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate();
+  return datePart * 10000 + progressPercentage * 101 + completionRate;
+}
+
 export function getMotivationalMessage(
   progressPercentage: number,
   completionRate: number
@@ -312,16 +333,15 @@ export function getMotivationalMessage(
   });
 
   if (matches.length === 0) {
-    // Fallback message if no match found
     return "Keep going";
   }
 
-  // Pick a random config from matches
-  const selectedConfig = matches[Math.floor(Math.random() * matches.length)];
-  
-  // Pick a random message from that config
+  const seed = dailySeed(progressPercentage, completionRate);
+
+  // Pick a config, then a message — both deterministic for the day
+  const selectedConfig = matches[Math.floor(seededRandom(seed) * matches.length)];
   const messages = selectedConfig.messages;
-  return messages[Math.floor(Math.random() * messages.length)];
+  return messages[Math.floor(seededRandom(seed + 1) * messages.length)];
 }
 
 /**

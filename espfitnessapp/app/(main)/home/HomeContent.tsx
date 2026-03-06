@@ -1,31 +1,27 @@
 'use client';
 
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
-import { Target, ChevronRight, CalendarX, CheckCircle2, Calendar, Check } from 'lucide-react';
-import { getMotivationalMessage, calculateProgressPercentage, calculateCompletionRate } from '@/app/lib/motivationalMessages';
+import { ChevronRight, CheckCircle2, X, Calendar, Check } from 'lucide-react';
+import { LoadingSpinner } from '@/app/components/LoadingSpinner';
 
-interface WorkoutData {
-  id: string;
-  dayName: string;
-  workoutType: string;
-  workoutColor: string;
-  scheduledDate: string | null;
-  exercises: {
+interface DayAssignment {
+  dayOfWeek: number;
+  workoutType: {
     id: string;
     name: string;
-    sets: number;
-    reps: number;
-    restTime: number;
-    exerciseType: string;
-    duration: number | null;
-    weightValue: number;
-    weightType: string;
-  }[];
+    color: string;
+    exerciseCount: number;
+    exercises: { id: string; name: string }[];
+  };
 }
 
-interface WorkoutLogData {
+interface SessionData {
   id: string;
+  workoutTypeId: string;
+  workoutDate: string;
   status: string;
 }
 
@@ -35,199 +31,126 @@ interface HomeData {
     bodyweight: number | null;
     onboardingCompleted: boolean;
   } | null;
-  userStats: {
-    currentStreak: number;
-    progressPercentage: number;
-  } | null;
+  currentStreak: number;
   activePlan: {
     id: string;
-    goal: string;
+    name: string;
     status: string;
     startDate: string | null;
-    durationWeeks: number;
+    endDate: string | null;
+    planCompletionPercentage: number | null;
+    dayAssignments: DayAssignment[];
   } | null;
-  currentWorkout: WorkoutData | null;
-  previousWorkout: WorkoutData | null;
-  nextWorkout: WorkoutData | null;
-  currentLog: WorkoutLogData | null;
-  previousLog: WorkoutLogData | null;
-  nextLog: WorkoutLogData | null;
-  allWorkoutDays: {
-    id: string;
-    dayName: string;
-    dayNumber: number;
-    workoutType: string;
-    workoutColor: string;
-    exerciseCount: number;
-    isGenerated: boolean;
-    scheduledDate: string | null;
-  }[];
-  recentLogs: {
-    id: string;
-    dayId: string;
-    workoutDate: string;
-    status: string;
-  }[];
-  daysMissed: number;
+  recentSessions: SessionData[];
   completedWorkouts: number;
-  weeksRemaining: number;
-  currentWeek: number;
+  missedWorkouts: number;
+  completionRateToDate: number;
+  motivationalMessage: string | null;
 }
 
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6 };
+
 export function HomeContent({ data }: { data: HomeData }) {
-  const { user, userStats, activePlan, currentWorkout, previousWorkout, nextWorkout, currentLog, previousLog, nextLog, allWorkoutDays, recentLogs, daysMissed, completedWorkouts, weeksRemaining } = data;
+  const router = useRouter();
+  const { user, currentStreak, activePlan, recentSessions, completedWorkouts, missedWorkouts, motivationalMessage } = data;
+  const [startingWorkout, setStartingWorkout] = useState<string | null>(null);
 
   const today = new Date();
-  const todayISO = today.toISOString();
   const formattedDate = today.toLocaleDateString('en-US', {
     weekday: 'long',
     month: 'short',
     day: 'numeric',
   });
 
-  // Build week preview based on CLIENT's local timezone
+  // Build week preview
   const clientToday = new Date();
   clientToday.setHours(0, 0, 0, 0);
-  
   const startOfWeek = new Date(clientToday);
   startOfWeek.setDate(clientToday.getDate() - clientToday.getDay());
-  
-  const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const weekPreview = daysOfWeek.map((dayName, index) => {
+
+  const planStartDate = activePlan?.startDate
+    ? (() => { const d = new Date(activePlan.startDate); d.setHours(0, 0, 0, 0); return d; })()
+    : null;
+
+  const planEndDate = activePlan?.endDate
+    ? (() => { const d = new Date(activePlan.endDate); d.setHours(0, 0, 0, 0); return d; })()
+    : null;
+
+  const weekPreview = DAY_NAMES.map((dayName, index) => {
     const dayDate = new Date(startOfWeek);
     dayDate.setDate(startOfWeek.getDate() + index);
-    const dayDateStr = dayDate.toISOString().split('T')[0]; // YYYY-MM-DD in local timezone
-    
-    // Find the workout scheduled for this specific date
-    const workoutDay = allWorkoutDays.find((d) => {
-      if (!d.scheduledDate) return false;
-      const scheduledDate = new Date(d.scheduledDate);
-      const scheduledDateStr = scheduledDate.toISOString().split('T')[0];
-      return scheduledDateStr === dayDateStr;
+    const dateStr = dayDate.toLocaleDateString('en-CA'); // YYYY-MM-DD
+
+    // Map JS day-of-week (0=Sun) to our 1=Mon..7=Sun
+    const dow = DAY_MAP[index];
+
+    const beforePlanStart = planStartDate ? dayDate < planStartDate : false;
+    const afterPlanEnd = planEndDate ? dayDate > planEndDate : false;
+
+    const rawAssignment = activePlan?.dayAssignments.find((a) => a.dayOfWeek === dow);
+    const assignment = rawAssignment;
+
+    const rawSession = recentSessions.find((s) => {
+      // Use UTC date slice directly — sessions are stored as UTC midnight of the local date string
+      const sDate = s.workoutDate.slice(0, 10);
+      const matchedAssignment = activePlan?.dayAssignments.find((a) => a.dayOfWeek === dow);
+      return sDate === dateStr && matchedAssignment && s.workoutTypeId === matchedAssignment.workoutType.id;
     });
-    
-    // Find if there's a log for this workout day on this date
-    const log = workoutDay ? recentLogs.find((l) => {
-      const logDate = new Date(l.workoutDate);
-      const logDateStr = logDate.toISOString().split('T')[0];
-      return logDateStr === dayDateStr && l.dayId === workoutDay.id;
-    }) : null;
-    
-    if (workoutDay) {
-      return {
-        id: workoutDay.id,
-        dayNumber: index,
-        dayName: workoutDay.dayName,
-        workoutType: workoutDay.workoutType,
-        workoutColor: workoutDay.workoutColor,
-        exerciseCount: workoutDay.exerciseCount,
-        isGenerated: workoutDay.isGenerated,
-        logId: log?.id || null,
-        logStatus: log?.status || null,
-        scheduledDate: workoutDay.scheduledDate,
-        calculatedDate: dayDate.toISOString(),
-      };
-    } else {
-      return {
-        id: null,
-        dayNumber: index,
-        dayName: dayName,
-        workoutType: 'rest',
-        workoutColor: '#404040',
-        exerciseCount: 0,
-        isGenerated: false,
-        logId: null,
-        logStatus: null,
-        scheduledDate: null,
-        calculatedDate: dayDate.toISOString(),
-      };
-    }
+
+    const session = rawSession;
+
+    return {
+      dayName,
+      dateStr,
+      dow,
+      dayDate,
+      isToday: index === clientToday.getDay(),
+      isFuture: dayDate > clientToday,
+      beforePlanStart,
+      afterPlanEnd,
+      assignment,
+      session,
+    };
   });
 
   const greeting = getGreeting();
   const userName = user?.name?.split(' ')[0] || 'there';
 
-  // Calculate motivational message using LOCAL date and client-side week preview
-  let motivationalMessage = '';
-  if (activePlan && activePlan.startDate) {
-    const progressPercentage = calculateProgressPercentage(activePlan.startDate, activePlan.durationWeeks);
-    
-    // Calculate completion rate based on actual data
-    // Count scheduled workouts that should have been done by today (local time)
-    const localToday = new Date();
-    localToday.setHours(0, 0, 0, 0);
-    
-    const startDate = new Date(activePlan.startDate);
-    startDate.setHours(0, 0, 0, 0);
-    
-    // Count scheduled workouts from weekPreview that are in the past or today
-    let scheduledWorkoutsSoFar = 0;
-    weekPreview.forEach(day => {
-      if (day.scheduledDate && day.workoutType !== 'rest') {
-        const scheduledDate = new Date(day.scheduledDate);
-        scheduledDate.setHours(0, 0, 0, 0);
-        if (scheduledDate <= localToday) {
-          scheduledWorkoutsSoFar++;
-        }
+
+  // Today's workout
+  const todayPreview = weekPreview.find((d) => d.isToday);
+  const todayAssignment = todayPreview?.assignment;
+  const todaySession = todayPreview?.session;
+
+  const startOrResumeWorkout = async (workoutTypeId: string, dateStr: string) => {
+    if (startingWorkout) return;
+    setStartingWorkout(workoutTypeId);
+    try {
+      const res = await fetch('/api/workout/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workoutTypeId,
+          date: dateStr,
+          planId: activePlan?.id,
+        }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        router.push(`/workout/live?sessionId=${result.data.sessionId}`);
       }
-    });
-    
-    // If we don't have enough data from weekPreview, estimate based on days passed
-    if (scheduledWorkoutsSoFar === 0) {
-      const daysPassed = Math.max(0, Math.floor((localToday.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
-      const weeksPassed = Math.floor(daysPassed / 7) + 1;
-      scheduledWorkoutsSoFar = Math.max(1, Math.floor(weeksPassed * 5));
+    } catch (error) {
+      console.error('Error starting workout:', error);
+    } finally {
+      setStartingWorkout(null);
     }
-    
-    // Add daysMissed to get total scheduled (completed + missed = total scheduled)
-    const totalScheduledSoFar = completedWorkouts + daysMissed;
-    
-    const completionRate = calculateCompletionRate(completedWorkouts, totalScheduledSoFar);
-    motivationalMessage = getMotivationalMessage(progressPercentage, completionRate);
-  }
+  };
 
-  // Determine which workout is "today's workout" based on local time
-  // Compare the scheduled dates with the client's local date
-  const localToday = new Date();
-  localToday.setHours(0, 0, 0, 0);
-  
-  let todayWorkout: WorkoutData | null = null;
-  let todayLog: WorkoutLogData | null = null;
-
-  // Check each workout to see which one matches today's local date
-  if (currentWorkout?.scheduledDate) {
-    const scheduledDate = new Date(currentWorkout.scheduledDate);
-    scheduledDate.setHours(0, 0, 0, 0);
-    if (scheduledDate.getTime() === localToday.getTime()) {
-      todayWorkout = currentWorkout;
-      todayLog = currentLog;
-    }
-  }
-
-  if (!todayWorkout && previousWorkout?.scheduledDate) {
-    const scheduledDate = new Date(previousWorkout.scheduledDate);
-    scheduledDate.setHours(0, 0, 0, 0);
-    if (scheduledDate.getTime() === localToday.getTime()) {
-      todayWorkout = previousWorkout;
-      todayLog = previousLog;
-    }
-  }
-
-  if (!todayWorkout && nextWorkout?.scheduledDate) {
-    const scheduledDate = new Date(nextWorkout.scheduledDate);
-    scheduledDate.setHours(0, 0, 0, 0);
-    if (scheduledDate.getTime() === localToday.getTime()) {
-      todayWorkout = nextWorkout;
-      todayLog = nextLog;
-    }
-  }
-
-  // No active plan - show empty state
   if (!activePlan) {
     return (
-    <div className="px-5 pt-10 pb-28">
-      <div className="max-w-lg mx-auto space-y-8">
-          {/* Header */}
+      <div className="px-5 pt-10 pb-28">
+        <div className="max-w-lg mx-auto space-y-8">
           <div>
             <p className="text-muted-foreground">{formattedDate}</p>
             <h1 className="text-2xl font-bold text-foreground mt-1">
@@ -235,21 +158,14 @@ export function HomeContent({ data }: { data: HomeData }) {
             </h1>
           </div>
 
-          {/* Empty State */}
           <div className="bg-surface rounded-2xl p-10 text-center space-y-8">
             <div className="text-6xl">🏋️</div>
             <div className="space-y-2">
-              <h2 className="text-xl font-bold text-foreground">
-                Start your fitness journey
-              </h2>
-              <p className="text-muted-foreground">
-                Create your first personalized workout plan with AI
-              </p>
+              <h2 className="text-xl font-bold text-foreground">Start your fitness journey</h2>
+              <p className="text-muted-foreground">Create your first personalized workout plan with AI</p>
             </div>
             <Link href="/chat">
-              <Button size="lg" fullWidth>
-                Create Your Plan
-              </Button>
+              <Button size="lg" fullWidth>Create Your Plan</Button>
             </Link>
           </div>
         </div>
@@ -267,46 +183,42 @@ export function HomeContent({ data }: { data: HomeData }) {
             {greeting}, {userName}!
           </h1>
           {motivationalMessage && (
-            <p className="text-lg font-medium text-foreground/80 mt-2 italic">
-              {motivationalMessage}
-            </p>
+            <p className="text-sm text-muted-foreground mt-1 italic">{motivationalMessage}</p>
           )}
         </div>
 
-        {/* Progress toward goal */}
-        {userStats && userStats.progressPercentage > 0 && (
+        {/* Progress */}
+        {activePlan.planCompletionPercentage !== null ? (
           <div className="bg-surface rounded-xl p-4 space-y-2">
             <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground flex items-center gap-2">
-                <Target className="w-4 h-4" />
-                Progress toward goal
-              </span>
-              <span className="font-medium text-foreground">
-                {Math.round(userStats.progressPercentage)}%
-              </span>
+              <span className="text-muted-foreground">Plan Completion</span>
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-foreground">{activePlan.planCompletionPercentage}%</span>
+                {activePlan.endDate && (
+                  <span className="text-xs text-muted-foreground">
+                    ends {new Date(activePlan.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="h-2 bg-background rounded-full overflow-hidden">
               <div
                 className="h-full bg-primary rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, userStats.progressPercentage)}%` }}
+                style={{ width: `${Math.min(100, activePlan.planCompletionPercentage)}%` }}
               />
             </div>
           </div>
-        )}
+        ) : null}
 
         {/* Today's Workout Card */}
-        {todayWorkout ? (
+        {todayAssignment ? (
           <div className="bg-surface rounded-2xl p-7 space-y-5">
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-sm text-muted-foreground uppercase tracking-wide">
-                  Today&apos;s Workout
-                </p>
-                <h2 className="text-xl font-bold text-foreground mt-1">
-                  {todayWorkout.workoutType.charAt(0).toUpperCase() + todayWorkout.workoutType.slice(1)}
-                </h2>
+                <p className="text-sm text-muted-foreground uppercase tracking-wide">Today&apos;s Workout</p>
+                <h2 className="text-xl font-bold text-foreground mt-1">{todayAssignment.workoutType.name}</h2>
               </div>
-              {todayLog?.status === 'completed' && (
+              {todaySession?.status === 'completed' && (
                 <div className="flex items-center gap-2 text-success">
                   <span className="text-sm font-medium">Completed</span>
                   <div className="w-6 h-6 rounded-full bg-success flex items-center justify-center">
@@ -316,218 +228,170 @@ export function HomeContent({ data }: { data: HomeData }) {
               )}
             </div>
 
-            <div className="flex items-center gap-4 text-sm text-muted-foreground">
-              <span>{todayWorkout.exercises.length} exercises</span>
-            </div>
-
-            {/* Exercise List */}
-            <div className="space-y-2">
-              {todayWorkout.exercises.map((exercise) => (
-                <div
-                  key={exercise.id}
-                  className="flex items-center justify-between text-sm"
-                >
-                  <span className="text-foreground">{exercise.name}</span>
-                  <span className="text-muted-foreground">
-                    {formatExerciseDisplay(exercise)}
-                  </span>
+            <div className="space-y-1.5">
+              {todayAssignment.workoutType.exercises.map((exercise) => (
+                <div key={exercise.id} className="text-sm text-muted-foreground">
+                  {exercise.name}
                 </div>
               ))}
             </div>
 
-            {/* Action Button */}
-            {todayLog?.status === 'in_progress' ? (
-              <Link href={`/workout/live?logId=${todayLog.id}`}>
-                <Button fullWidth size="lg" variant="secondary">
-                  Resume Workout
-                </Button>
-              </Link>
-            ) : todayLog?.status === 'completed' ? (
-              <Link href={`/workout/live?logId=${todayLog.id}`}>
-                <Button fullWidth size="lg" variant="secondary">
-                  View Workout
-                </Button>
-              </Link>
+            {todaySession?.status === 'in_progress' ? (
+              <Button
+                fullWidth
+                size="lg"
+                variant="secondary"
+                onClick={() => router.push(`/workout/live?sessionId=${todaySession.id}`)}
+              >
+                Resume Workout
+              </Button>
+            ) : todaySession?.status === 'completed' ? (
+              <Button
+                fullWidth
+                size="lg"
+                variant="secondary"
+                onClick={() => router.push(`/workout/live?sessionId=${todaySession.id}`)}
+              >
+                View Workout
+              </Button>
             ) : (
-              <Link href={`/workout/live?dayId=${todayWorkout.id}&planId=${activePlan.id}&date=${todayISO}`}>
-                <Button fullWidth size="lg">
-                  Start Workout
-                </Button>
-              </Link>
+              <Button
+                fullWidth
+                size="lg"
+                disabled={startingWorkout !== null}
+                onClick={() => startOrResumeWorkout(todayAssignment.workoutType.id, todayPreview!.dateStr)}
+              >
+                {startingWorkout === todayAssignment.workoutType.id ? <LoadingSpinner size="sm" /> : 'Start Workout'}
+              </Button>
             )}
           </div>
         ) : (
-          /* Rest Day */
           <div className="bg-surface rounded-2xl p-6 text-center space-y-3">
             <div className="text-4xl">😴</div>
             <div>
               <h2 className="text-xl font-bold text-foreground">Rest Day</h2>
-              <p className="text-muted-foreground mt-1">
-                Recovery is part of the process!
-              </p>
+              <p className="text-muted-foreground mt-1">Recovery is part of the process!</p>
             </div>
           </div>
         )}
 
         {/* Week Preview */}
-        {weekPreview.length > 0 && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-medium text-foreground">This Week</h3>
-              <Link
-                href="/calendar"
-                className="text-sm text-primary flex items-center gap-1 hover:text-primary-hover transition-colors"
-              >
-                View Calendar
-                <ChevronRight className="w-4 h-4" />
-              </Link>
-            </div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="font-medium text-foreground">This Week</h3>
+            <Link
+              href="/calendar"
+              className="text-sm text-primary flex items-center gap-1 hover:text-primary-hover transition-colors"
+            >
+              View Calendar
+              <ChevronRight className="w-4 h-4" />
+            </Link>
+          </div>
 
-            <div className="flex gap-2 overflow-x-auto pb-2 pt-1">
-              {weekPreview.map((day, index) => {
-                // Since we built the week preview using client's local timezone, 
-                // we can directly check if this is today's day of week
-                const isToday = index === clientToday.getDay();
-                const dayAbbr = day.dayName.slice(0, 3);
-                const hasWorkout = day.id && day.workoutType !== 'rest' && day.exerciseCount > 0;
-                const isCompleted = day.logStatus === 'completed';
-                
-                // Check if this workout is in the future
-                const isFuture = day.scheduledDate ? (() => {
-                  const today = new Date();
-                  today.setHours(0, 0, 0, 0);
-                  const scheduledDate = new Date(day.scheduledDate);
-                  scheduledDate.setHours(0, 0, 0, 0);
-                  return scheduledDate > today;
-                })() : false;
+          <div className="flex gap-2 overflow-x-auto pb-2 pt-1">
+            {weekPreview.map((day) => {
+              const isCompleted = day.session?.status === 'completed';
+              // Show workout indicator if: completed session exists, OR assigned day within plan date range
+              const hasWorkout = !!day.assignment && (isCompleted || (!day.beforePlanStart && !day.afterPlanEnd));
+              const color = day.assignment?.workoutType.color || '#404040';
 
-                const content = (
+              const content = (
+                <div
+                  className={`
+                    flex flex-col items-center gap-2 py-3 rounded-lg min-h-[110px] w-[75px] flex-shrink-0
+                    ${day.isToday ? 'bg-surface ring-2 ring-primary' : 'bg-surface/50'}
+                    ${hasWorkout ? 'hover:bg-surface transition-colors' : ''}
+                    ${hasWorkout && day.isFuture ? 'opacity-60' : ''}
+                  `}
+                >
+                  <span className="text-xs text-muted-foreground">{day.dayName.slice(0, 3)}</span>
                   <div
-                    className={`
-                      flex flex-col items-center gap-2 py-3 rounded-lg min-h-[110px] w-[75px] flex-shrink-0
-                      ${isToday ? 'bg-surface ring-2 ring-primary' : 'bg-surface/50'}
-                      ${hasWorkout && !isCompleted ? 'cursor-pointer hover:bg-surface transition-colors' : ''}
-                    `}
+                    className="rounded-full flex items-center justify-center flex-shrink-0"
+                    style={{
+                      width: '28px',
+                      height: '28px',
+                      backgroundColor: !hasWorkout ? 'transparent' : isCompleted ? color : color + '30',
+                      border: !hasWorkout ? '2px solid var(--border)' : isCompleted ? 'none' : `2px solid ${color}`,
+                    }}
                   >
-                    <span className="text-xs text-muted-foreground">{dayAbbr}</span>
-                    <div
-                      className="rounded-full flex items-center justify-center flex-shrink-0"
-                      style={{ 
-                        width: '28px',
-                        height: '28px',
-                        backgroundColor: day.workoutType === 'rest' 
-                          ? 'transparent' 
-                          : isCompleted
-                          ? day.workoutColor
-                          : day.workoutColor + '30',
-                        border: day.workoutType === 'rest' 
-                          ? '2px solid var(--border)' 
-                          : isCompleted
-                          ? 'none'
-                          : `2px solid ${day.workoutColor}`,
-                      }}
-                    >
-                      {isCompleted ? (
-                        <span className="text-white text-xs">✓</span>
-                      ) : (
-                        <span className="text-xs font-medium" style={{ color: day.workoutType === 'rest' ? 'var(--muted)' : day.workoutColor }}>
-                          {day.workoutType === 'rest' ? '' : day.workoutType.charAt(0).toUpperCase()}
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-xs capitalize text-muted-foreground text-center leading-tight w-full px-1">
-                      {day.workoutType}
-                    </span>
+                    {isCompleted ? (
+                      <Check size={14} className="text-white" />
+                    ) : hasWorkout ? (
+                      <span className="text-xs font-medium" style={{ color }}>
+                        {day.assignment!.workoutType.name.charAt(0).toUpperCase()}
+                      </span>
+                    ) : null}
                   </div>
-                );
+                  <span className="text-xs capitalize text-muted-foreground text-center leading-tight w-full px-1">
+                    {hasWorkout ? day.assignment!.workoutType.name : 'Rest'}
+                  </span>
+                </div>
+              );
 
-                // If completed, link to view
-                if (isCompleted && day.logId) {
-                  return (
-                    <Link
-                      key={day.dayNumber}
-                      href={`/workout/live?logId=${day.logId}`}
-                    >
-                      {content}
-                    </Link>
-                  );
-                }
-
-                // If has workout log (in progress), link to resume
-                if (hasWorkout && day.logId) {
-                  return (
-                    <Link
-                      key={day.dayNumber}
-                      href={`/workout/live?logId=${day.logId}`}
-                    >
-                      {content}
-                    </Link>
-                  );
-                }
-
-                // If has workout but no log - check if future or not
-                if (hasWorkout && day.isGenerated) {
-                  // For future workouts, add preview=true
-                  const url = isFuture
-                    ? `/workout/live?dayId=${day.id}&planId=${activePlan.id}&date=${day.calculatedDate}&preview=true`
-                    : `/workout/live?dayId=${day.id}&planId=${activePlan.id}&date=${day.calculatedDate}`;
-                  
-                  return (
-                    <Link
-                      key={day.dayNumber}
-                      href={url}
-                    >
-                      {content}
-                    </Link>
-                  );
-                }
-
-                // Rest day or no workout generated yet
+              if (day.session) {
                 return (
-                  <div key={day.dayNumber}>
+                  <div
+                    key={day.dow}
+                    onClick={() => router.push(`/workout/live?sessionId=${day.session!.id}`)}
+                    className="cursor-pointer"
+                  >
                     {content}
                   </div>
                 );
-              })}
-            </div>
-          </div>
-        )}
+              }
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-3 gap-3">
-          {/* Completed Workouts */}
-          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
-            <CheckCircle2 className="w-5 h-5 text-success mb-2" />
-            <span className="text-2xl font-bold text-foreground">
-              {completedWorkouts}
-            </span>
-            <span className="text-xs text-muted-foreground text-center mt-1">
-              Completed
-            </span>
-          </div>
+              if (hasWorkout) {
+                return (
+                  <div
+                    key={day.dow}
+                    onClick={() => {
+                      if (day.isFuture) {
+                        router.push(`/workout/preview?workoutTypeId=${day.assignment!.workoutType.id}&date=${day.dateStr}`);
+                      } else {
+                        startOrResumeWorkout(day.assignment!.workoutType.id, day.dateStr);
+                      }
+                    }}
+                    className="cursor-pointer"
+                  >
+                    {content}
+                  </div>
+                );
+              }
 
-          {/* Workouts Missed */}
-          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
-            <CalendarX className="w-5 h-5 text-muted-foreground mb-2" />
-            <span className="text-2xl font-bold text-foreground">
-              {daysMissed}
-            </span>
-            <span className="text-xs text-muted-foreground text-center mt-1">
-              Missed
-            </span>
-          </div>
-
-          {/* Weeks Remaining */}
-          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
-            <Calendar className="w-5 h-5 text-primary mb-2" />
-            <span className="text-2xl font-bold text-foreground">
-              {weeksRemaining}
-            </span>
-            <span className="text-xs text-muted-foreground text-center mt-1">
-              Weeks left
-            </span>
+              return <div key={day.dow}>{content}</div>;
+            })}
           </div>
         </div>
+
+        {/* Stats */}
+        <div className="grid grid-cols-3 gap-3">
+          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
+            <CheckCircle2 className="w-5 h-5 text-success mb-2" />
+            <span className="text-2xl font-bold text-foreground">{completedWorkouts}</span>
+            <span className="text-xs text-muted-foreground text-center mt-1">Completed</span>
+          </div>
+          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
+            <Calendar className="w-5 h-5 text-primary mb-2" />
+            <span className="text-2xl font-bold text-foreground">{currentStreak}</span>
+            <span className="text-xs text-muted-foreground text-center mt-1">Streak</span>
+          </div>
+          <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center">
+            <X className="w-5 h-5 mb-2" style={{ color: '#ef4444' }} />
+            <span className="text-2xl font-bold text-foreground">{missedWorkouts}</span>
+            <span className="text-xs text-muted-foreground text-center mt-1">Missed</span>
+          </div>
+        </div>
+
+        {/* View Plan */}
+        <Link href={`/plan/${activePlan.id}`}>
+          <div className="bg-surface rounded-xl p-4 flex items-center justify-between hover:bg-surface-elevated transition-colors">
+            <div>
+              <p className="font-medium text-foreground">{activePlan.name}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{activePlan.dayAssignments.length} training days</p>
+            </div>
+            <ChevronRight className="w-5 h-5 text-muted-foreground" />
+          </div>
+        </Link>
       </div>
     </div>
   );
@@ -538,36 +402,4 @@ function getGreeting(): string {
   if (hour < 12) return 'Good morning';
   if (hour < 18) return 'Good afternoon';
   return 'Good evening';
-}
-
-function formatExerciseDisplay(exercise: { sets: number; reps: number; exerciseType: string; duration: number | null; weightValue: number; weightType: string }): string {
-  if (exercise.exerciseType === 'cardio_time' || exercise.exerciseType === 'mobility_time') {
-    // Duration is stored in minutes, fall back to reps if duration is not set
-    // If duration is 0 or null/undefined, use reps; if that's also 0 or 1, show as time-based exercise
-    let minutes: number;
-    if (exercise.duration !== null && exercise.duration !== undefined && exercise.duration > 0) {
-      minutes = exercise.duration;
-    } else if (exercise.reps > 1) {
-      minutes = exercise.reps;
-    } else {
-      // If both duration and reps are not set properly, this exercise needs fixing
-      return 'Time-based';
-    }
-    return `${minutes} min`;
-  }
-  
-  // For strength exercises, show sets×reps @ weight
-  let display = `${exercise.sets}×${exercise.reps}`;
-  
-  if (exercise.weightValue > 0) {
-    if (exercise.weightType === 'BW') {
-      display += ` @ ${Math.round(exercise.weightValue * 100)}% BW`;
-    } else if (exercise.weightType === '1RM') {
-      display += ` @ ${Math.round(exercise.weightValue * 100)}% 1RM`;
-    } else {
-      display += ` @ ${exercise.weightValue} lbs`;
-    }
-  }
-  
-  return display;
 }

@@ -52,7 +52,7 @@ export default function RegisterPage() {
       if (result?.error) {
         setError('Account created but failed to sign in. Please try logging in.');
       } else {
-        router.push('/onboarding');
+        router.push('/home');
         router.refresh();
       }
     } catch {

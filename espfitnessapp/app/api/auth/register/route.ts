@@ -66,7 +66,7 @@ export async function POST(request: NextRequest) {
         email,
         password: hashedPassword,
         name,
-        onboardingCompleted: false,
+        onboardingCompleted: true,
       },
     });
 

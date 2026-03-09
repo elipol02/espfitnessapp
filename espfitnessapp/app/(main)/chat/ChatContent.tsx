@@ -371,6 +371,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
     } catch (error) {
       if ((error as Error).name === 'AbortError') {
         streamActiveRef.current = false;
+        streamingMessageIdRef.current = null;
         return;
       }
       console.error('Streaming error:', error);
@@ -582,7 +583,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
           <p className="text-center text-muted-foreground mb-6">What would you like to do?</p>
           <div className="flex flex-col gap-3 w-full max-w-sm">
             <button
-              onClick={() => { setInput('I want to create a new workout plan. '); inputRef.current?.focus(); }}
+              onClick={() => handleStreamingSend('I want to create a new workout plan.')}
               className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
             >
               <div className="w-10 h-10 rounded-full bg-success/20 flex items-center justify-center flex-shrink-0">
@@ -595,7 +596,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
             </button>
 
             <button
-              onClick={() => { setInput('I want to add my current workout plan. '); inputRef.current?.focus(); }}
+              onClick={() => handleStreamingSend('I want to add my current workout plan.')}
               className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
             >
               <div className="w-10 h-10 rounded-full bg-orange-500/20 flex items-center justify-center flex-shrink-0">
@@ -609,7 +610,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
 
             {activePlan && (
               <button
-                onClick={() => { setInput('I want to edit my existing workout plan. '); inputRef.current?.focus(); }}
+                onClick={() => handleStreamingSend('I want to edit my existing workout plan.')}
                 className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
               >
                 <div className="w-10 h-10 rounded-full bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
@@ -623,7 +624,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
             )}
 
             <button
-              onClick={() => { setInput('Can you review my last workout and give me feedback? '); inputRef.current?.focus(); }}
+              onClick={() => handleStreamingSend('Can you review my last workout and give me feedback?')}
               className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
             >
               <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center flex-shrink-0">
@@ -636,7 +637,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
             </button>
 
             <button
-              onClick={() => { setInput('I have a question: '); inputRef.current?.focus(); }}
+              onClick={() => handleStreamingSend('I have a question')}
               className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
             >
               <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">

@@ -379,7 +379,7 @@ export class OpenRouterClient {
     messages: ChatMessage[],
     options?: {
       temperature?: number;
-      maxTokens?: number;
+
       tools?: typeof WORKOUT_TOOLS;
     },
     signal?: AbortSignal
@@ -390,7 +390,7 @@ export class OpenRouterClient {
     void,
     unknown
   > {
-    const { temperature = 0.7, maxTokens = 4096, tools } = options || {};
+    const { temperature = 0.7, tools } = options || {};
 
     const response = await fetch(OPENROUTER_API_URL, {
       method: 'POST',
@@ -404,7 +404,7 @@ export class OpenRouterClient {
         model: MODEL,
         messages,
         temperature,
-        max_tokens: maxTokens,
+
         stream: true,
         tools: tools || undefined,
         tool_choice: tools ? 'auto' : undefined,
@@ -482,7 +482,15 @@ export class OpenRouterClient {
               }
             }
 
-            if (json.choices[0]?.finish_reason === 'tool_calls') {
+            const finishReason = json.choices[0]?.finish_reason;
+
+            if (finishReason === 'length' && toolCallsBuffer.size > 0) {
+              throw new Error(
+                'The plan was too large to generate in one response. Try requesting fewer workout days or simpler exercises.',
+              );
+            }
+
+            if (finishReason === 'tool_calls') {
               for (const [, toolCall] of toolCallsBuffer) {
                 if (toolCall.id && toolCall.name && toolCall.arguments) {
                   yield {

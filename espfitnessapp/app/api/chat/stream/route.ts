@@ -251,12 +251,23 @@ export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
+  const { signal } = request;
 
   const sendEvent = async (event: SSEEvent) => {
-    await writer.write(encoder.encode(encodeSSE(event)));
+    try {
+      await writer.write(encoder.encode(encodeSSE(event)));
+    } catch {
+      // Client may have disconnected; ignore write errors
+    }
   };
 
   (async () => {
+    // Hoisted so the catch block can access them for partial saves
+    let fullResponse = '';
+    let metadata: Record<string, unknown> | undefined;
+    let sessionId: string | undefined;
+    let userId: string | undefined;
+
     try {
       const { session, error } = await validateSession();
       if (error || !session?.user?.id) {
@@ -265,9 +276,10 @@ export async function POST(request: NextRequest) {
         return;
       }
 
-      const userId = session.user.id;
+      userId = session.user.id;
       const body = await request.json();
-      const { sessionId, message, displayMessage, planId, context } = body;
+      const { sessionId: sid, message, displayMessage, planId, context } = body;
+      sessionId = sid;
 
       const chatSession = await prisma.chatSession.findUnique({
         where: { id: sessionId, userId },
@@ -373,18 +385,19 @@ export async function POST(request: NextRequest) {
 
       const llmMessages: ChatMessage[] = [systemMessage, ...chatHistory];
       const openRouter = getOpenRouterClient();
-      let fullResponse = '';
-      let metadata: Record<string, unknown> | undefined;
       const allToolCallNames: string[] = [];
 
       const MAX_TOOL_ROUNDS = 5;
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        if (signal.aborted) break;
+
         let roundText = '';
         const roundToolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
 
         const generator = openRouter.chatStream(
           llmMessages,
           { temperature: 0.7, tools: WORKOUT_TOOLS },
+          signal,
         );
 
         for await (const chunk of generator) {
@@ -411,6 +424,9 @@ export async function POST(request: NextRequest) {
           }
         }
 
+        // Don't execute tools if the client cancelled mid-stream
+        if (signal.aborted) break;
+
         if (roundToolCalls.length === 0) break;
 
         llmMessages.push({
@@ -426,6 +442,8 @@ export async function POST(request: NextRequest) {
         let breakAfterTools = false;
 
         for (const toolCall of roundToolCalls) {
+          if (signal.aborted) break;
+
           allToolCallNames.push(toolCall.name);
 
           if (toolCall.name === 'ask_user') {
@@ -480,6 +498,22 @@ export async function POST(request: NextRequest) {
         if (breakAfterTools) break;
       }
 
+      if (signal.aborted) {
+        // Save whatever was streamed before the user stopped
+        if (fullResponse.trim()) {
+          await prisma.chatMessage.create({
+            data: {
+              sessionId,
+              userId,
+              role: 'assistant',
+              content: fullResponse,
+              metadata: undefined,
+            },
+          });
+        }
+        return;
+      }
+
       await sendEvent({ type: 'done' });
 
       await prisma.chatMessage.create({
@@ -517,13 +551,37 @@ export async function POST(request: NextRequest) {
         }
       }
     } catch (error) {
+      const isAbort = signal.aborted || (error as Error).name === 'AbortError';
+      if (isAbort) {
+        // Save whatever was streamed before the client aborted
+        if (fullResponse.trim() && sessionId && userId) {
+          try {
+            await prisma.chatMessage.create({
+              data: {
+                sessionId,
+                userId,
+                role: 'assistant',
+                content: fullResponse,
+                metadata: undefined,
+              },
+            });
+          } catch (saveError) {
+            console.error('Failed to save partial message on abort:', saveError);
+          }
+        }
+        return;
+      }
       console.error('Streaming chat error:', error);
       await sendEvent({
         type: 'error',
         error: error instanceof Error ? error.message : 'Failed to process message',
       });
     } finally {
-      await writer.close();
+      try {
+        await writer.close();
+      } catch {
+        // Already closed
+      }
     }
   })();
 

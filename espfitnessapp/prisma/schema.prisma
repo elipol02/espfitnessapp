@@ -20,6 +20,7 @@ model User {
   accounts            Account[]
   chatMessages        ChatMessage[]
   chatSessions        ChatSession[]
+  chatMemories        ChatMemory[]
   sessions            Session[]
   workoutPlans        WorkoutPlan[]
   workoutTypes        WorkoutType[]
@@ -199,5 +200,18 @@ model ChatMessage {
 
   @@index([sessionId])
   @@index([userId])
+  @@index([createdAt])
+}
+
+model ChatMemory {
+  id        String   @id @default(cuid())
+  userId    String
+  sessionId String?
+  content   String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([sessionId])
   @@index([createdAt])
 }

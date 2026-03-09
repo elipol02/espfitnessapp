@@ -89,6 +89,7 @@ const TOOL_LABELS: Record<string, string> = {
   edit_workout_plan: 'Updating your plan...',
   get_workout_history: 'Fetching workout history...',
   ask_user: 'Preparing questions...',
+  write_memory: 'Remembering...',
 };
 
 function formatExerciseDisplay(ex: { name: string; exerciseType: ExerciseType; config: Record<string, unknown> }): string {

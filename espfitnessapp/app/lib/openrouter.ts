@@ -231,6 +231,24 @@ export const WORKOUT_TOOLS = [
       },
     },
   },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'write_memory',
+      description:
+        'Store a memory for this user. Call this when the user shares critical information (goals, preferences, injuries, equipment, experience level, constraints) or when you answer an important question that should be remembered for future conversations. Use a concise, factual summary (e.g. "User has knee pain; avoid heavy squatting" or "Prefers 4 days per week, 45 min sessions"). Do not store trivial chitchat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          content: {
+            type: 'string',
+            description: 'Concise summary to remember. One or two sentences; include key facts only.',
+          },
+        },
+        required: ['content'],
+      },
+    },
+  },
 ];
 
 // ─── System Prompt ──────────────────────────────────────────────────────────
@@ -249,9 +267,11 @@ You have access to these tools:
 - Any injuries or limitations
 - Specific goals
 
-**edit_workout_plan**: Edit exercises within an existing workout type. Use this to add, update, or remove exercises. Provide exercise IDs for updates, omit IDs for new exercises, and use deleteExerciseIds for removals.
+**edit_workout_plan**: Edit exercises within an existing workout type. Use this to add, update, or remove exercises. Provide exercise IDs for updates, omit IDs for new exercises, and use deleteExerciseIds for removals. When editing multiple days, make ONE edit_workout_plan call per day; do not stop after the first edit. After your LAST edit_workout_plan for the request, do not send a long follow-up message — use at most a brief confirmation or no text after the final edit.
 
 **get_workout_history**: Fetch past workout performance for a workout type. ALWAYS call this before suggesting edits — you need to see what they've actually been doing.
+
+**write_memory**: Store a memory when the user shares critical info (goals, injuries, preferences, equipment, experience) or when you give an answer worth remembering. Keep summaries concise and factual.
 
 EXERCISE TYPES:
 - strength: sets × reps with weight. Config: {sets, repsMin, repsMax, weightType, baseWeight, weightUnit (lbs/kg ONLY — never use "percent" or any other unit), restSeconds, tempo?}
@@ -307,6 +327,8 @@ export interface PlanContext {
   } | null;
   userName?: string | null;
   bodyweight?: number | null;
+  /** Recent memory summaries to inject into system message (searched per request). */
+  memorySummaries?: string[];
 }
 
 export function buildSystemMessage(context?: PlanContext): ChatMessage {
@@ -333,6 +355,9 @@ export function buildSystemMessage(context?: PlanContext): ChatMessage {
   }
   if (context?.bodyweight != null) {
     systemContent += `\nUser's bodyweight: ${context.bodyweight} lbs`;
+  }
+  if (context?.memorySummaries?.length) {
+    systemContent += `\n\nRECENT MEMORIES (use these to personalize responses):\n${context.memorySummaries.map((s) => `- ${s}`).join('\n')}`;
   }
 
   return { role: 'system', content: systemContent };

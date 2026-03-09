@@ -16,9 +16,44 @@ function encodeSSE(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
 
+/** Fetch memories for the user. If query is provided, prefer memories whose content matches (simple word overlap). */
+async function searchMemories(
+  userId: string,
+  limit: number = 20,
+  query?: string,
+): Promise<string[]> {
+  const words =
+    query
+      ?.toLowerCase()
+      .replace(/[^\w\s]/g, '')
+      .split(/\s+/)
+      .filter((w) => w.length > 2) || [];
+  const memories = await prisma.chatMemory.findMany({
+    where: { userId },
+    orderBy: { createdAt: 'desc' },
+    take: limit * 2,
+  });
+  if (words.length === 0) {
+    return memories.slice(0, limit).map((m) => m.content);
+  }
+  const scored = memories.map((m) => {
+    const lower = m.content.toLowerCase();
+    const score = words.filter((w) => lower.includes(w)).length;
+    return { content: m.content, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored
+    .filter((s) => s.score > 0)
+    .slice(0, limit)
+    .map((s) => s.content)
+    .concat(scored.filter((s) => s.score === 0).map((s) => s.content))
+    .slice(0, limit);
+}
+
 async function executeTool(
   toolCall: { id: string; name: string; arguments: Record<string, unknown> },
   userId: string,
+  sessionId: string,
 ): Promise<{ result: Record<string, unknown>; metadata?: Record<string, unknown> }> {
   if (toolCall.name === 'create_workout_plan') {
     const args = toolCall.arguments as {
@@ -158,6 +193,22 @@ async function executeTool(
     };
   }
 
+  if (toolCall.name === 'write_memory') {
+    const args = toolCall.arguments as { content: string };
+    const content = (args.content || '').trim();
+    if (!content) {
+      return { result: { success: false, error: 'content is required' } };
+    }
+    await prisma.chatMemory.create({
+      data: {
+        userId,
+        sessionId,
+        content: content.slice(0, 2000),
+      },
+    });
+    return { result: { success: true } };
+  }
+
   if (toolCall.name === 'get_workout_history') {
     const args = toolCall.arguments as {
       workoutTypeId: string;
@@ -251,6 +302,13 @@ export async function POST(request: NextRequest) {
         take: 10,
       });
 
+      const lastUserMessage = recentMessages.find((m) => m.role === 'user')?.content ?? '';
+      const memorySummaries = await searchMemories(
+        userId,
+        20,
+        lastUserMessage || undefined,
+      );
+
       const chatHistory: ChatMessage[] = recentMessages
         .reverse()
         .filter((m) => m.role !== 'system')
@@ -310,6 +368,7 @@ export async function POST(request: NextRequest) {
           : null,
         userName: context?.userName,
         bodyweight: context?.bodyweight,
+        memorySummaries,
       });
 
       const llmMessages: ChatMessage[] = [systemMessage, ...chatHistory];
@@ -384,7 +443,7 @@ export async function POST(request: NextRequest) {
           }
 
           try {
-            const { result, metadata: toolMeta } = await executeTool(toolCall, userId);
+            const { result, metadata: toolMeta } = await executeTool(toolCall, userId, sessionId);
             if (toolMeta) metadata = toolMeta;
 
             await sendEvent({
@@ -398,7 +457,7 @@ export async function POST(request: NextRequest) {
               tool_call_id: toolCall.id,
             });
 
-            if (toolCall.name === 'create_workout_plan' || toolCall.name === 'edit_workout_plan') {
+            if (toolCall.name === 'create_workout_plan') {
               breakAfterTools = true;
             }
           } catch (error) {

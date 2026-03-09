@@ -291,6 +291,12 @@ export async function POST(request: NextRequest) {
         return;
       }
 
+      if (!sessionId) {
+        await sendEvent({ type: 'error', error: 'Session ID required' });
+        await writer.close();
+        return;
+      }
+
       if (message && message.trim()) {
         await prisma.chatMessage.create({
           data: {

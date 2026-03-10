@@ -748,25 +748,36 @@ function SimpleLogger({
 
   if (completed || isDone) {
     return (
-      <div className="flex flex-col items-center gap-3 py-8">
-        <div className="w-16 h-16 rounded-full bg-green-500/15 flex items-center justify-center">
-          <CheckCircle2 size={36} className="text-green-500" />
+      <div className="space-y-4">
+        <div className="flex items-center gap-3 bg-surface rounded-lg p-3">
+          <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center">
+            <Check size={14} className="text-success" />
+          </div>
+          <p className="text-sm font-medium text-foreground flex-1">Done</p>
+          {!completed && (
+            <Button
+              variant="secondary"
+              onClick={() => onSave({ completed: false })}
+              disabled={saving}
+            >
+              {saving ? <LoadingSpinner size="sm" /> : 'Undo'}
+            </Button>
+          )}
         </div>
-        <p className="text-base font-semibold text-foreground">Done</p>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col items-center gap-4 py-8">
-      <button
-        onClick={() => onSave({ completed: true })}
-        disabled={saving}
-        className="w-48 h-48 rounded-full bg-primary/10 hover:bg-primary/20 active:scale-95 transition-all flex flex-col items-center justify-center gap-3 border-2 border-primary/30"
-      >
-        <CheckCircle2 size={48} className="text-primary" />
-        <span className="text-lg font-bold text-primary">Mark Complete</span>
-      </button>
+    <div className="space-y-4">
+      <div className="bg-surface rounded-lg p-3">
+        <p className="text-xs text-muted-foreground">Mark this exercise complete when done.</p>
+      </div>
+      <div className="bg-surface rounded-xl p-4 space-y-4">
+        <Button onClick={() => onSave({ completed: true })} disabled={saving} fullWidth>
+          {saving ? <LoadingSpinner size="sm" /> : 'Mark Complete'}
+        </Button>
+      </div>
     </div>
   );
 }

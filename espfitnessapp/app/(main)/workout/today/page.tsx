@@ -1,6 +1,7 @@
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
 import { redirect } from 'next/navigation';
+import { RedirectToLocalDate } from './RedirectToLocalDate';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,11 +22,21 @@ export default async function TodayWorkoutPage({
   let workoutTypeId = params.workoutTypeId;
   let dateStr = params.date;
 
-  // If no params, look up today's assignment from the active plan
-  if (!workoutTypeId || !dateStr) {
-    const todayDate = new Date();
-    dateStr = todayDate.toLocaleDateString('en-CA');
-    const todayDow = DAY_MAP[todayDate.getDay()];
+  // No date param: we need the user's local "today" (server timezone would be wrong).
+  // Client redirect will add ?date=YYYY-MM-DD and reload.
+  if (!dateStr) {
+    return (
+      <div className="px-5 pb-28">
+        <RedirectToLocalDate />
+      </div>
+    );
+  }
+
+  // Look up assignment for this date (by day-of-week). Parse date in local terms for correct DOW.
+  if (!workoutTypeId) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const localDate = new Date(y, m - 1, d);
+    const todayDow = DAY_MAP[localDate.getDay()];
 
     const activePlan = await prisma.workoutPlan.findFirst({
       where: { userId, status: 'active' },

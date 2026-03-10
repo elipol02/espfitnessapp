@@ -674,7 +674,7 @@ export function LiveWorkoutContent({
             data={currentEntryData as SimpleEntryData | undefined}
             onSave={(data) => saveEntry(currentExercise.id, data)}
             saving={saving}
-            completed={workoutCompleted}
+            readOnly={readOnly}
           />
         )}
       </div>
@@ -736,17 +736,17 @@ function ExerciseIcon({ type }: { type: ExerciseType }) {
 // ─── Simple Logger ────────────────────────────────────────────────────────────
 
 function SimpleLogger({
-  config: _config, data, onSave, saving, completed,
+  config: _config, data, onSave, saving, readOnly = false,
 }: {
   config: SimpleConfig;
   data: SimpleEntryData | undefined;
   onSave: (data: SimpleEntryData) => void;
   saving: boolean;
-  completed: boolean;
+  readOnly?: boolean;
 }) {
   const isDone = data?.completed === true;
 
-  if (completed || isDone) {
+  if (isDone) {
     return (
       <div className="space-y-4">
         <div className="flex items-center gap-3 bg-surface rounded-lg p-3">
@@ -754,7 +754,7 @@ function SimpleLogger({
             <Check size={14} className="text-success" />
           </div>
           <p className="text-sm font-medium text-foreground flex-1">Done</p>
-          {!completed && (
+          {!readOnly && (
             <Button
               variant="secondary"
               onClick={() => onSave({ completed: false })}
@@ -773,11 +773,13 @@ function SimpleLogger({
       <div className="bg-surface rounded-lg p-3">
         <p className="text-xs text-muted-foreground">Mark this exercise complete when done.</p>
       </div>
-      <div className="bg-surface rounded-xl p-4 space-y-4">
-        <Button onClick={() => onSave({ completed: true })} disabled={saving} fullWidth>
-          {saving ? <LoadingSpinner size="sm" /> : 'Mark Complete'}
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="bg-surface rounded-xl p-4 space-y-4">
+          <Button onClick={() => onSave({ completed: true })} disabled={saving} fullWidth>
+            {saving ? <LoadingSpinner size="sm" /> : 'Mark Complete'}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

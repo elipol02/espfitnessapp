@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
-import { LoadingSpinner } from '@/app/components/LoadingSpinner';
+import { useRestTimer } from '@/app/components/RestTimerBadge';
 
 interface DayAssignment {
   dayOfWeek: number;
@@ -37,11 +37,11 @@ const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6:
 
 export function CalendarContent({ data }: { data: CalendarData }) {
   const router = useRouter();
+  const restTimer = useRestTimer();
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>('month');
-  const [startingWorkout, setStartingWorkout] = useState<string | null>(null);
 
-  const { planId, startDate, endDate, dayAssignments, sessions } = data;
+  const { startDate, endDate, dayAssignments, sessions } = data;
 
   const planStartDate = startDate ? (() => { const d = new Date(startDate); d.setHours(0, 0, 0, 0); return d; })() : null;
   const planEndDate = endDate ? (() => { const d = new Date(endDate); d.setHours(0, 0, 0, 0); return d; })() : null;
@@ -130,24 +130,8 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     date.getMonth() === today.getMonth() &&
     date.getDate() === today.getDate();
 
-  const startOrResumeWorkout = async (workoutTypeId: string, dateStr: string) => {
-    if (startingWorkout) return;
-    setStartingWorkout(workoutTypeId + dateStr);
-    try {
-      const res = await fetch('/api/workout/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workoutTypeId, date: dateStr, planId }),
-      });
-      const result = await res.json();
-      if (result.success) {
-        router.push(`/workout/live?sessionId=${result.data.sessionId}`);
-      }
-    } catch (error) {
-      console.error('Error starting workout:', error);
-    } finally {
-      setStartingWorkout(null);
-    }
+  const startOrResumeWorkout = (workoutTypeId: string, dateStr: string) => {
+    router.push(`/workout/today?workoutTypeId=${workoutTypeId}&date=${dateStr}`);
   };
 
   if (dayAssignments.length === 0) {
@@ -171,12 +155,12 @@ export function CalendarContent({ data }: { data: CalendarData }) {
   }
 
   return (
-    <div className="px-5 py-4">
-      <div className="max-w-lg mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
+    <div>
+      {/* Sticky header */}
+      <div className="sticky top-0 z-10 bg-background border-b border-border">
+        <div className="px-5 py-3 max-w-lg mx-auto flex items-center justify-between">
           <h1 className="text-2xl font-bold text-foreground">Calendar</h1>
-          <div className="flex bg-surface rounded-lg p-1">
+          <div className={`flex bg-surface rounded-lg p-1 transition-all duration-200 ${restTimer !== null ? 'mr-24' : ''}`}>
             <button
               onClick={() => setViewMode('month')}
               className={`px-3 py-1.5 text-sm rounded-md transition-colors ${viewMode === 'month' ? 'bg-primary text-white' : 'text-muted-foreground hover:text-foreground'}`}
@@ -191,7 +175,10 @@ export function CalendarContent({ data }: { data: CalendarData }) {
             </button>
           </div>
         </div>
+      </div>
 
+    <div className="px-5 py-4">
+      <div className="max-w-lg mx-auto space-y-6">
         {/* Navigation */}
         <div className="flex items-center justify-between">
           <button onClick={goToPrevious} className="p-2 text-muted-foreground hover:text-foreground transition-colors touch-target">
@@ -337,10 +324,9 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                         <Button
                           size="sm"
                           variant={isTodayDate ? 'primary' : 'secondary'}
-                          disabled={startingWorkout !== null}
                           onClick={() => startOrResumeWorkout(assignment!.workoutType.id, dateStr)}
                         >
-                          {startingWorkout === assignment!.workoutType.id + dateStr ? <LoadingSpinner size="sm" /> : 'Start'}
+                          Start
                         </Button>
                       )
                     )}
@@ -361,6 +347,7 @@ export function CalendarContent({ data }: { data: CalendarData }) {
           ))}
         </div>
       </div>
+    </div>
     </div>
   );
 }

@@ -1,11 +1,9 @@
 'use client';
 
-import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
 import { ChevronRight, CheckCircle2, X, Calendar, Check } from 'lucide-react';
-import { LoadingSpinner } from '@/app/components/LoadingSpinner';
 
 interface DayAssignment {
   dayOfWeek: number;
@@ -54,7 +52,6 @@ const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6:
 export function HomeContent({ data }: { data: HomeData }) {
   const router = useRouter();
   const { user, currentStreak, activePlan, recentSessions, completedWorkouts, missedWorkouts, motivationalMessage } = data;
-  const [startingWorkout, setStartingWorkout] = useState<string | null>(null);
 
   const today = new Date();
   const formattedDate = today.toLocaleDateString('en-US', {
@@ -123,28 +120,8 @@ export function HomeContent({ data }: { data: HomeData }) {
   const todayAssignment = todayPreview?.assignment;
   const todaySession = todayPreview?.session;
 
-  const startOrResumeWorkout = async (workoutTypeId: string, dateStr: string) => {
-    if (startingWorkout) return;
-    setStartingWorkout(workoutTypeId);
-    try {
-      const res = await fetch('/api/workout/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workoutTypeId,
-          date: dateStr,
-          planId: activePlan?.id,
-        }),
-      });
-      const result = await res.json();
-      if (result.success) {
-        router.push(`/workout/live?sessionId=${result.data.sessionId}`);
-      }
-    } catch (error) {
-      console.error('Error starting workout:', error);
-    } finally {
-      setStartingWorkout(null);
-    }
+  const startOrResumeWorkout = (workoutTypeId: string, dateStr: string) => {
+    router.push(`/workout/today?workoutTypeId=${workoutTypeId}&date=${dateStr}`);
   };
 
   if (!activePlan) {
@@ -258,10 +235,9 @@ export function HomeContent({ data }: { data: HomeData }) {
               <Button
                 fullWidth
                 size="lg"
-                disabled={startingWorkout !== null}
                 onClick={() => startOrResumeWorkout(todayAssignment.workoutType.id, todayPreview!.dateStr)}
               >
-                {startingWorkout === todayAssignment.workoutType.id ? <LoadingSpinner size="sm" /> : 'Start Workout'}
+                Start Workout
               </Button>
             )}
           </div>

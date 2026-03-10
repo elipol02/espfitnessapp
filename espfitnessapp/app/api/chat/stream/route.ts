@@ -264,9 +264,43 @@ export async function POST(request: NextRequest) {
   (async () => {
     // Hoisted so the catch block can access them for partial saves
     let fullResponse = '';
-    let metadata: Record<string, unknown> | undefined;
     let sessionId: string | undefined;
     let userId: string | undefined;
+
+    // Bubble tracking: each "round" of text after tool calls becomes its own chat bubble
+    const bubbles: Array<{ text: string; metadata?: Record<string, unknown> }> = [];
+    let currentBubbleText = '';
+    let currentBubbleEditPreviews: Array<Record<string, unknown>> = [];
+    let currentBubblePlanData: unknown = undefined;
+
+    const finalizeBubble = () => {
+      let bubbleMeta: Record<string, unknown> | undefined;
+      if (currentBubbleEditPreviews.length > 0) {
+        bubbleMeta = { type: 'edit_preview', editPreviews: [...currentBubbleEditPreviews] };
+      } else if (currentBubblePlanData !== undefined) {
+        bubbleMeta = { type: 'plan_preview', planData: currentBubblePlanData };
+      }
+      if (currentBubbleText.trim() || bubbleMeta) {
+        bubbles.push({ text: currentBubbleText, metadata: bubbleMeta });
+      }
+      currentBubbleText = '';
+      currentBubbleEditPreviews = [];
+      currentBubblePlanData = undefined;
+    };
+
+    const saveBubbles = async () => {
+      for (const bubble of bubbles) {
+        await prisma.chatMessage.create({
+          data: {
+            sessionId: sessionId!,
+            userId: userId!,
+            role: 'assistant',
+            content: bubble.text,
+            metadata: (bubble.metadata as object) || undefined,
+          },
+        });
+      }
+    };
 
     try {
       const { session, error } = await validateSession();
@@ -392,10 +426,17 @@ export async function POST(request: NextRequest) {
       const llmMessages: ChatMessage[] = [systemMessage, ...chatHistory];
       const openRouter = getOpenRouterClient();
       const allToolCallNames: string[] = [];
+      let previousRoundHadTools = false;
 
       const MAX_TOOL_ROUNDS = 5;
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         if (signal.aborted) break;
+
+        // When resuming after tool calls, finalize the current bubble and start a fresh one
+        if (round > 0 && previousRoundHadTools) {
+          finalizeBubble();
+          await sendEvent({ type: 'new-bubble' });
+        }
 
         let roundText = '';
         const roundToolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
@@ -409,6 +450,7 @@ export async function POST(request: NextRequest) {
         for await (const chunk of generator) {
           if (chunk.type === 'text') {
             roundText += chunk.content;
+            currentBubbleText += chunk.content;
             fullResponse += chunk.content;
             await sendEvent({ type: 'text-chunk', content: chunk.content });
           } else if (chunk.type === 'tool_call_start') {
@@ -433,7 +475,12 @@ export async function POST(request: NextRequest) {
         // Don't execute tools if the client cancelled mid-stream
         if (signal.aborted) break;
 
-        if (roundToolCalls.length === 0) break;
+        if (roundToolCalls.length === 0) {
+          previousRoundHadTools = false;
+          break;
+        }
+
+        previousRoundHadTools = true;
 
         llmMessages.push({
           role: 'assistant',
@@ -468,7 +515,20 @@ export async function POST(request: NextRequest) {
 
           try {
             const { result, metadata: toolMeta } = await executeTool(toolCall, userId, sessionId);
-            if (toolMeta) metadata = toolMeta;
+
+            if (toolMeta) {
+              const metaType = toolMeta.type as string;
+              if (metaType === 'edit_preview') {
+                currentBubbleEditPreviews.push({
+                  workoutTypeId: toolMeta.workoutTypeId as string,
+                  editArgs: toolMeta.editArgs as Record<string, unknown>,
+                  currentState: toolMeta.currentState as Record<string, unknown>,
+                  proposedState: toolMeta.proposedState as Record<string, unknown>,
+                });
+              } else if (metaType === 'plan_preview') {
+                currentBubblePlanData = toolMeta.planData;
+              }
+            }
 
             await sendEvent({
               type: 'tool-result',
@@ -501,36 +561,26 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        if (breakAfterTools) break;
+        if (breakAfterTools) {
+          finalizeBubble();
+          break;
+        }
       }
 
+      // Finalize any remaining bubble not yet pushed
+      finalizeBubble();
+
       if (signal.aborted) {
-        // Save whatever was streamed before the user stopped
-        if (fullResponse.trim()) {
-          await prisma.chatMessage.create({
-            data: {
-              sessionId,
-              userId,
-              role: 'assistant',
-              content: fullResponse,
-              metadata: undefined,
-            },
-          });
+        // Save whatever bubbles were completed before the user stopped
+        if (bubbles.length > 0) {
+          await saveBubbles();
         }
         return;
       }
 
       await sendEvent({ type: 'done' });
 
-      await prisma.chatMessage.create({
-        data: {
-          sessionId,
-          userId,
-          role: 'assistant',
-          content: fullResponse,
-          metadata: (metadata as object) || undefined,
-        },
-      });
+      await saveBubbles();
 
       const updatedSession = await prisma.chatSession.update({
         where: { id: sessionId },
@@ -559,20 +609,12 @@ export async function POST(request: NextRequest) {
     } catch (error) {
       const isAbort = signal.aborted || (error as Error).name === 'AbortError';
       if (isAbort) {
-        // Save whatever was streamed before the client aborted
-        if (fullResponse.trim() && sessionId && userId) {
+        // Save any completed bubbles before the client aborted
+        if (bubbles.length > 0 && sessionId && userId) {
           try {
-            await prisma.chatMessage.create({
-              data: {
-                sessionId,
-                userId,
-                role: 'assistant',
-                content: fullResponse,
-                metadata: undefined,
-              },
-            });
+            await saveBubbles();
           } catch (saveError) {
-            console.error('Failed to save partial message on abort:', saveError);
+            console.error('Failed to save partial messages on abort:', saveError);
           }
         }
         return;

@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'No edit preview in message' }, { status: 400 });
     }
 
-    const editArgs = metadata.editArgs as {
+    type EditArgs = {
       workoutTypeId: string;
       name?: string;
       color?: string;
@@ -51,62 +51,77 @@ export async function POST(request: NextRequest) {
       deleteExerciseIds?: string[];
     };
 
-    const workoutType = await prisma.workoutType.findFirst({
-      where: { id: editArgs.workoutTypeId, userId },
-    });
+    // Support new format (editPreviews array) and legacy format (single editArgs)
+    const editArgsList: EditArgs[] = metadata.editPreviews
+      ? (metadata.editPreviews as Array<{ editArgs: EditArgs }>).map((ep) => ep.editArgs)
+      : metadata.editArgs
+        ? [metadata.editArgs as EditArgs]
+        : [];
 
-    if (!workoutType) {
-      return NextResponse.json({ success: false, error: 'Workout type not found' }, { status: 404 });
+    if (editArgsList.length === 0) {
+      return NextResponse.json({ success: false, error: 'No edit data in message' }, { status: 400 });
+    }
+
+    // Validate all workout types belong to this user before starting transaction
+    for (const editArgs of editArgsList) {
+      const workoutType = await prisma.workoutType.findFirst({
+        where: { id: editArgs.workoutTypeId, userId },
+      });
+      if (!workoutType) {
+        return NextResponse.json({ success: false, error: 'Workout type not found' }, { status: 404 });
+      }
     }
 
     await prisma.$transaction(async (tx) => {
-      if (editArgs.name || editArgs.color) {
-        await tx.workoutType.update({
-          where: { id: editArgs.workoutTypeId },
-          data: {
-            ...(editArgs.name && { name: editArgs.name }),
-            ...(editArgs.color && { color: editArgs.color }),
-          },
-        });
-      }
+      for (const editArgs of editArgsList) {
+        if (editArgs.name || editArgs.color) {
+          await tx.workoutType.update({
+            where: { id: editArgs.workoutTypeId },
+            data: {
+              ...(editArgs.name && { name: editArgs.name }),
+              ...(editArgs.color && { color: editArgs.color }),
+            },
+          });
+        }
 
-      if (editArgs.deleteExerciseIds?.length) {
-        await tx.exercise.deleteMany({
-          where: {
-            id: { in: editArgs.deleteExerciseIds },
-            workoutTypeId: editArgs.workoutTypeId,
-          },
-        });
-      }
+        if (editArgs.deleteExerciseIds?.length) {
+          await tx.exercise.deleteMany({
+            where: {
+              id: { in: editArgs.deleteExerciseIds },
+              workoutTypeId: editArgs.workoutTypeId,
+            },
+          });
+        }
 
-      if (editArgs.exercises) {
-        for (const ex of editArgs.exercises) {
-          if (ex.id) {
-            await tx.exercise.update({
-              where: { id: ex.id },
-              data: {
-                name: ex.name,
-                exerciseType: ex.exerciseType,
-                config: ex.config as Prisma.InputJsonValue,
-                progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
-                groupTag: ex.groupTag || null,
-                order: ex.order,
-                notes: ex.notes || null,
-              },
-            });
-          } else {
-            await tx.exercise.create({
-              data: {
-                workoutTypeId: editArgs.workoutTypeId,
-                name: ex.name,
-                exerciseType: ex.exerciseType,
-                config: ex.config as Prisma.InputJsonValue,
-                progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
-                groupTag: ex.groupTag || null,
-                order: ex.order,
-                notes: ex.notes || null,
-              },
-            });
+        if (editArgs.exercises) {
+          for (const ex of editArgs.exercises) {
+            if (ex.id) {
+              await tx.exercise.update({
+                where: { id: ex.id },
+                data: {
+                  name: ex.name,
+                  exerciseType: ex.exerciseType,
+                  config: ex.config as Prisma.InputJsonValue,
+                  progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
+                  groupTag: ex.groupTag || null,
+                  order: ex.order,
+                  notes: ex.notes || null,
+                },
+              });
+            } else {
+              await tx.exercise.create({
+                data: {
+                  workoutTypeId: editArgs.workoutTypeId,
+                  name: ex.name,
+                  exerciseType: ex.exerciseType,
+                  config: ex.config as Prisma.InputJsonValue,
+                  progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
+                  groupTag: ex.groupTag || null,
+                  order: ex.order,
+                  notes: ex.notes || null,
+                },
+              });
+            }
           }
         }
       }

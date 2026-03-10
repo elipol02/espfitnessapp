@@ -106,6 +106,8 @@ function formatExerciseConfig(
       const c = config as unknown as TabataConfig;
       return `Tabata: ${c.rounds} rounds (${c.workSeconds}s work / ${c.restSeconds}s rest)`;
     }
+    case 'simple':
+      return 'Mark as completed';
     default:
       return '';
   }

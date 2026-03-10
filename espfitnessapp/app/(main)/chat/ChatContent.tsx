@@ -6,6 +6,7 @@ import { SendHorizontal, Plus, History, X, Square, Edit3, MessageSquare, FileTex
 import ReactMarkdown from 'react-markdown';
 import { Button } from '@/app/components/Button';
 import { LoadingSpinner } from '@/app/components/LoadingSpinner';
+import { useRestTimer } from '@/app/components/RestTimerBadge';
 import type { PlanDayData, ExerciseType, StrengthConfig, DistanceConfig, TimeConfig, AmrapConfig, EmomConfig, RoundBlockConfig, TabataConfig, ProgressionRule } from '@/app/types';
 
 interface AskUserQuestion {
@@ -15,7 +16,7 @@ interface AskUserQuestion {
 }
 
 interface SSEEvent {
-  type: 'text-chunk' | 'text-done' | 'tool-call' | 'tool-result' | 'ask-user' | 'error' | 'done' | 'cancelled';
+  type: 'text-chunk' | 'text-done' | 'tool-call' | 'tool-result' | 'ask-user' | 'new-bubble' | 'error' | 'done' | 'cancelled';
   content?: string;
   toolCall?: {
     id: string;
@@ -48,12 +49,22 @@ interface EditWorkoutState {
   exercises: EditExercise[];
 }
 
+interface EditPreviewItem {
+  workoutTypeId: string;
+  editArgs: Record<string, unknown>;
+  currentState: EditWorkoutState;
+  proposedState: EditWorkoutState;
+}
+
 interface MessageMetadata {
   type?: 'plan_preview' | 'edit_preview' | 'edit_result';
   planData?: {
     name: string;
     schedule: PlanDayData[];
   };
+  // New: array of edit previews (supports multiple-day edits)
+  editPreviews?: EditPreviewItem[];
+  // Legacy single edit preview fields (backward compat with old DB records)
   workoutTypeId?: string;
   editArgs?: Record<string, unknown>;
   currentState?: EditWorkoutState;
@@ -154,6 +165,7 @@ function formatProgressionDisplay(progression: ProgressionRule | null | undefine
 
 export function ChatContent({ data, userId: _userId }: { data: ChatData; userId: string }) {
   const router = useRouter();
+  const restTimer = useRestTimer();
 
   const [messages, setMessages] = useState<Message[]>(data.messages);
   const [input, setInput] = useState('');
@@ -251,8 +263,8 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
 
       const decoder = new TextDecoder();
       let buffer = '';
-      let fullText = '';
-      let currentMetadata: MessageMetadata | null = null;
+      // Track the active bubble — starts as the initial assistant message
+      let currentBubbleId = assistantMessageId;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -275,12 +287,29 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
           switch (event.type) {
             case 'text-chunk':
               if (event.content) {
-                fullText += event.content;
+                const bubbleId = currentBubbleId;
                 setMessages((prev) =>
-                  prev.map((msg) => (msg.id === assistantMessageId ? { ...msg, content: fullText } : msg))
+                  prev.map((msg) => (msg.id === bubbleId ? { ...msg, content: msg.content + event.content! } : msg))
                 );
               }
               break;
+
+            case 'new-bubble': {
+              // Server is starting a fresh text section after tool calls — create a new message bubble
+              const newBubbleId = `stream-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              currentBubbleId = newBubbleId;
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: newBubbleId,
+                  role: 'assistant' as const,
+                  content: '',
+                  metadata: null,
+                  createdAt: new Date().toISOString(),
+                },
+              ]);
+              break;
+            }
 
             case 'tool-call':
               if (event.toolCall) {
@@ -295,11 +324,11 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                 const result = event.toolResult.result as Record<string, unknown>;
                 if (result.planData) {
                   const planData = result.planData as MessageMetadata['planData'];
-                  currentMetadata = { type: 'plan_preview', planData };
+                  const bubbleId = currentBubbleId;
                   if (planData?.schedule) {
                     setMessages((prev) =>
                       prev.map((msg) =>
-                        msg.id === assistantMessageId
+                        msg.id === bubbleId
                           ? { ...msg, metadata: { type: 'plan_preview', planData: { name: planData.name, schedule: [] } } }
                           : msg
                       )
@@ -309,7 +338,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                       const revealedSchedule = planData.schedule.slice(0, i + 1);
                       setMessages((prev) =>
                         prev.map((msg) =>
-                          msg.id === assistantMessageId
+                          msg.id === bubbleId
                             ? { ...msg, metadata: { type: 'plan_preview', planData: { name: planData.name, schedule: revealedSchedule } } }
                             : msg
                         )
@@ -317,23 +346,27 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                     }
                   }
                 } else if (result.editPreview) {
-                  const ep = result.editPreview as {
-                    workoutTypeId: string;
-                    editArgs: Record<string, unknown>;
-                    currentState: EditWorkoutState;
-                    proposedState: EditWorkoutState;
-                  };
-                  currentMetadata = {
-                    type: 'edit_preview',
+                  const ep = result.editPreview as EditPreviewItem;
+                  const newPreview: EditPreviewItem = {
                     workoutTypeId: ep.workoutTypeId,
                     editArgs: ep.editArgs,
                     currentState: ep.currentState,
                     proposedState: ep.proposedState,
                   };
+                  const bubbleId = currentBubbleId;
+                  // Accumulate edit previews — multiple days = multiple previews in same bubble
                   setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === assistantMessageId ? { ...msg, metadata: currentMetadata } : msg
-                    )
+                    prev.map((msg) => {
+                      if (msg.id !== bubbleId) return msg;
+                      const existing = (msg.metadata?.editPreviews as EditPreviewItem[]) || [];
+                      return {
+                        ...msg,
+                        metadata: {
+                          type: 'edit_preview' as const,
+                          editPreviews: [...existing, newPreview],
+                        },
+                      };
+                    })
                   );
                 }
               }
@@ -516,7 +549,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
       <div className="flex-shrink-0 bg-background border-b border-border">
         <div className="px-4 py-3 flex items-center justify-between">
           <h1 className="text-lg font-bold text-foreground">ESP Fitness Planner</h1>
-          <div className="flex gap-2">
+          <div className={`flex gap-2 transition-all duration-200 ${restTimer !== null ? 'mr-24' : ''}`}>
             {!showHistory && (
               <button
                 onClick={() => { setShowHistory(true); fetchSessions(); }}
@@ -740,69 +773,89 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                         )}
 
                         {/* Edit preview — before/after confirmation */}
-                        {message.metadata?.type === 'edit_preview' && message.metadata.currentState && message.metadata.proposedState && (() => {
-                          const current = message.metadata.currentState;
-                          const proposed = message.metadata.proposedState;
-                          const deletedIds = new Set(
-                            ((message.metadata.editArgs?.deleteExerciseIds as string[]) || [])
-                          );
-                          const updatedIds = new Set(
-                            ((message.metadata.editArgs?.exercises as Array<{ id?: string }>) || [])
-                              .filter((e) => e.id)
-                              .map((e) => e.id as string)
-                          );
+                        {message.metadata?.type === 'edit_preview' && (() => {
+                          // Normalize: support new editPreviews array OR legacy single-edit fields
+                          const previews: EditPreviewItem[] =
+                            message.metadata.editPreviews ??
+                            (message.metadata.currentState && message.metadata.proposedState
+                              ? [{
+                                  workoutTypeId: message.metadata.workoutTypeId!,
+                                  editArgs: message.metadata.editArgs!,
+                                  currentState: message.metadata.currentState,
+                                  proposedState: message.metadata.proposedState,
+                                }]
+                              : []);
+
+                          if (previews.length === 0) return null;
 
                           return (
-                            <div className="mt-4 pt-4 border-t border-border space-y-3">
-                              <p className="font-semibold text-sm">
-                                Proposed edit: {proposed.name}
-                              </p>
+                            <div className="mt-4 pt-4 border-t border-border space-y-4">
+                              {previews.map((ep, epIdx) => {
+                                const current = ep.currentState;
+                                const proposed = ep.proposedState;
+                                const deletedIds = new Set(
+                                  ((ep.editArgs?.deleteExerciseIds as string[]) || [])
+                                );
+                                const updatedIds = new Set(
+                                  ((ep.editArgs?.exercises as Array<{ id?: string }>) || [])
+                                    .filter((e) => e.id)
+                                    .map((e) => e.id as string)
+                                );
 
-                              {/* Before */}
-                              <div className="bg-background/30 rounded-lg p-3">
-                                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Before</p>
-                                <div className="space-y-1">
-                                  {current.exercises.map((ex) => (
-                                    <div key={ex.id} className={`text-xs ${deletedIds.has(ex.id!) ? 'line-through opacity-40' : ''}`}>
-                                      <span className="font-medium">{ex.name}</span>
-                                      <span className="text-muted-foreground ml-2">
-                                        {formatExerciseDisplay({ name: ex.name, exerciseType: ex.exerciseType, config: ex.config })}
-                                      </span>
+                                return (
+                                  <div key={epIdx} className="space-y-3">
+                                    <p className="font-semibold text-sm">
+                                      {previews.length > 1 ? `Edit ${epIdx + 1}: ` : 'Proposed edit: '}{proposed.name}
+                                    </p>
+
+                                    {/* Before */}
+                                    <div className="bg-background/30 rounded-lg p-3">
+                                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Before</p>
+                                      <div className="space-y-1">
+                                        {current.exercises.map((ex) => (
+                                          <div key={ex.id} className={`text-xs ${deletedIds.has(ex.id!) ? 'line-through opacity-40' : ''}`}>
+                                            <span className="font-medium">{ex.name}</span>
+                                            <span className="text-muted-foreground ml-2">
+                                              {formatExerciseDisplay({ name: ex.name, exerciseType: ex.exerciseType, config: ex.config })}
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
                                     </div>
-                                  ))}
-                                </div>
-                              </div>
 
-                              {/* After */}
-                              <div className="bg-background/30 rounded-lg p-3">
-                                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">After</p>
-                                <div className="space-y-1">
-                                  {proposed.exercises.map((ex, idx) => {
-                                    const isNew = !ex.id;
-                                    const isModified = !isNew && updatedIds.has(ex.id!);
-                                    return (
-                                      <div
-                                        key={ex.id ?? `new-${idx}`}
-                                        className={`text-xs ${isNew ? 'text-success' : isModified ? 'text-yellow-400' : ''}`}
-                                      >
-                                        {isNew && <span className="mr-1 font-bold">+</span>}
-                                        <span className="font-medium">{ex.name}</span>
-                                        <span className={`ml-2 ${isNew ? 'text-success/80' : isModified ? 'text-yellow-400/80' : 'text-muted-foreground'}`}>
-                                          {formatExerciseDisplay({ name: ex.name, exerciseType: ex.exerciseType, config: ex.config })}
-                                        </span>
+                                    {/* After */}
+                                    <div className="bg-background/30 rounded-lg p-3">
+                                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">After</p>
+                                      <div className="space-y-1">
+                                        {proposed.exercises.map((ex, idx) => {
+                                          const isNew = !ex.id;
+                                          const isModified = !isNew && updatedIds.has(ex.id!);
+                                          return (
+                                            <div
+                                              key={ex.id ?? `new-${idx}`}
+                                              className={`text-xs ${isNew ? 'text-success' : isModified ? 'text-yellow-400' : ''}`}
+                                            >
+                                              {isNew && <span className="mr-1 font-bold">+</span>}
+                                              <span className="font-medium">{ex.name}</span>
+                                              <span className={`ml-2 ${isNew ? 'text-success/80' : isModified ? 'text-yellow-400/80' : 'text-muted-foreground'}`}>
+                                                {formatExerciseDisplay({ name: ex.name, exerciseType: ex.exerciseType, config: ex.config })}
+                                              </span>
+                                            </div>
+                                          );
+                                        })}
+                                        {current.exercises
+                                          .filter((e) => deletedIds.has(e.id!))
+                                          .map((ex) => (
+                                            <div key={`del-${ex.id}`} className="text-xs text-error line-through opacity-60">
+                                              <span className="mr-1 font-bold">−</span>
+                                              <span className="font-medium">{ex.name}</span>
+                                            </div>
+                                          ))}
                                       </div>
-                                    );
-                                  })}
-                                  {current.exercises
-                                    .filter((e) => deletedIds.has(e.id!))
-                                    .map((ex) => (
-                                      <div key={`del-${ex.id}`} className="text-xs text-error line-through opacity-60">
-                                        <span className="mr-1 font-bold">−</span>
-                                        <span className="font-medium">{ex.name}</span>
-                                      </div>
-                                    ))}
-                                </div>
-                              </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
 
                               {!isApproved ? (
                                 <Button
@@ -811,7 +864,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                                   fullWidth
                                 >
                                   {approvingEdit === message.id && <LoadingSpinner size="sm" />}
-                                  Confirm Changes
+                                  {previews.length > 1 ? 'Confirm All Changes' : 'Confirm Changes'}
                                 </Button>
                               ) : (
                                 <div className="text-center text-success font-medium py-2">Workout updated</div>

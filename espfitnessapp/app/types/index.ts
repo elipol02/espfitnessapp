@@ -7,7 +7,8 @@ export type ExerciseType =
   | 'amrap'
   | 'emom'
   | 'round_block'
-  | 'tabata';
+  | 'tabata'
+  | 'simple';
 
 export type WeightType = 'absolute' | 'bodyweight' | 'percentage_1rm';
 export type WeightUnit = 'lbs' | 'kg';
@@ -73,6 +74,10 @@ export interface TabataConfig {
   movements: MovementDef[];
 }
 
+export interface SimpleConfig {
+  notes?: string;
+}
+
 export type ExerciseConfig =
   | StrengthConfig
   | DistanceConfig
@@ -80,7 +85,8 @@ export type ExerciseConfig =
   | AmrapConfig
   | EmomConfig
   | RoundBlockConfig
-  | TabataConfig;
+  | TabataConfig
+  | SimpleConfig;
 
 // ─── Progression Rules ──────────────────────────────────────────────────────
 
@@ -212,11 +218,16 @@ export interface RoundsEntryData {
   timeElapsed: number;
 }
 
+export interface SimpleEntryData {
+  completed: boolean;
+}
+
 export type ExerciseEntryData =
   | StrengthEntryData
   | DistanceEntryData
   | TimeEntryData
-  | RoundsEntryData;
+  | RoundsEntryData
+  | SimpleEntryData;
 
 export interface ExerciseEntry {
   id: string;

@@ -4,7 +4,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft, ChevronLeft, ChevronRight, Check, Timer,
-  Dumbbell, Footprints, Clock, Play, Pause, RotateCcw, Pencil,
+  Dumbbell, Footprints, Clock, Play, Pause, RotateCcw, Pencil, CheckCircle2,
 } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import { LoadingSpinner } from '@/app/components/LoadingSpinner';
@@ -18,11 +18,13 @@ import type {
   EmomConfig,
   RoundBlockConfig,
   TabataConfig,
+  SimpleConfig,
   SuggestionMap,
   StrengthEntryData,
   DistanceEntryData,
   TimeEntryData,
   RoundsEntryData,
+  SimpleEntryData,
   ExerciseEntryData,
 } from '@/app/types';
 
@@ -505,6 +507,9 @@ export function LiveWorkoutContent({
         const d = data as RoundsEntryData;
         return d.roundsCompleted > 0;
       }
+      if (type === 'simple') {
+        return (data as SimpleEntryData).completed === true;
+      }
       return false;
     });
   }, [exercises, entryDataMap]);
@@ -574,7 +579,7 @@ export function LiveWorkoutContent({
           <div className="text-center">
             <h1 className="text-sm font-bold text-foreground">{workoutType.name}</h1>
             <p className="text-xs text-muted-foreground">
-              {new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+              {new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}
             </p>
             {readOnly && <span className="text-xs text-primary font-medium">Upcoming</span>}
           </div>
@@ -663,6 +668,15 @@ export function LiveWorkoutContent({
             completed={workoutCompleted}
           />
         )}
+        {exerciseType === 'simple' && (
+          <SimpleLogger
+            config={config as unknown as SimpleConfig}
+            data={currentEntryData as SimpleEntryData | undefined}
+            onSave={(data) => saveEntry(currentExercise.id, data)}
+            saving={saving}
+            completed={workoutCompleted}
+          />
+        )}
       </div>
 
       {/* Navigation + Finish */}
@@ -711,11 +725,50 @@ export function LiveWorkoutContent({
 
 function ExerciseIcon({ type }: { type: ExerciseType }) {
   switch (type) {
-    case 'strength': return <Dumbbell  size={20} className="text-primary" />;
-    case 'distance': return <Footprints size={20} className="text-primary" />;
-    case 'time':     return <Clock     size={20} className="text-primary" />;
-    default:         return <Timer     size={20} className="text-primary" />;
+    case 'strength': return <Dumbbell     size={20} className="text-primary" />;
+    case 'distance': return <Footprints   size={20} className="text-primary" />;
+    case 'time':     return <Clock        size={20} className="text-primary" />;
+    case 'simple':   return <CheckCircle2 size={20} className="text-primary" />;
+    default:         return <Timer        size={20} className="text-primary" />;
   }
+}
+
+// ─── Simple Logger ────────────────────────────────────────────────────────────
+
+function SimpleLogger({
+  config: _config, data, onSave, saving, completed,
+}: {
+  config: SimpleConfig;
+  data: SimpleEntryData | undefined;
+  onSave: (data: SimpleEntryData) => void;
+  saving: boolean;
+  completed: boolean;
+}) {
+  const isDone = data?.completed === true;
+
+  if (completed || isDone) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-8">
+        <div className="w-16 h-16 rounded-full bg-green-500/15 flex items-center justify-center">
+          <CheckCircle2 size={36} className="text-green-500" />
+        </div>
+        <p className="text-base font-semibold text-foreground">Done</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-4 py-8">
+      <button
+        onClick={() => onSave({ completed: true })}
+        disabled={saving}
+        className="w-48 h-48 rounded-full bg-primary/10 hover:bg-primary/20 active:scale-95 transition-all flex flex-col items-center justify-center gap-3 border-2 border-primary/30"
+      >
+        <CheckCircle2 size={48} className="text-primary" />
+        <span className="text-lg font-bold text-primary">Mark Complete</span>
+      </button>
+    </div>
+  );
 }
 
 // ─── Strength Logger ──────────────────────────────────────────────────────────
@@ -751,6 +804,7 @@ function StrengthLogger({
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [editReps,   setEditReps]   = useState(0);
   const [editWeight, setEditWeight] = useState(0);
+  const [savingIdx,  setSavingIdx]  = useState<number | null>(null);
   const restRemaining = useRestTimer();
   const timerRunning = restRemaining !== null && restRemaining > 0;
 
@@ -767,12 +821,17 @@ function StrengthLogger({
 
   const saveEdit = () => {
     if (editingIdx === null) return;
+    setSavingIdx(editingIdx);
     const updated = sets.map((s, i) =>
       i === editingIdx ? { ...s, reps: editReps, weight: editWeight } : s
     );
     onSave({ sets: updated });
     setEditingIdx(null);
   };
+
+  useEffect(() => {
+    if (!saving) setSavingIdx(null);
+  }, [saving]);
 
   return (
     <div className="space-y-4">
@@ -815,9 +874,10 @@ function StrengthLogger({
                   </p>
                   <button
                     onClick={() => startEdit(idx)}
-                    className="w-7 h-7 rounded-lg bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+                    disabled={savingIdx === idx}
+                    className="w-7 h-7 rounded-lg bg-background flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors disabled:cursor-default"
                   >
-                    <Pencil size={13} />
+                    {savingIdx === idx ? <LoadingSpinner size="sm" /> : <Pencil size={13} />}
                   </button>
                 </div>
               )}
@@ -835,7 +895,7 @@ function StrengthLogger({
           </div>
           <div className="max-w-xs mx-auto w-full">
             <Button onClick={logSet} disabled={saving || timerRunning} fullWidth>
-              {saving ? <LoadingSpinner size="sm" /> : 'Log Set'}
+              {saving && editingIdx === null ? <LoadingSpinner size="sm" /> : 'Log Set'}
             </Button>
           </div>
         </div>

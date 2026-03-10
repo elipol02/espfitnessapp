@@ -31,6 +31,7 @@ export type SSEEventType =
   | 'tool-call'
   | 'tool-result'
   | 'ask-user'
+  | 'new-bubble'
   | 'error'
   | 'done'
   | 'cancelled';
@@ -99,12 +100,12 @@ export const WORKOUT_TOOLS = [
                       name: { type: 'string' },
                       exerciseType: {
                         type: 'string',
-                        enum: ['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata'],
+                        enum: ['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata', 'simple'],
                       },
                       config: {
                         type: 'object',
                         description:
-                          'Type-specific config. strength: {sets,repsMin,repsMax,weightType,baseWeight,weightUnit,restSeconds,tempo?}. distance: {sets,distanceTarget,distanceUnit,restSeconds}. time: {sets,durationSeconds,restSeconds}. amrap: {timeCap,movements:[{name,reps?,weight?,weightUnit?}]}. emom: {intervalSeconds,totalMinutes,movements:[...]}. round_block: {rounds,restBetweenRounds,movements:[...]}. tabata: {rounds,workSeconds,restSeconds,movements:[...]}',
+                          'Type-specific config. strength: {sets,repsMin,repsMax,weightType,baseWeight,weightUnit,restSeconds,tempo?}. distance: {sets,distanceTarget,distanceUnit,restSeconds}. time: {sets,durationSeconds,restSeconds}. amrap: {timeCap,movements:[{name,reps?,weight?,weightUnit?}]}. emom: {intervalSeconds,totalMinutes,movements:[...]}. round_block: {rounds,restBetweenRounds,movements:[...]}. tabata: {rounds,workSeconds,restSeconds,movements:[...]}. simple: {} (empty object or {notes?})',
                       },
                       progression: {
                         type: 'object',
@@ -153,7 +154,7 @@ export const WORKOUT_TOOLS = [
                 name: { type: 'string' },
                 exerciseType: {
                   type: 'string',
-                  enum: ['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata'],
+                  enum: ['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata', 'simple'],
                 },
                 config: { type: 'object' },
                 progression: {
@@ -285,6 +286,7 @@ EXERCISE TYPES:
 - emom: Every Minute On the Minute. Config: {intervalSeconds, totalMinutes, movements: [...]}
 - round_block: Fixed rounds. Config: {rounds, restBetweenRounds, movements: [...]}
 - tabata: Work/rest intervals. Config: {rounds, workSeconds, restSeconds, movements: [...]}
+- simple: Just mark it done — no sets, reps, or weight. Config: {} (empty, or {notes?}). Always use progression: {type:"none"}.
 
 PROGRESSION RULES (REQUIRED on EVERY exercise — never omit the progression field):
 - double_progression: {type:"double_progression", repsMin:6, repsMax:12, weightIncrement:5, weightIncrementUnit:"lbs"} — build reps to repsMax across all sets, then bump weight back to repsMin. Use this for ALL weighted strength exercises with a rep range (e.g. "6-10 reps, +5 lbs at top").
@@ -553,7 +555,7 @@ export const planDataSchema = z.object({
       exercises: z.array(
         z.object({
           name: z.string(),
-          exerciseType: z.enum(['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata']),
+          exerciseType: z.enum(['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata', 'simple']),
           config: z.record(z.string(), z.unknown()),
           progression: z.record(z.string(), z.unknown()).optional(),
           groupTag: z.string().optional(),

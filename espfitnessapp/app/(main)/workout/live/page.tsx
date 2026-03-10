@@ -39,7 +39,8 @@ export default async function LiveWorkoutPage({
 
   const suggestions = await computeSuggestions(
     workoutSession.workoutTypeId,
-    session.user.id
+    session.user.id,
+    workoutSession.workoutDate
   );
 
   const user = await prisma.user.findUnique({

@@ -11,9 +11,19 @@ import type {
   TimeConfig,
 } from '../types';
 
+/** Same calendar day in UTC (for comparing stored workoutDate). */
+function isSameUTCDay(a: Date, b: Date): boolean {
+  return (
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
+  );
+}
+
 export async function computeSuggestions(
   workoutTypeId: string,
-  userId: string
+  userId: string,
+  currentWorkoutDate?: Date
 ): Promise<SuggestionMap> {
   const exercises = await prisma.exercise.findMany({
     where: { workoutTypeId },
@@ -25,6 +35,11 @@ export async function computeSuggestions(
     orderBy: { workoutDate: 'desc' },
     include: { entries: true },
   });
+
+  // Don't show "Last → Today" when the last session is the same day as this workout (first time today)
+  if (lastSession && currentWorkoutDate && isSameUTCDay(lastSession.workoutDate, currentWorkoutDate)) {
+    return {};
+  }
 
   const suggestions: SuggestionMap = {};
 

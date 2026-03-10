@@ -464,6 +464,15 @@ interface Props {
 
 // ─── Main LiveWorkoutContent ──────────────────────────────────────────────────
 
+/** True if the workout is for a calendar day after today (user's local time). */
+function isFutureWorkoutDate(workoutDate: Date): boolean {
+  const w = new Date(workoutDate);
+  const t = new Date();
+  w.setHours(0, 0, 0, 0);
+  t.setHours(0, 0, 0, 0);
+  return w.getTime() > t.getTime();
+}
+
 export function LiveWorkoutContent({
   sessionId,
   workoutType,
@@ -477,6 +486,10 @@ export function LiveWorkoutContent({
 }: Props) {
   const router = useRouter();
 
+  // Treat future-dated workouts as read-only (can't log or finish); show "Upcoming"
+  const isFuture = isFutureWorkoutDate(workoutDate);
+  const effectiveReadOnly = readOnly || isFuture;
+
   const [currentExerciseIndex, setCurrentExerciseIndex] = useState(0);
   const [entryDataMap, setEntryDataMap] = useState<Record<string, ExerciseEntryData>>(() => {
     const initial: Record<string, ExerciseEntryData> = {};
@@ -487,7 +500,7 @@ export function LiveWorkoutContent({
   });
   const [saving, setSaving] = useState(false);
   const [finishing, setFinishing] = useState(false);
-  const [workoutCompleted, setWorkoutCompleted] = useState(sessionStatus === 'completed' || readOnly);
+  const [workoutCompleted, setWorkoutCompleted] = useState(sessionStatus === 'completed' || effectiveReadOnly);
 
   const currentExercise = exercises[currentExerciseIndex];
   const isFirst = currentExerciseIndex === 0;
@@ -515,6 +528,7 @@ export function LiveWorkoutContent({
   }, [exercises, entryDataMap]);
 
   const saveEntry = useCallback(async (exerciseId: string, data: ExerciseEntryData) => {
+    if (effectiveReadOnly) return;
     setSaving(true);
     try {
       await fetch('/api/workout/live/add-set', {
@@ -528,7 +542,7 @@ export function LiveWorkoutContent({
     } finally {
       setSaving(false);
     }
-  }, [sessionId]);
+  }, [sessionId, effectiveReadOnly]);
 
   const finishWorkout = useCallback(async () => {
     setFinishing(true);
@@ -579,9 +593,9 @@ export function LiveWorkoutContent({
           <div className="text-center">
             <h1 className="text-sm font-bold text-foreground">{workoutType.name}</h1>
             <p className="text-xs text-muted-foreground">
-              {new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}
+              {new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
             </p>
-            {readOnly && <span className="text-xs text-primary font-medium">Upcoming</span>}
+            {effectiveReadOnly && <span className="text-xs text-primary font-medium">Upcoming</span>}
           </div>
           {/* Wide spacer keeps center aligned and gives room for rest-timer badge */}
           <div className="w-16" />
@@ -674,7 +688,7 @@ export function LiveWorkoutContent({
             data={currentEntryData as SimpleEntryData | undefined}
             onSave={(data) => saveEntry(currentExercise.id, data)}
             saving={saving}
-            readOnly={readOnly}
+            readOnly={effectiveReadOnly}
           />
         )}
       </div>
@@ -696,7 +710,7 @@ export function LiveWorkoutContent({
             </p>
           </div>
 
-          {isLast && allExercisesComplete && !workoutCompleted ? (
+          {isLast && allExercisesComplete && !workoutCompleted && !effectiveReadOnly ? (
             <Button onClick={finishWorkout} disabled={finishing}>
               {finishing ? <LoadingSpinner size="sm" /> : <Check size={18} />}
               <span className="ml-1">Finish Workout</span>
@@ -712,7 +726,7 @@ export function LiveWorkoutContent({
           )}
         </div>
 
-        {allExercisesComplete && !workoutCompleted && !isLast && (
+        {allExercisesComplete && !workoutCompleted && !isLast && !effectiveReadOnly && (
           <Button onClick={finishWorkout} disabled={finishing} fullWidth className="mt-2">
             {finishing ? <LoadingSpinner size="sm" /> : <Check size={18} />}
             <span className="ml-1">Finish Workout</span>

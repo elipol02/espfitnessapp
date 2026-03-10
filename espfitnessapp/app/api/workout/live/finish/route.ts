@@ -28,6 +28,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, data: { alreadyCompleted: true } });
     }
 
+    // Reject finishing a workout that is dated in the future (UTC calendar day)
+    const now = new Date();
+    const todayStartUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const workoutDayStart = new Date(workoutSession.workoutDate);
+    workoutDayStart.setUTCHours(0, 0, 0, 0);
+    if (workoutDayStart.getTime() > todayStartUTC.getTime()) {
+      return NextResponse.json(
+        { success: false, error: 'Cannot complete a future-dated workout.' },
+        { status: 400 }
+      );
+    }
+
     await prisma.workoutSession.update({
       where: { id: sessionId },
       data: {

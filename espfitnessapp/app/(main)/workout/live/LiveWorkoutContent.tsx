@@ -466,11 +466,13 @@ interface Props {
 
 /** True if the workout is for a calendar day after today (user's local time). */
 function isFutureWorkoutDate(workoutDate: Date): boolean {
-  const w = new Date(workoutDate);
-  const t = new Date();
-  w.setHours(0, 0, 0, 0);
-  t.setHours(0, 0, 0, 0);
-  return w.getTime() > t.getTime();
+  // Workout date is stored as UTC midnight for the calendar day (e.g. "March 10" = 2025-03-10T00:00:00.000Z).
+  // Compare that calendar day (UTC) to the user's current local calendar day.
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const workoutDay = `${workoutDate.getUTCFullYear()}-${pad(workoutDate.getUTCMonth() + 1)}-${pad(workoutDate.getUTCDate())}`;
+  const now = new Date();
+  const todayLocal = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  return workoutDay > todayLocal;
 }
 
 export function LiveWorkoutContent({

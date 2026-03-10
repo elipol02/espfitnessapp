@@ -1,7 +1,9 @@
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
+import { computeSuggestions } from '@/app/lib/progression';
 import { redirect } from 'next/navigation';
 import { RedirectToLocalDate } from './RedirectToLocalDate';
+import { LiveWorkoutContent } from '../live/LiveWorkoutContent';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,10 +22,8 @@ export default async function TodayWorkoutPage({
   const userId = session.user.id;
   const params = await searchParams;
   let workoutTypeId = params.workoutTypeId;
-  let dateStr = params.date;
+  const dateStr = params.date;
 
-  // No date param: we need the user's local "today" (server timezone would be wrong).
-  // Client redirect will add ?date=YYYY-MM-DD and reload.
   if (!dateStr) {
     return (
       <div className="px-5 pb-28">
@@ -32,7 +32,6 @@ export default async function TodayWorkoutPage({
     );
   }
 
-  // Look up assignment for this date (by day-of-week). Parse date in local terms for correct DOW.
   if (!workoutTypeId) {
     const [y, m, d] = dateStr.split('-').map(Number);
     const localDate = new Date(y, m - 1, d);
@@ -64,12 +63,13 @@ export default async function TodayWorkoutPage({
     workoutTypeId = assignment.workoutType.id;
   }
 
-  // Find existing session for this workout type on this date
   const workoutDate = new Date(dateStr);
   const startOfDay = new Date(workoutDate);
   startOfDay.setUTCHours(0, 0, 0, 0);
   const endOfDay = new Date(workoutDate);
   endOfDay.setUTCHours(23, 59, 59, 999);
+
+  let workoutSessionId: string;
 
   const existingSession = await prisma.workoutSession.findFirst({
     where: {
@@ -81,25 +81,64 @@ export default async function TodayWorkoutPage({
   });
 
   if (existingSession) {
-    redirect(`/workout/live?sessionId=${existingSession.id}`);
+    workoutSessionId = existingSession.id;
+  } else {
+    const activePlan = await prisma.workoutPlan.findFirst({
+      where: { userId, status: 'active' },
+      select: { id: true },
+    });
+
+    const newSession = await prisma.workoutSession.create({
+      data: {
+        userId,
+        workoutTypeId,
+        planId: activePlan?.id ?? null,
+        workoutDate: startOfDay,
+        status: 'in_progress',
+        startedAt: new Date(),
+      },
+    });
+
+    workoutSessionId = newSession.id;
   }
 
-  // No session yet — create one and redirect
-  const activePlan = await prisma.workoutPlan.findFirst({
-    where: { userId, status: 'active' },
-    select: { id: true },
-  });
-
-  const newSession = await prisma.workoutSession.create({
-    data: {
-      userId,
-      workoutTypeId,
-      planId: activePlan?.id ?? null,
-      workoutDate: startOfDay,
-      status: 'in_progress',
-      startedAt: new Date(),
+  const workoutSession = await prisma.workoutSession.findFirst({
+    where: { id: workoutSessionId, userId },
+    include: {
+      workoutType: {
+        include: {
+          exercises: { orderBy: { order: 'asc' } },
+        },
+      },
+      entries: true,
     },
   });
 
-  redirect(`/workout/live?sessionId=${newSession.id}`);
+  if (!workoutSession) {
+    redirect('/home');
+  }
+
+  const [suggestions, user] = await Promise.all([
+    computeSuggestions(workoutSession.workoutTypeId, userId, workoutSession.workoutDate),
+    prisma.user.findUnique({ where: { id: userId }, select: { bodyweight: true } }),
+  ]);
+
+  const exercises = workoutSession.workoutType.exercises.map((ex) => ({
+    ...ex,
+    config: ex.config as Record<string, unknown>,
+    progression: ex.progression as Record<string, unknown> | null,
+  }));
+
+  return (
+    <LiveWorkoutContent
+      sessionId={workoutSession.id}
+      workoutType={workoutSession.workoutType}
+      exercises={exercises}
+      existingEntries={workoutSession.entries}
+      suggestions={suggestions}
+      sessionStatus={workoutSession.status}
+      userBodyweight={user?.bodyweight || null}
+      workoutDate={workoutSession.workoutDate}
+    />
+  );
 }

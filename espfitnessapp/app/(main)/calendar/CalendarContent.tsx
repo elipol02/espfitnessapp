@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
@@ -36,7 +35,6 @@ type ViewMode = 'month' | 'week';
 const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6 };
 
 export function CalendarContent({ data }: { data: CalendarData }) {
-  const router = useRouter();
   const restTimer = useRestTimer();
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>('month');
@@ -130,10 +128,6 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     date.getMonth() === today.getMonth() &&
     date.getDate() === today.getDate();
 
-  const startOrResumeWorkout = (workoutTypeId: string, dateStr: string) => {
-    router.push(`/workout/today?workoutTypeId=${workoutTypeId}&date=${dateStr}`);
-  };
-
   if (dayAssignments.length === 0) {
     return (
       <div className="px-4 pt-8 pb-24">
@@ -223,28 +217,23 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                 const hasWorkout = !!assignment && (isCompleted || (!beforePlanStart && !afterPlanEnd));
                 const dateStr = date.toLocaleDateString('en-CA');
 
-                const handleClick = () => {
-                  if (!hasWorkout) return;
-                  if (session) {
-                    router.push(`/workout/live?sessionId=${session.id}`);
-                  } else if (future) {
-                    router.push(`/workout/preview?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`);
-                  } else {
-                    startOrResumeWorkout(assignment!.workoutType.id, dateStr);
-                  }
-                };
+                const workoutHref = hasWorkout
+                  ? session
+                    ? `/workout/live?sessionId=${session.id}`
+                    : future
+                      ? `/workout/preview?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`
+                      : `/workout/today?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`
+                  : null;
 
-                return (
-                  <div
-                    key={i}
-                    onClick={handleClick}
-                    className={`
-                      aspect-square flex flex-col items-center justify-center rounded-lg
-                      transition-colors relative gap-1.25 p-1
-                      ${isTodayDate ? 'ring-2 ring-primary' : ''}
-                      ${hasWorkout ? 'hover:bg-surface-elevated cursor-pointer' : 'cursor-default'}
-                    `}
-                  >
+                const cellClass = `
+                  aspect-square flex flex-col items-center justify-center rounded-lg
+                  transition-colors relative gap-1.25 p-1
+                  ${isTodayDate ? 'ring-2 ring-primary' : ''}
+                  ${hasWorkout ? 'hover:bg-surface-elevated cursor-pointer' : 'cursor-default'}
+                `;
+
+                const cellContent = (
+                  <>
                     <span className={`text-sm leading-none ${isTodayDate ? 'font-bold text-primary' : 'text-foreground'}`}>
                       {date.getDate()}
                     </span>
@@ -259,6 +248,16 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                         {isCompleted && <Check size={14} className="text-white" />}
                       </div>
                     )}
+                  </>
+                );
+
+                return workoutHref ? (
+                  <Link key={i} href={workoutHref} className={cellClass}>
+                    {cellContent}
+                  </Link>
+                ) : (
+                  <div key={i} className={cellClass}>
+                    {cellContent}
                   </div>
                 );
               })}
@@ -305,29 +304,26 @@ export function CalendarContent({ data }: { data: CalendarData }) {
 
                     {showWorkout && (
                       future ? (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => router.push(`/workout/preview?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`)}
+                        <Link
+                          href={`/workout/preview?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`}
+                          className="inline-flex items-center justify-center font-medium rounded-lg transition-colors duration-150 touch-target px-3 py-1.5 text-sm min-h-[36px] bg-surface hover:bg-surface-elevated text-foreground border border-border"
                         >
                           Preview
-                        </Button>
+                        </Link>
                       ) : session ? (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => router.push(`/workout/live?sessionId=${session.id}`)}
+                        <Link
+                          href={`/workout/live?sessionId=${session.id}`}
+                          className="inline-flex items-center justify-center font-medium rounded-lg transition-colors duration-150 touch-target px-3 py-1.5 text-sm min-h-[36px] bg-surface hover:bg-surface-elevated text-foreground border border-border"
                         >
                           {isCompleted ? 'View' : 'Resume'}
-                        </Button>
+                        </Link>
                       ) : (
-                        <Button
-                          size="sm"
-                          variant={isTodayDate ? 'primary' : 'secondary'}
-                          onClick={() => startOrResumeWorkout(assignment!.workoutType.id, dateStr)}
+                        <Link
+                          href={`/workout/today?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`}
+                          className={`inline-flex items-center justify-center font-medium rounded-lg transition-colors duration-150 touch-target px-3 py-1.5 text-sm min-h-[36px] ${isTodayDate ? 'bg-primary hover:bg-primary-hover text-white' : 'bg-surface hover:bg-surface-elevated text-foreground border border-border'}`}
                         >
                           Start
-                        </Button>
+                        </Link>
                       )
                     )}
                   </div>

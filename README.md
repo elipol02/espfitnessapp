@@ -1,4 +1,4 @@
-# ESP Fitness ([espfitnessapp.com])
+# ESP Fitness ([https://espfitnessapp.com])
 
 An AI-powered fitness planning and workout tracking Progressive Web App (PWA) built with Next.js. Chat with an AI coach to generate personalized workout plans, then track your workouts in real time with automatic progression suggestions.
 

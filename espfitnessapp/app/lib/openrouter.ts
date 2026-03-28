@@ -56,6 +56,7 @@ export interface SSEEvent {
   };
   questions?: AskUserQuestion[];
   error?: string;
+  savedMessageIds?: string[];
 }
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
@@ -505,6 +506,7 @@ export class OpenRouterClient {
                   };
                 }
               }
+              toolCallsBuffer.clear();
             }
           } catch {
             // Skip malformed chunks

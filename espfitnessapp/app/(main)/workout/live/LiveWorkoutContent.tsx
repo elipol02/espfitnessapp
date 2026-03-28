@@ -3,12 +3,15 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  ArrowLeft, ChevronLeft, ChevronRight, Check, Timer,
+  ArrowLeft, ChevronLeft, ChevronRight, Check, Timer, X,
   Dumbbell, Footprints, Clock, Play, Pause, RotateCcw, Pencil, CheckCircle2,
 } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import { LoadingSpinner } from '@/app/components/LoadingSpinner';
-import { startRestTimer, useRestTimer } from '@/app/components/RestTimerBadge';
+import {
+  startRestTimer, cancelRestTimer, dismissRestTimerDone, suppressRestTimerBadge,
+  useRestTimer, useRestTimerExerciseId, useRestTimerDone,
+} from '@/app/components/RestTimerBadge';
 import type {
   ExerciseType,
   StrengthConfig,
@@ -20,6 +23,7 @@ import type {
   TabataConfig,
   SimpleConfig,
   SuggestionMap,
+  ProgressionSuggestion,
   StrengthEntryData,
   DistanceEntryData,
   TimeEntryData,
@@ -82,18 +86,22 @@ interface FinishData {
   segmentsCompleted: number;
 }
 
+const TIMER_STORAGE_PREFIX = 'esp_interval_timer_';
+
 function IntervalTimer({
   config,
   onFinish,
   resetKey,
   adjustable = false,
   onDurationChange,
+  storageKey,
 }: {
   config: IntervalTimerConfig;
   onFinish?: (data: FinishData) => void;
   resetKey?: number;
   adjustable?: boolean;
   onDurationChange?: (seconds: number) => void;
+  storageKey?: string;
 }) {
   // Which kinds support adjustable
   const isAdjustableSingle = adjustable && (config.kind === 'countdown' || config.kind === 'amrap');
@@ -106,6 +114,9 @@ function IntervalTimer({
   const [localIntervals, setLocalIntervals] = useState(
     config.kind === 'emom' ? config.totalIntervals : 0
   );
+  const [localIntervalSecs, setLocalIntervalSecs] = useState(
+    config.kind === 'emom' ? config.intervalSeconds : 0
+  );
 
   // Segments rebuild from local values when adjustable (safe — only changes while idle)
   const segments = useMemo(() => {
@@ -116,12 +127,12 @@ function IntervalTimer({
     if (isAdjustableEmom && config.kind === 'emom') {
       return Array.from({ length: localIntervals }, (_, i) => ({
         label: `Interval ${i + 1} / ${localIntervals}`,
-        duration: config.intervalSeconds,
+        duration: localIntervalSecs,
         phase: 'work' as const,
       })) as Segment[];
     }
     return buildSegments(config);
-  }, [config, isAdjustableSingle, isAdjustableEmom, localDuration, localIntervals]);
+  }, [config, isAdjustableSingle, isAdjustableEmom, localDuration, localIntervals, localIntervalSecs]);
 
   const [status, setStatus] = useState<TimerStatus>('idle');
   const [getReadyCount, setGetReadyCount] = useState(5);
@@ -138,6 +149,30 @@ function IntervalTimer({
   onFinishRef.current         = onFinish;
   onDurationChangeRef.current = onDurationChange;
 
+  const fullStorageKey = storageKey ? `${TIMER_STORAGE_PREFIX}${storageKey}` : null;
+  const initialRestoreRef = useRef(false);
+
+  const persistState = useCallback((s: 'active' | 'paused') => {
+    if (!fullStorageKey) return;
+    const state: Record<string, unknown> = {
+      status: s,
+      segIdx: segIdxRef.current,
+      totalElapsed: totalElapsedRef.current,
+      segsCompleted: segsCompletedRef.current,
+    };
+    if (s === 'active') {
+      state.segmentEndTime = startTimeRef.current + pausedRemainingRef.current * 1000;
+    } else {
+      state.pausedRemaining = pausedRemainingRef.current;
+    }
+    localStorage.setItem(fullStorageKey, JSON.stringify(state));
+  }, [fullStorageKey]);
+
+  const clearTimerState = useCallback(() => {
+    if (!fullStorageKey) return;
+    localStorage.removeItem(fullStorageKey);
+  }, [fullStorageKey]);
+
   const doReset = useCallback((dur?: number) => {
     const d = dur ?? segments[0]?.duration ?? 0;
     setStatus('idle');
@@ -148,13 +183,77 @@ function IntervalTimer({
     setRemaining(d);
     totalElapsedRef.current    = 0;
     segsCompletedRef.current   = 0;
-  }, [segments]);
+    if (initialRestoreRef.current) clearTimerState();
+  }, [segments, clearTimerState]);
 
   // Reset when resetKey changes
   useEffect(() => {
     doReset();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey]);
+
+  // Restore timer state from localStorage on initial mount.
+  // The cleanup resets the guard so React Strict Mode's double-invoke cycle
+  // (mount → cleanup → remount) doesn't prevent restoration on the second run.
+  useEffect(() => {
+    if (initialRestoreRef.current || !fullStorageKey) return;
+    initialRestoreRef.current = true;
+
+    const raw = localStorage.getItem(fullStorageKey);
+    if (!raw) return;
+
+    try {
+      const saved = JSON.parse(raw);
+      if (saved.status === 'paused') {
+        segIdxRef.current = saved.segIdx;
+        setSegIdx(saved.segIdx);
+        pausedRemainingRef.current = saved.pausedRemaining;
+        setRemaining(Math.ceil(saved.pausedRemaining));
+        totalElapsedRef.current = saved.totalElapsed;
+        segsCompletedRef.current = saved.segsCompleted;
+        setStatus('paused');
+      } else if (saved.status === 'active') {
+        let segI = saved.segIdx;
+        let totalEl = saved.totalElapsed;
+        let segsComp = saved.segsCompleted;
+        let endTime = saved.segmentEndTime;
+        const now = Date.now();
+
+        // Fast-forward through segments that completed while away
+        while (endTime <= now && segI < segments.length) {
+          totalEl += segments[segI].duration;
+          segsComp++;
+          segI++;
+          if (segI < segments.length) {
+            endTime += segments[segI].duration * 1000;
+          }
+        }
+
+        if (segI >= segments.length) {
+          localStorage.removeItem(fullStorageKey);
+          totalElapsedRef.current = totalEl;
+          segsCompletedRef.current = segsComp;
+          setStatus('done');
+          onFinishRef.current?.({ elapsedSeconds: Math.round(totalEl), segmentsCompleted: segsComp });
+        } else {
+          const rem = (endTime - now) / 1000;
+          segIdxRef.current = segI;
+          setSegIdx(segI);
+          pausedRemainingRef.current = rem;
+          startTimeRef.current = now;
+          setRemaining(Math.ceil(rem));
+          totalElapsedRef.current = totalEl;
+          segsCompletedRef.current = segsComp;
+          setStatus('active');
+        }
+      }
+    } catch {
+      localStorage.removeItem(fullStorageKey);
+    }
+
+    return () => { initialRestoreRef.current = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 5-second get-ready countdown
   useEffect(() => {
@@ -168,11 +267,12 @@ function IntervalTimer({
       setSegIdx(0);
       setRemaining(segments[0].duration);
       setStatus('active');
+      persistState('active');
       return;
     }
     const t = setTimeout(() => setGetReadyCount((c) => c - 1), 1000);
     return () => clearTimeout(t);
-  }, [status, getReadyCount, segments]);
+  }, [status, getReadyCount, segments, persistState]);
 
   // Main timer tick
   useEffect(() => {
@@ -188,6 +288,7 @@ function IntervalTimer({
         const next = segIdxRef.current + 1;
 
         if (next >= segments.length) {
+          clearTimerState();
           setStatus('done');
           onFinishRef.current?.({
             elapsedSeconds: Math.round(totalElapsedRef.current),
@@ -199,11 +300,12 @@ function IntervalTimer({
           startTimeRef.current       = Date.now();
           setSegIdx(next);
           setRemaining(segments[next].duration);
+          persistState('active');
         }
       }
     }, 200);
     return () => clearInterval(id);
-  }, [status, segments]);
+  }, [status, segments, clearTimerState, persistState]);
 
   const handleStart = () => { setGetReadyCount(5); setStatus('get-ready'); };
 
@@ -212,13 +314,18 @@ function IntervalTimer({
     pausedRemainingRef.current = Math.max(0, pausedRemainingRef.current - elapsed);
     setRemaining(Math.ceil(pausedRemainingRef.current));
     setStatus('paused');
+    persistState('paused');
   };
 
-  const handleResume = () => { startTimeRef.current = Date.now(); setStatus('active'); };
+  const handleResume = () => {
+    startTimeRef.current = Date.now();
+    setStatus('active');
+    persistState('active');
+  };
 
   const handleReset = () => {
     if (isAdjustableSingle) return doReset(localDuration);
-    if (isAdjustableEmom && config.kind === 'emom') return doReset(config.intervalSeconds);
+    if (isAdjustableEmom && config.kind === 'emom') return doReset(localIntervalSecs);
     doReset();
   };
 
@@ -235,7 +342,14 @@ function IntervalTimer({
     if (config.kind !== 'emom') return;
     const next = Math.max(1, localIntervals + delta);
     setLocalIntervals(next);
-    // remaining stays as intervalSeconds — no change needed
+  };
+
+  const adjustIntervalDuration = (delta: number) => {
+    if (config.kind !== 'emom') return;
+    const next = Math.max(10, localIntervalSecs + delta);
+    setLocalIntervalSecs(next);
+    setRemaining(next);
+    pausedRemainingRef.current = next;
   };
 
   const seg = segments[segIdx] ?? segments[0];
@@ -304,28 +418,47 @@ function IntervalTimer({
               </div>
             )}
 
-            {/* EMOM adjustable interval count stepper */}
+            {/* EMOM adjustable interval count + duration steppers */}
             {isAdjustableEmom && config.kind === 'emom' && (
-              <div className="w-full space-y-2">
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => adjustIntervals(-1)}
-                    className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
-                  >−</button>
-                  <div className="flex-1 text-center">
-                    <div className="text-5xl font-black tabular-nums text-foreground">{localIntervals}</div>
-                    <div className="text-xs text-muted-foreground mt-0.5">
-                      intervals · {formatTime(localIntervals * config.intervalSeconds)} total
+              <div className="w-full space-y-4">
+                {/* Interval count */}
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground text-center font-medium">Intervals</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => adjustIntervals(-1)}
+                      className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                    >−</button>
+                    <div className="flex-1 text-center">
+                      <div className="text-5xl font-black tabular-nums text-foreground">{localIntervals}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {formatTime(localIntervals * localIntervalSecs)} total
+                      </div>
                     </div>
+                    <button
+                      onClick={() => adjustIntervals(1)}
+                      className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                    >+</button>
                   </div>
-                  <button
-                    onClick={() => adjustIntervals(1)}
-                    className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
-                  >+</button>
                 </div>
-                <p className="text-xs text-muted-foreground text-center">
-                  {formatTime(config.intervalSeconds)} each
-                </p>
+                {/* Interval duration */}
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground text-center font-medium">Time per interval</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => adjustIntervalDuration(-10)}
+                      className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                    >−</button>
+                    <span className="flex-1 text-center text-4xl font-black tabular-nums text-foreground">
+                      {formatTime(localIntervalSecs)}
+                    </span>
+                    <button
+                      onClick={() => adjustIntervalDuration(10)}
+                      className="w-11 h-11 rounded-xl bg-background border border-border flex items-center justify-center text-foreground font-bold text-lg"
+                    >+</button>
+                  </div>
+                  <p className="text-xs text-muted-foreground text-center">10s steps</p>
+                </div>
               </div>
             )}
 
@@ -516,7 +649,8 @@ export function LiveWorkoutContent({
       const type = ex.exerciseType as ExerciseType;
       if (type === 'strength' || type === 'distance' || type === 'time') {
         const d = data as StrengthEntryData | DistanceEntryData | TimeEntryData;
-        return 'sets' in d && d.sets.length > 0 && d.sets.every((s: { completed?: boolean }) => s.completed);
+        const targetSets = (ex.config as { sets?: number }).sets ?? 1;
+        return 'sets' in d && d.sets.length >= targetSets && d.sets.every((s: { completed?: boolean }) => s.completed);
       }
       if (type === 'amrap' || type === 'emom' || type === 'round_block' || type === 'tabata') {
         const d = data as RoundsEntryData;
@@ -528,6 +662,26 @@ export function LiveWorkoutContent({
       return false;
     });
   }, [exercises, entryDataMap]);
+
+  const restRemaining  = useRestTimer();
+  const restExerciseId = useRestTimerExerciseId();
+  const restDone       = useRestTimerDone();
+  const timerRunning   = restRemaining !== null && restRemaining > 0;
+  const matchesExercise = !!(restExerciseId && currentExercise && restExerciseId === currentExercise.id);
+  const showInlineTimer = !!(matchesExercise && (timerRunning || restDone));
+
+  useEffect(() => {
+    suppressRestTimerBadge(showInlineTimer);
+    return () => suppressRestTimerBadge(false);
+  }, [showInlineTimer]);
+
+  useEffect(() => {
+    if (!sessionId || readOnly) return;
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const openedDate = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    localStorage.setItem('esp_last_workout_session', JSON.stringify({ sessionId, openedDate }));
+  }, [sessionId, readOnly]);
 
   const saveEntry = useCallback(async (exerciseId: string, data: ExerciseEntryData) => {
     if (effectiveReadOnly) return;
@@ -578,11 +732,9 @@ export function LiveWorkoutContent({
   const config        = currentExercise.config;
   const suggestion    = suggestions[currentExercise.id];
   const currentEntryData = entryDataMap[currentExercise.id];
-  const restRemaining = useRestTimer();
-  const timerRunning  = restRemaining !== null && restRemaining > 0;
   const strengthConfig = exerciseType === 'strength' ? config as unknown as StrengthConfig : null;
   const strengthSets   = exerciseType === 'strength' ? ((currentEntryData as StrengthEntryData | undefined)?.sets ?? []) : [];
-  const showRestButton = !!(strengthConfig && strengthConfig.restSeconds > 0 && strengthSets.length > 0 && !timerRunning);
+  const showRestButton = !!(strengthConfig && strengthConfig.restSeconds > 0 && strengthSets.length > 0 && !timerRunning && !restDone);
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -595,7 +747,13 @@ export function LiveWorkoutContent({
           <div className="text-center">
             <h1 className="text-sm font-bold text-foreground">{workoutType.name}</h1>
             <p className="text-xs text-muted-foreground">
-              {new Date(workoutDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+              {(() => {
+                const d = new Date(workoutDate);
+                // workoutDate is stored as UTC midnight for the calendar day, so use
+                // UTC accessors to avoid shifting the date in non-UTC timezones.
+                const utcDate = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+                return utcDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+              })()}
             </p>
             {effectiveReadOnly && <span className="text-xs text-primary font-medium">Upcoming</span>}
           </div>
@@ -624,14 +782,12 @@ export function LiveWorkoutContent({
         <div className="flex items-center gap-2 mb-1">
           <ExerciseIcon type={exerciseType} />
           <h2 className="text-xl font-bold text-foreground flex-1">{currentExercise.name}</h2>
-          {showRestButton && (
-            <button
-              onClick={() => startRestTimer(strengthConfig!.restSeconds)}
-              className="flex items-center gap-1 text-xs text-primary font-medium px-2 py-1 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors"
-            >
-              <Timer size={12} /> Rest
-            </button>
-          )}
+          <button
+            onClick={() => startRestTimer(strengthConfig!.restSeconds, currentExercise.id)}
+            className={`flex items-center gap-1 text-xs text-primary font-medium px-2 py-1 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors ${showRestButton ? '' : 'invisible pointer-events-none'}`}
+          >
+            <Timer size={12} /> Rest
+          </button>
         </div>
         <p className="text-sm text-muted-foreground mb-4 capitalize">{exerciseType.replace('_', ' ')}</p>
 
@@ -649,20 +805,26 @@ export function LiveWorkoutContent({
         {exerciseType === 'strength' && (
           <StrengthLogger
             key={currentExercise.id}
+            exerciseId={currentExercise.id}
             config={config as unknown as StrengthConfig}
             data={currentEntryData as StrengthEntryData | undefined}
+            suggestion={suggestion}
             onSave={(data) => saveEntry(currentExercise.id, data)}
             saving={saving}
             completed={workoutCompleted}
+            hideNextSet={showInlineTimer}
           />
         )}
         {exerciseType === 'distance' && (
           <DistanceLogger
+            exerciseId={currentExercise.id}
             config={config as unknown as DistanceConfig}
             data={currentEntryData as DistanceEntryData | undefined}
+            suggestion={suggestion}
             onSave={(data) => saveEntry(currentExercise.id, data)}
             saving={saving}
             completed={workoutCompleted}
+            hideNextSet={showInlineTimer}
           />
         )}
         {exerciseType === 'time' && (
@@ -672,6 +834,8 @@ export function LiveWorkoutContent({
             onSave={(data) => saveEntry(currentExercise.id, data)}
             saving={saving}
             completed={workoutCompleted}
+            exerciseId={currentExercise.id}
+            hideNextSet={showInlineTimer}
           />
         )}
         {(exerciseType === 'amrap' || exerciseType === 'emom' || exerciseType === 'round_block' || exerciseType === 'tabata') && (
@@ -682,6 +846,7 @@ export function LiveWorkoutContent({
             onSave={(data) => saveEntry(currentExercise.id, data)}
             saving={saving}
             completed={workoutCompleted}
+            exerciseId={currentExercise.id}
           />
         )}
         {exerciseType === 'simple' && (
@@ -818,28 +983,39 @@ function SetStepper({ label, value, onChange, min = 1, step = 1 }: {
 }
 
 function StrengthLogger({
-  config, data, onSave, saving, completed,
+  config, data, suggestion, onSave, saving, completed, exerciseId, hideNextSet = false,
 }: {
   config: StrengthConfig;
   data: StrengthEntryData | undefined;
+  suggestion?: ProgressionSuggestion;
   onSave: (data: StrengthEntryData) => void;
   saving: boolean;
   completed: boolean;
+  exerciseId?: string;
+  hideNextSet?: boolean;
 }) {
   const targetSets = config.sets;
   const sets = data?.sets || [];
-  const [reps,   setReps]   = useState(config.repsMin);
-  const [weight, setWeight] = useState(config.baseWeight);
+
+  // Default to the last logged set's values → suggestion → config baseline
+  const lastSet = sets[sets.length - 1];
+  const defaultReps   = lastSet?.reps   ?? suggestion?.suggestedReps   ?? config.repsMin;
+  const defaultWeight = lastSet?.weight ?? suggestion?.suggestedWeight ?? config.baseWeight;
+
+  const [reps,   setReps]   = useState(defaultReps);
+  const [weight, setWeight] = useState(defaultWeight);
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [editReps,   setEditReps]   = useState(0);
   const [editWeight, setEditWeight] = useState(0);
   const [savingIdx,  setSavingIdx]  = useState<number | null>(null);
   const restRemaining = useRestTimer();
-  const timerRunning = restRemaining !== null && restRemaining > 0;
+  const restDone = useRestTimerDone();
 
   const logSet = () => {
     onSave({ sets: [...sets, { reps, weight, weightUnit: config.weightUnit, completed: true }] });
-    if (config.restSeconds > 0) startRestTimer(config.restSeconds);
+    setReps(reps);
+    setWeight(weight);
+    if (config.restSeconds > 0) startRestTimer(config.restSeconds, exerciseId);
   };
 
   const startEdit = (idx: number) => {
@@ -916,18 +1092,44 @@ function StrengthLogger({
       )}
 
       {sets.length < targetSets && !completed && (
-        <div className="bg-surface rounded-xl p-4 space-y-4">
-          <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
-          <div className="space-y-3 max-w-xs mx-auto">
-            <SetStepper label="Reps" value={reps} onChange={setReps} min={1} />
-            <SetStepper label={`Weight (${config.weightUnit})`} value={weight} onChange={setWeight} min={0} step={5} />
+        hideNextSet && restRemaining !== null ? (
+          <div className="bg-primary/10 border border-primary/20 rounded-xl p-6 flex flex-col items-center gap-3">
+            <p className="text-xs font-semibold text-primary/70 uppercase tracking-widest">Rest</p>
+            <span className="text-8xl font-black tabular-nums text-primary leading-none tracking-tight">
+              {formatTime(restRemaining)}
+            </span>
+            <button
+              onClick={cancelRestTimer}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X size={11} /> Skip rest
+            </button>
           </div>
-          <div className="max-w-xs mx-auto w-full">
-            <Button onClick={logSet} disabled={saving || timerRunning} fullWidth>
-              {saving && editingIdx === null ? <LoadingSpinner size="sm" /> : 'Log Set'}
-            </Button>
+        ) : hideNextSet && restDone ? (
+          <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-6 flex flex-col items-center gap-3">
+            <CheckCircle2 size={32} className="text-green-500" />
+            <p className="text-lg font-bold text-green-500">Done</p>
+            <button
+              onClick={dismissRestTimerDone}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X size={11} /> Dismiss
+            </button>
           </div>
-        </div>
+        ) : !hideNextSet ? (
+          <div className="bg-surface rounded-xl p-4 space-y-4">
+            <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
+            <div className="space-y-3 max-w-xs mx-auto">
+              <SetStepper label="Reps" value={reps} onChange={setReps} min={1} />
+              <SetStepper label={`Weight (${config.weightUnit})`} value={weight} onChange={setWeight} min={0} step={5} />
+            </div>
+            <div className="max-w-xs mx-auto w-full">
+              <Button onClick={logSet} disabled={saving} fullWidth>
+                {saving && editingIdx === null ? <LoadingSpinner size="sm" /> : 'Log Set'}
+              </Button>
+            </div>
+          </div>
+        ) : null
       )}
 
       {sets.length >= targetSets && (
@@ -940,21 +1142,31 @@ function StrengthLogger({
 // ─── Distance Logger ──────────────────────────────────────────────────────────
 
 function DistanceLogger({
-  config, data, onSave, saving, completed,
+  config, data, suggestion, onSave, saving, completed, exerciseId, hideNextSet = false,
 }: {
   config: DistanceConfig;
   data: DistanceEntryData | undefined;
+  suggestion?: ProgressionSuggestion;
   onSave: (data: DistanceEntryData) => void;
   saving: boolean;
   completed: boolean;
+  exerciseId?: string;
+  hideNextSet?: boolean;
 }) {
   const targetSets = config.sets;
   const sets = data?.sets || [];
-  const [distance, setDistance] = useState(config.distanceTarget);
+
+  // Default to the last logged set's distance → suggestion → config baseline
+  const lastSet = sets[sets.length - 1];
+  const defaultDistance = lastSet?.distance ?? suggestion?.suggestedDistance ?? config.distanceTarget;
+
+  const [distance, setDistance] = useState(defaultDistance);
+  const restRemaining = useRestTimer();
+  const restDone = useRestTimerDone();
 
   const logSet = () => {
     onSave({ sets: [...sets, { distance, distanceUnit: config.distanceUnit, completed: true }] });
-    if (config.restSeconds > 0) startRestTimer(config.restSeconds);
+    if (config.restSeconds > 0) startRestTimer(config.restSeconds, exerciseId);
   };
 
   return (
@@ -986,20 +1198,46 @@ function DistanceLogger({
       )}
 
       {sets.length < targetSets && !completed && (
-        <div className="bg-surface rounded-xl p-4 space-y-4">
-          <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
-          <div>
-            <label className="text-xs text-muted-foreground block mb-1">Distance ({config.distanceUnit})</label>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setDistance((d) => Math.max(0, d - 5))} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
-              <span className="flex-1 text-center text-lg font-bold text-foreground">{distance}</span>
-              <button onClick={() => setDistance((d) => d + 5)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
-            </div>
+        hideNextSet && restRemaining !== null ? (
+          <div className="bg-primary/10 border border-primary/20 rounded-xl p-6 flex flex-col items-center gap-3">
+            <p className="text-xs font-semibold text-primary/70 uppercase tracking-widest">Rest</p>
+            <span className="text-8xl font-black tabular-nums text-primary leading-none tracking-tight">
+              {formatTime(restRemaining)}
+            </span>
+            <button
+              onClick={cancelRestTimer}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X size={11} /> Skip rest
+            </button>
           </div>
-          <Button onClick={logSet} disabled={saving} fullWidth>
-            {saving ? <LoadingSpinner size="sm" /> : 'Log Set'}
-          </Button>
-        </div>
+        ) : hideNextSet && restDone ? (
+          <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-6 flex flex-col items-center gap-3">
+            <CheckCircle2 size={32} className="text-green-500" />
+            <p className="text-lg font-bold text-green-500">Done</p>
+            <button
+              onClick={dismissRestTimerDone}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X size={11} /> Dismiss
+            </button>
+          </div>
+        ) : !hideNextSet ? (
+          <div className="bg-surface rounded-xl p-4 space-y-4">
+            <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Distance ({config.distanceUnit})</label>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setDistance((d) => Math.max(0, d - 5))} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
+                <span className="flex-1 text-center text-lg font-bold text-foreground">{distance}</span>
+                <button onClick={() => setDistance((d) => d + 5)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
+              </div>
+            </div>
+            <Button onClick={logSet} disabled={saving} fullWidth>
+              {saving ? <LoadingSpinner size="sm" /> : 'Log Set'}
+            </Button>
+          </div>
+        ) : null
       )}
 
       {sets.length >= targetSets && (
@@ -1012,23 +1250,27 @@ function DistanceLogger({
 // ─── Time Logger ──────────────────────────────────────────────────────────────
 
 function TimeLogger({
-  config, data, onSave, saving, completed,
+  config, data, onSave, saving, completed, exerciseId, hideNextSet = false,
 }: {
   config: TimeConfig;
   data: TimeEntryData | undefined;
   onSave: (data: TimeEntryData) => void;
   saving: boolean;
   completed: boolean;
+  exerciseId?: string;
+  hideNextSet?: boolean;
 }) {
   const targetSets = config.sets;
   const sets = data?.sets || [];
   const [timerDone,      setTimerDone]      = useState(false);
   const [actualDuration, setActualDuration] = useState(config.durationSeconds);
+  const restRemaining = useRestTimer();
+  const restDone = useRestTimerDone();
 
   const logSet = () => {
     onSave({ sets: [...sets, { durationSeconds: actualDuration, completed: true }] });
     setTimerDone(false);
-    if (config.restSeconds > 0) startRestTimer(config.restSeconds);
+    if (config.restSeconds > 0) startRestTimer(config.restSeconds, exerciseId);
   };
 
   return (
@@ -1060,24 +1302,51 @@ function TimeLogger({
       )}
 
       {sets.length < targetSets && !completed && (
-        <div className="space-y-3">
-          <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
-          <IntervalTimer
-            config={{ kind: 'countdown', totalSeconds: actualDuration }}
-            onFinish={() => setTimerDone(true)}
-            resetKey={sets.length}
-            adjustable
-            onDurationChange={(s) => setActualDuration(s)}
-          />
-          <Button
-            onClick={logSet}
-            disabled={saving}
-            fullWidth
-            variant={timerDone ? 'primary' : 'secondary'}
-          >
-            {saving ? <LoadingSpinner size="sm" /> : timerDone ? '✓ Submit Set' : 'Log Set'}
-          </Button>
-        </div>
+        hideNextSet && restRemaining !== null ? (
+          <div className="bg-primary/10 border border-primary/20 rounded-xl p-6 flex flex-col items-center gap-3">
+            <p className="text-xs font-semibold text-primary/70 uppercase tracking-widest">Rest</p>
+            <span className="text-8xl font-black tabular-nums text-primary leading-none tracking-tight">
+              {formatTime(restRemaining)}
+            </span>
+            <button
+              onClick={cancelRestTimer}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X size={11} /> Skip rest
+            </button>
+          </div>
+        ) : hideNextSet && restDone ? (
+          <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-6 flex flex-col items-center gap-3">
+            <CheckCircle2 size={32} className="text-green-500" />
+            <p className="text-lg font-bold text-green-500">Done</p>
+            <button
+              onClick={dismissRestTimerDone}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X size={11} /> Dismiss
+            </button>
+          </div>
+        ) : !hideNextSet ? (
+          <div className="space-y-3">
+            <p className="text-sm font-semibold text-foreground">Set {sets.length + 1}</p>
+            <IntervalTimer
+              config={{ kind: 'countdown', totalSeconds: actualDuration }}
+              onFinish={() => setTimerDone(true)}
+              resetKey={sets.length}
+              adjustable
+              onDurationChange={(s) => setActualDuration(s)}
+              storageKey={exerciseId ? `time_${exerciseId}` : undefined}
+            />
+            <Button
+              onClick={logSet}
+              disabled={saving}
+              fullWidth
+              variant={timerDone ? 'primary' : 'secondary'}
+            >
+              {saving ? <LoadingSpinner size="sm" /> : timerDone ? '✓ Submit Set' : 'Log Set'}
+            </Button>
+          </div>
+        ) : null
       )}
 
       {sets.length >= targetSets && (
@@ -1090,7 +1359,7 @@ function TimeLogger({
 // ─── Rounds Logger (AMRAP, EMOM, Round Block, Tabata) ─────────────────────────
 
 function RoundsLogger({
-  exerciseType, config, data, onSave, saving, completed,
+  exerciseType, config, data, onSave, saving, completed, exerciseId,
 }: {
   exerciseType: ExerciseType;
   config: AmrapConfig | EmomConfig | RoundBlockConfig | TabataConfig;
@@ -1098,6 +1367,7 @@ function RoundsLogger({
   onSave: (data: RoundsEntryData) => void;
   saving: boolean;
   completed: boolean;
+  exerciseId?: string;
 }) {
   const [rounds,      setRounds]      = useState(data?.roundsCompleted || 0);
   const [timeElapsed, setTimeElapsed] = useState(data?.timeElapsed || 0);
@@ -1117,6 +1387,20 @@ function RoundsLogger({
   })();
 
   const movements = 'movements' in config ? config.movements : [];
+
+  // Editable weights for movements that have a prescribed weight
+  const [movementWeights, setMovementWeights] = useState<{ name: string; weight: number; weightUnit: string }[]>(() => {
+    if (data?.movementWeights?.length) return data.movementWeights;
+    return movements
+      .filter((m) => m.weight && m.weight > 0)
+      .map((m) => ({ name: m.name, weight: m.weight!, weightUnit: m.weightUnit || 'lbs' }));
+  });
+
+  const updateMovementWeight = (idx: number, delta: number) => {
+    setMovementWeights((prev) =>
+      prev.map((mw, i) => i === idx ? { ...mw, weight: Math.max(0, mw.weight + delta) } : mw)
+    );
+  };
 
   // Build timer config (null for round_block — no fixed time)
   const timerConfig = ((): IntervalTimerConfig | null => {
@@ -1144,9 +1428,7 @@ function RoundsLogger({
   const rbRest         = 'restBetweenRounds' in config ? (config as RoundBlockConfig).restBetweenRounds : 0;
   const [rbCurrent,    setRbCurrent]    = useState(1);
   const [rbRoundTimes, setRbRoundTimes] = useState<number[]>([]);
-  // Duration the user sets before each round (seconds); default 5 min
   const [rbRoundDuration, setRbRoundDuration] = useState(300);
-  // timerKey forces IntervalTimer to remount (reset) for each new round
   const [rbTimerKey,   setRbTimerKey]   = useState(0);
   const [rbTimerDone,  setRbTimerDone]  = useState(false);
 
@@ -1155,9 +1437,9 @@ function RoundsLogger({
     setRbRoundTimes(newTimes);
 
     if (rbCurrent >= rbTotalRounds) {
-      onSave({ roundsCompleted: rbTotalRounds, timeElapsed: newTimes.reduce((a, b) => a + b, 0) });
+      onSave({ roundsCompleted: rbTotalRounds, timeElapsed: newTimes.reduce((a, b) => a + b, 0), movementWeights: movementWeights.length > 0 ? movementWeights : undefined });
     } else {
-      if (rbRest > 0) startRestTimer(rbRest);
+      if (rbRest > 0) startRestTimer(rbRest, exerciseId);
       setRbCurrent((r) => r + 1);
       setRbTimerDone(false);
       setRbTimerKey((k) => k + 1);
@@ -1165,7 +1447,7 @@ function RoundsLogger({
   };
 
   const logResult = () => {
-    onSave({ roundsCompleted: rounds, timeElapsed });
+    onSave({ roundsCompleted: rounds, timeElapsed, movementWeights: movementWeights.length > 0 ? movementWeights : undefined });
   };
 
   return (
@@ -1185,11 +1467,14 @@ function RoundsLogger({
         )}
         {movements.length > 0 && (
           <div className="space-y-0.5 mt-2">
-            {movements.map((m, idx) => (
-              <p key={idx} className="text-sm text-foreground">
-                {m.reps && `${m.reps}× `}{m.name}{m.weight ? ` @ ${m.weight} ${m.weightUnit || 'lbs'}` : ''}
-              </p>
-            ))}
+            {movements.map((m, idx) => {
+              const mwIdx = movementWeights.findIndex((mw) => mw.name === m.name);
+              return (
+                <p key={idx} className="text-sm text-foreground">
+                  {m.reps && `${m.reps}× `}{m.name}{mwIdx >= 0 ? ` @ ${movementWeights[mwIdx].weight} ${movementWeights[mwIdx].weightUnit}` : m.weight ? ` @ ${m.weight} ${m.weightUnit || 'lbs'}` : ''}
+                </p>
+              );
+            })}
           </div>
         )}
       </div>
@@ -1243,6 +1528,7 @@ function RoundsLogger({
               resetKey={rbTimerKey}
               adjustable
               onDurationChange={(s) => setRbRoundDuration(s)}
+              storageKey={exerciseId ? `rb_${exerciseId}` : undefined}
             />
 
             <Button
@@ -1265,36 +1551,52 @@ function RoundsLogger({
             config={timerConfig}
             onFinish={handleTimerFinish}
             adjustable={exerciseType === 'amrap' || exerciseType === 'emom'}
+            storageKey={exerciseId}
           />
 
-          {/* Rounds input — always visible for AMRAP, shown after timer for EMOM/Tabata */}
-          {(exerciseType === 'amrap' || timerDone) && (
+          {/* Weight adjustments for movements */}
+          {movementWeights.length > 0 && (
             <div className="bg-surface rounded-xl p-4 space-y-3">
-              <div>
-                <label className="text-xs text-muted-foreground block mb-1">
-                  {exerciseType === 'amrap' ? 'Rounds completed' : 'Rounds / intervals completed'}
-                </label>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setRounds((r) => Math.max(0, r - 1))} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
-                  <span className="flex-1 text-center text-lg font-bold text-foreground">{rounds}</span>
-                  <button onClick={() => setRounds((r) => r + 1)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
+              <p className="text-xs text-muted-foreground font-medium">Adjust weight</p>
+              {movementWeights.map((mw, idx) => (
+                <div key={idx}>
+                  <label className="text-xs text-muted-foreground block mb-1">{mw.name} ({mw.weightUnit})</label>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => updateMovementWeight(idx, -5)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
+                    <span className="flex-1 text-center text-lg font-bold text-foreground">{mw.weight}</span>
+                    <button onClick={() => updateMovementWeight(idx, 5)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
+                  </div>
                 </div>
-              </div>
-              {timerDone && timeElapsed > 0 && (
-                <p className="text-xs text-muted-foreground text-center">
-                  Time: {formatTime(timeElapsed)}
-                </p>
-              )}
-              <Button
-                onClick={logResult}
-                disabled={saving || rounds === 0}
-                fullWidth
-                variant={timerDone ? 'primary' : 'secondary'}
-              >
-                {saving ? <LoadingSpinner size="sm" /> : timerDone ? '✓ Log Result' : 'Log Result'}
-              </Button>
+              ))}
             </div>
           )}
+
+          {/* Rounds input — always visible (not gated on timer completion) */}
+          <div className="bg-surface rounded-xl p-4 space-y-3">
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">
+                {exerciseType === 'amrap' ? 'Rounds completed' : 'Rounds / intervals completed'}
+              </label>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setRounds((r) => Math.max(0, r - 1))} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">-</button>
+                <span className="flex-1 text-center text-lg font-bold text-foreground">{rounds}</span>
+                <button onClick={() => setRounds((r) => r + 1)} className="w-10 h-10 rounded-lg bg-background flex items-center justify-center text-foreground font-bold">+</button>
+              </div>
+            </div>
+            {timeElapsed > 0 && (
+              <p className="text-xs text-muted-foreground text-center">
+                Time: {formatTime(timeElapsed)}
+              </p>
+            )}
+            <Button
+              onClick={logResult}
+              disabled={saving || rounds === 0}
+              fullWidth
+              variant={timerDone ? 'primary' : 'secondary'}
+            >
+              {saving ? <LoadingSpinner size="sm" /> : timerDone ? '✓ Log Result' : 'Log Result'}
+            </Button>
+          </div>
         </div>
       )}
     </div>

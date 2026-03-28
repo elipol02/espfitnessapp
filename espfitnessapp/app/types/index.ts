@@ -213,9 +213,16 @@ export interface TimeEntryData {
   sets: TimeSetData[];
 }
 
+export interface MovementWeightEntry {
+  name: string;
+  weight: number;
+  weightUnit: string;
+}
+
 export interface RoundsEntryData {
   roundsCompleted: number;
   timeElapsed: number;
+  movementWeights?: MovementWeightEntry[];
 }
 
 export interface SimpleEntryData {

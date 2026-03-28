@@ -3,10 +3,11 @@ import { prisma } from '@/app/lib/db';
 import { HomeContent } from './HomeContent';
 import { redirect } from 'next/navigation';
 import { getMotivationalMessage } from '@/app/lib/motivationalMessages';
+import { cookies } from 'next/headers';
 
 export const dynamic = 'force-dynamic';
 
-async function getHomeData(userId: string) {
+async function getHomeData(userId: string, tzOffsetMinutes: number) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { name: true, bodyweight: true, onboardingCompleted: true },
@@ -97,14 +98,20 @@ async function getHomeData(userId: string) {
     });
     const completedDateSet = new Set(allCompleted.map((s) => s.workoutDate.toISOString().slice(0, 10)));
     const assignedDaySet = new Set(activePlan.dayAssignments.map((d) => d.dayOfWeek));
-    const yesterdayUTC = new Date();
-    yesterdayUTC.setUTCHours(0, 0, 0, 0);
-    yesterdayUTC.setUTCDate(yesterdayUTC.getUTCDate() - 1);
+    // Shift "now" by the user's timezone offset so UTC accessors give local date components.
+    // getTimezoneOffset() returns minutes-west-of-UTC (positive for US), so we subtract.
+    const offsetMs = tzOffsetMinutes * 60 * 1000;
+    const localNow = new Date(Date.now() - offsetMs);
+    const localYesterday = new Date(Date.UTC(
+      localNow.getUTCFullYear(),
+      localNow.getUTCMonth(),
+      localNow.getUTCDate() - 1,
+    ));
     const planStart = new Date(activePlan.startDate);
     planStart.setUTCHours(0, 0, 0, 0);
     let scheduledSoFar = 0;
     const missedCursor = new Date(planStart);
-    while (missedCursor <= yesterdayUTC) {
+    while (missedCursor <= localYesterday) {
       const dow = DAY_MAP[missedCursor.getUTCDay()];
       const dateStr = missedCursor.toISOString().slice(0, 10);
       if (assignedDaySet.has(dow)) {
@@ -185,6 +192,9 @@ export default async function HomePage() {
     redirect('/login');
   }
 
-  const data = await getHomeData(session.user.id);
+  const cookieStore = await cookies();
+  const rawOffset = cookieStore.get('tz-offset')?.value;
+  const tzOffset = rawOffset !== undefined ? parseInt(rawOffset, 10) : 0;
+  const data = await getHomeData(session.user.id, isNaN(tzOffset) ? 0 : tzOffset);
   return <HomeContent data={data} />;
 }

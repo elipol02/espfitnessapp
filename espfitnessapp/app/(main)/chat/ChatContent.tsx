@@ -29,6 +29,7 @@ interface SSEEvent {
   };
   questions?: AskUserQuestion[];
   error?: string;
+  savedMessageIds?: string[];
 }
 
 interface EditExercise {
@@ -191,11 +192,54 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
   const streamingMessageIdRef = useRef<string | null>(null);
   const toolCallStartRef = useRef<number>(0);
   const streamActiveRef = useRef(false);
+  const userScrolledUpRef = useRef(false);
+  const isStreamingRef = useRef(false);
+  const isProgrammaticScrollRef = useRef(false);
 
   const { activePlan, user } = data;
 
+  // Keep isStreamingRef in sync so the scroll handler can read it without stale closure
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    isStreamingRef.current = isStreaming;
+    if (!isStreaming) {
+      userScrolledUpRef.current = false;
+    }
+  }, [isStreaming]);
+
+  // Detect manual scroll during streaming; ignore programmatic scrolls
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      // Ignore scroll events we triggered ourselves
+      if (isProgrammaticScrollRef.current) return;
+      if (!isStreamingRef.current) return;
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+      if (distanceFromBottom > 50) {
+        userScrolledUpRef.current = true;
+      } else {
+        // User scrolled back to the bottom — resume auto-scroll
+        userScrolledUpRef.current = false;
+      }
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+    if (userScrolledUpRef.current) return;
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    // Use instant scroll so the programmatic flag clears reliably before the next event
+    isProgrammaticScrollRef.current = true;
+    container.scrollTop = container.scrollHeight;
+    // Clear flag after the scroll event has been dispatched and handled
+    setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+    }, 0);
   }, [messages]);
 
   useEffect(() => {
@@ -212,6 +256,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
   const handleStreamingSend = useCallback(async (messageContent: string, displayContent?: string) => {
     if (!messageContent.trim() || streamActiveRef.current) return;
     streamActiveRef.current = true;
+    userScrolledUpRef.current = false;
 
     const userMessage: Message = {
       id: `user-${Date.now()}`,
@@ -265,6 +310,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
       let buffer = '';
       // Track the active bubble — starts as the initial assistant message
       let currentBubbleId = assistantMessageId;
+      const bubbleIds: string[] = [assistantMessageId];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -295,9 +341,9 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
               break;
 
             case 'new-bubble': {
-              // Server is starting a fresh text section after tool calls — create a new message bubble
               const newBubbleId = `stream-${Date.now()}-${Math.random().toString(36).slice(2)}`;
               currentBubbleId = newBubbleId;
+              bubbleIds.push(newBubbleId);
               setMessages((prev) => [
                 ...prev,
                 {
@@ -385,6 +431,18 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
               break;
 
             case 'done':
+              if (event.savedMessageIds?.length) {
+                const idMap = new Map<string, string>();
+                for (let i = 0; i < bubbleIds.length && i < event.savedMessageIds.length; i++) {
+                  idMap.set(bubbleIds[i], event.savedMessageIds[i]);
+                }
+                setMessages((prev) =>
+                  prev.map((msg) => {
+                    const dbId = idMap.get(msg.id);
+                    return dbId ? { ...msg, id: dbId } : msg;
+                  })
+                );
+              }
               break;
 
             case 'error':
@@ -712,8 +770,24 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                     ) : (
                       <>
                         {message.content && (
-                          <div className="prose prose-invert prose-sm max-w-none">
-                            <ReactMarkdown>{message.content}</ReactMarkdown>
+                          <div className="text-sm leading-relaxed">
+                            <ReactMarkdown
+                              components={{
+                                p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                                strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+                                em: ({ children }) => <em className="italic">{children}</em>,
+                                hr: () => <hr className="border-border my-3" />,
+                                ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-0.5">{children}</ul>,
+                                ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-0.5">{children}</ol>,
+                                li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                                h1: ({ children }) => <h1 className="font-bold text-base mb-1 mt-3 first:mt-0">{children}</h1>,
+                                h2: ({ children }) => <h2 className="font-bold text-sm mb-1 mt-3 first:mt-0">{children}</h2>,
+                                h3: ({ children }) => <h3 className="font-semibold text-sm mb-1 mt-2 first:mt-0">{children}</h3>,
+                                code: ({ children }) => <code className="bg-background/50 rounded px-1 py-0.5 text-xs font-mono">{children}</code>,
+                                pre: ({ children }) => <pre className="bg-background/50 rounded p-3 mb-2 overflow-x-auto text-xs font-mono">{children}</pre>,
+                                blockquote: ({ children }) => <blockquote className="border-l-2 border-primary/50 pl-3 mb-2 text-muted-foreground">{children}</blockquote>,
+                              }}
+                            >{message.content}</ReactMarkdown>
                           </div>
                         )}
 

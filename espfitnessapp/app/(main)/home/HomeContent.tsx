@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
@@ -52,6 +53,12 @@ const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6:
 export function HomeContent({ data }: { data: HomeData }) {
   const router = useRouter();
   const { user, currentStreak, activePlan, recentSessions, completedWorkouts, missedWorkouts, motivationalMessage } = data;
+
+  useEffect(() => {
+    // Persist timezone offset so the server can compute "local yesterday" correctly.
+    const offset = new Date().getTimezoneOffset();
+    document.cookie = `tz-offset=${offset}; path=/; max-age=86400; SameSite=Lax`;
+  }, []);
 
   const today = new Date();
   const formattedDate = today.toLocaleDateString('en-US', {

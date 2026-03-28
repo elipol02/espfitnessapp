@@ -288,9 +288,10 @@ export async function POST(request: NextRequest) {
       currentBubblePlanData = undefined;
     };
 
-    const saveBubbles = async () => {
+    const saveBubbles = async (): Promise<string[]> => {
+      const ids: string[] = [];
       for (const bubble of bubbles) {
-        await prisma.chatMessage.create({
+        const msg = await prisma.chatMessage.create({
           data: {
             sessionId: sessionId!,
             userId: userId!,
@@ -299,7 +300,9 @@ export async function POST(request: NextRequest) {
             metadata: (bubble.metadata as object) || undefined,
           },
         });
+        ids.push(msg.id);
       }
+      return ids;
     };
 
     try {
@@ -427,6 +430,7 @@ export async function POST(request: NextRequest) {
       const openRouter = getOpenRouterClient();
       const allToolCallNames: string[] = [];
       let previousRoundHadTools = false;
+      const usedToolCallIds = new Set<string>();
 
       const MAX_TOOL_ROUNDS = 5;
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -482,10 +486,23 @@ export async function POST(request: NextRequest) {
 
         previousRoundHadTools = true;
 
+        // Deduplicate tool calls by ID and ensure uniqueness across rounds
+        const deduped = new Map<string, (typeof roundToolCalls)[0]>();
+        for (const tc of roundToolCalls) {
+          if (!deduped.has(tc.id)) deduped.set(tc.id, tc);
+        }
+        const uniqueToolCalls = [...deduped.values()];
+        for (const tc of uniqueToolCalls) {
+          if (usedToolCallIds.has(tc.id)) {
+            tc.id = `toolu_${crypto.randomUUID().replace(/-/g, '')}`;
+          }
+          usedToolCallIds.add(tc.id);
+        }
+
         llmMessages.push({
           role: 'assistant',
           content: roundText || null,
-          tool_calls: roundToolCalls.map((tc) => ({
+          tool_calls: uniqueToolCalls.map((tc) => ({
             id: tc.id,
             type: 'function' as const,
             function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
@@ -494,7 +511,7 @@ export async function POST(request: NextRequest) {
 
         let breakAfterTools = false;
 
-        for (const toolCall of roundToolCalls) {
+        for (const toolCall of uniqueToolCalls) {
           if (signal.aborted) break;
 
           allToolCallNames.push(toolCall.name);
@@ -571,16 +588,14 @@ export async function POST(request: NextRequest) {
       finalizeBubble();
 
       if (signal.aborted) {
-        // Save whatever bubbles were completed before the user stopped
         if (bubbles.length > 0) {
           await saveBubbles();
         }
         return;
       }
 
-      await sendEvent({ type: 'done' });
-
-      await saveBubbles();
+      const savedIds = await saveBubbles();
+      await sendEvent({ type: 'done', savedMessageIds: savedIds });
 
       const updatedSession = await prisma.chatSession.update({
         where: { id: sessionId },

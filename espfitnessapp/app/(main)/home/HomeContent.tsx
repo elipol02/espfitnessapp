@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
-import { ChevronRight, CheckCircle2, X, Calendar, Check, RefreshCw } from 'lucide-react';
+import { ChevronRight, CheckCircle2, X, Calendar, Check, RefreshCw, TrendingUp } from 'lucide-react';
 
 interface WorkoutTypeSummary {
   id: string;
@@ -430,8 +430,24 @@ export function HomeContent({ data }: { data: HomeData }) {
           </div>
         </div>
 
+        {/* Progress & Lifts */}
+        <Link href="/history" className="block">
+          <div className="bg-surface rounded-xl p-4 flex items-center justify-between hover:bg-surface-elevated transition-colors">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                <TrendingUp className="w-5 h-5 text-primary" />
+              </div>
+              <div>
+                <p className="font-medium text-foreground">Progress &amp; Lifts</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Track every lift over time</p>
+              </div>
+            </div>
+            <ChevronRight className="w-5 h-5 text-muted-foreground" />
+          </div>
+        </Link>
+
         {/* View Schedule */}
-        <Link href="/schedule">
+        <Link href="/schedule" className="block">
           <div className="bg-surface rounded-xl p-4 flex items-center justify-between hover:bg-surface-elevated transition-colors">
             <div>
               <p className="font-medium text-foreground">My Schedule</p>

@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "build:ci": "npm ci && prisma generate && npm run build",
+    "vercel-build": "prisma generate && prisma migrate deploy && next build",
     "start": "next start",
     "lint": "eslint"
   },

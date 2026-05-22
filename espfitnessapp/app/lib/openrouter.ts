@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'anthropic/claude-haiku-4.5';
+const MODEL = 'anthropic/claude-sonnet-4.6';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';

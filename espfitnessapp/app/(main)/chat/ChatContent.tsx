@@ -86,10 +86,7 @@ interface Message {
 interface ChatData {
   sessionId: string;
   messages: Message[];
-  activePlan: {
-    id: string;
-    name: string;
-  } | null;
+  hasSchedule: boolean;
   user: {
     name: string | null;
     bodyweight: number | null;
@@ -196,7 +193,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
   const isStreamingRef = useRef(false);
   const isProgrammaticScrollRef = useRef(false);
 
-  const { activePlan, user } = data;
+  const { hasSchedule, user } = data;
 
   // Keep isStreamingRef in sync so the scroll handler can read it without stale closure
   useEffect(() => {
@@ -292,7 +289,6 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
           sessionId: data.sessionId,
           message: messageContent.trim(),
           ...(displayContent && displayContent !== messageContent.trim() ? { displayMessage: displayContent.trim() } : {}),
-          planId: activePlan?.id,
           context: {
             bodyweight: user?.bodyweight,
             userName: user?.name,
@@ -478,7 +474,7 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
       abortControllerRef.current = null;
       streamingMessageIdRef.current = null;
     }
-  }, [data.sessionId, activePlan?.id, user?.bodyweight, user?.name, router]);
+  }, [data.sessionId, user?.bodyweight, user?.name, router]);
 
   const handleStopStreaming = useCallback(() => {
     if (abortControllerRef.current) {
@@ -699,17 +695,17 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
               </div>
             </button>
 
-            {activePlan && (
+            {hasSchedule && (
               <button
-                onClick={() => handleStreamingSend('I want to edit my existing workout plan.')}
+                onClick={() => handleStreamingSend('I want to edit my existing workout schedule.')}
                 className="flex items-center gap-3 p-4 bg-surface rounded-xl text-left hover:bg-surface-elevated transition-colors"
               >
                 <div className="w-10 h-10 rounded-full bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
                   <Edit3 className="w-5 h-5 text-yellow-500" />
                 </div>
                 <div>
-                  <p className="font-medium text-foreground">Edit Existing Plan</p>
-                  <p className="text-sm text-muted-foreground">Modify your current workout plan</p>
+                  <p className="font-medium text-foreground">Edit Schedule</p>
+                  <p className="text-sm text-muted-foreground">Modify your current workout schedule</p>
                 </div>
               </button>
             )}
@@ -897,12 +893,12 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                                 fullWidth
                               >
                                 {approvingPlan === message.id && <LoadingSpinner size="sm" />}
-                                {activePlan ? 'Replace Current Plan' : 'Activate Plan'}
+                                {hasSchedule ? 'Update My Schedule' : 'Use This Schedule'}
                               </Button>
                             )}
 
                             {isApproved && (
-                              <div className="text-center text-success font-medium py-2">Plan Applied</div>
+                              <div className="text-center text-success font-medium py-2">Schedule Applied</div>
                             )}
                           </div>
                         )}

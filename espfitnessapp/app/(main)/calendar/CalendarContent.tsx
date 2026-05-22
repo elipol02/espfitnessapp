@@ -29,7 +29,6 @@ interface SessionData {
 }
 
 interface CalendarData {
-  planId: string | null;
   startDate: string | null;
   endDate: string | null;
   slots: Slot[];

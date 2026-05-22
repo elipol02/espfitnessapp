@@ -95,13 +95,13 @@ export const WORKOUT_TOOLS = [
     function: {
       name: 'create_workout_plan',
       description:
-        'Create a new workout plan. Returns plan JSON for user approval — no DB records created yet. ALWAYS use ask_user first for: days per week, session length, equipment, experience level, injuries, goals, and whether they want A/B rotation. A rotation cycles workout types across the same days (e.g., MWF alternates Upper-A and Upper-B each occurrence). Multiple slots on a day means TWO separate workouts (e.g., strength + cardio same day).',
+        "Build the user's weekly SCHEDULE. Use ONLY for (a) creating their first schedule, or (b) STRUCTURAL changes to an existing one — adding/removing a training day, adding/removing a slot, or adding/removing/reordering a rotation. Do NOT use this to change exercises, weights, sets, or reps inside an existing workout — use edit_workout_plan for that. Returns schedule JSON for approval (no DB writes yet); on approval it is reconciled by workout NAME, so unchanged workouts keep their history. When restructuring an existing schedule, output the COMPLETE schedule (every day, including unchanged ones). For a NEW schedule, ALWAYS use ask_user first for: days per week, session length, equipment, experience level, injuries, goals, and whether they want A/B rotation. A rotation cycles workout types across the same days (e.g., MWF alternates Upper-A and Upper-B each occurrence). Multiple slots on a day means TWO separate workouts (e.g., strength + cardio same day).",
       parameters: {
         type: 'object',
         properties: {
           name: {
             type: 'string',
-            description: 'Plan name (e.g., "Summer Strength Block")',
+            description: 'Short label shown as the preview title (e.g., "Summer Strength Block")',
           },
           schedule: {
             type: 'array',
@@ -184,7 +184,7 @@ export const WORKOUT_TOOLS = [
     function: {
       name: 'edit_workout_plan',
       description:
-        'Edit an existing workout type. Updates exercises in-place by ID — does not delete and recreate. Use get_workout_history first to understand what the user has been doing before suggesting edits.',
+        "PREFERRED tool for changing an existing schedule. Edits ONE existing workout type, updating its exercises in place by ID (never deletes/recreates the workout, so completed-session history is preserved). Use for changing weights/sets/reps/tempo/rest, swapping an exercise, or adding/removing exercises within a workout. It does NOT change which days are scheduled or rotation structure — use create_workout_plan only for those structural changes. Call get_workout_history first to see what the user has actually been doing.",
       parameters: {
         type: 'object',
         properties: {
@@ -230,9 +230,31 @@ export const WORKOUT_TOOLS = [
   {
     type: 'function' as const,
     function: {
+      name: 'remove_from_schedule',
+      description:
+        "Remove items from the user's schedule WITHOUT deleting any workout history. Use to take a workout off a single day, remove a workout from the schedule entirely, or clear the whole schedule. Workout types, exercises, and logged sessions are ALWAYS preserved — this only unschedules. Before clearing the whole schedule or removing an entire day, briefly confirm with the user first unless they were explicit.",
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['remove_day', 'remove_workout', 'clear_schedule'],
+            description:
+              "'remove_day' = unschedule everything on one day (needs dayOfWeek). 'remove_workout' = take one workout type off every day it appears (needs workoutTypeId). 'clear_schedule' = wipe the entire schedule.",
+          },
+          dayOfWeek: { type: 'number', description: 'For remove_day: 1=Monday … 7=Sunday.' },
+          workoutTypeId: { type: 'string', description: 'For remove_workout: the WorkoutType ID from the current schedule shown in context.' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
       name: 'ask_user',
       description:
-        'Ask the user one or more multiple-choice questions to gather structured information. Use this BEFORE creating a plan or making significant decisions. The UI will show questions one at a time. An "Other" free-text option is always added automatically — do NOT include it in your options list.',
+        'Ask the user one or more multiple-choice questions to gather structured information. Use this BEFORE building a new schedule or making significant decisions. The UI will show questions one at a time. An "Other" free-text option is always added automatically — do NOT include it in your options list.',
       parameters: {
         type: 'object',
         properties: {
@@ -269,7 +291,7 @@ export const WORKOUT_TOOLS = [
     function: {
       name: 'get_workout_history',
       description:
-        'Fetch past performance data for a specific workout type. Use this BEFORE suggesting plan edits so you understand what the user has actually been doing. Returns recent completed sessions with exercise-by-exercise data.',
+        'Fetch past performance data for a specific workout type. Use this BEFORE suggesting changes so you understand what the user has actually been doing. Returns recent completed sessions with exercise-by-exercise data.',
       parameters: {
         type: 'object',
         properties: {
@@ -304,11 +326,13 @@ export const WORKOUT_TOOLS = [
 
 export const SYSTEM_PROMPT = `You are ESP Fitness AI, an expert fitness coach assistant.
 
+HOW THE APP WORKS: The user has ONE ongoing weekly workout SCHEDULE — a set of days, each with one or more workouts (and optional A/B rotations). There are no separate "plans", no start/end dates, and nothing to activate or archive — edits take effect on the single live schedule. The user's current schedule (workout types + exercise IDs) is shown below when they have one. Completed workouts and logged history are tied to each workout type and exercise, so PRESERVE those identities: change existing workouts in place rather than rebuilding the schedule.
+
 You have access to these tools:
 
-**ask_user**: Ask the user structured multiple-choice questions. Use this to gather information before creating a plan. Questions are shown one at a time with selectable options. An "Other" free-text option is always automatically included. Call this ONCE with ALL your questions bundled together — do not call it multiple times in a row.
+**ask_user**: Ask the user structured multiple-choice questions. Use this to gather information before building a new schedule. Questions are shown one at a time with selectable options. An "Other" free-text option is always automatically included. Call this ONCE with ALL your questions bundled together — do not call it multiple times in a row.
 
-**create_workout_plan**: Create a new workout plan. ALWAYS use ask_user first to collect:
+**create_workout_plan**: Builds the user's weekly schedule. Use it ONLY to create their first schedule or to make STRUCTURAL changes (add/remove a training day, add/remove a slot, add/remove/reorder a rotation). Do NOT use it to change exercises, weights, sets, or reps — that's edit_workout_plan. For a brand-new schedule, ALWAYS use ask_user first to collect:
 - How many days per week to work out
 - Session length (30min, 45min, 60min, 90min)
 - Available equipment (full gym, home gym, dumbbells, kettlebells, bodyweight)
@@ -317,13 +341,20 @@ You have access to these tools:
 - Specific goals
 - Whether they want A/B rotation (for undulating periodization or upper/lower splits that alternate across days)
 
+**CHANGING AN EXISTING SCHEDULE — EDIT IN PLACE, DON'T REBUILD**: The user's current schedule (with workout type and exercise IDs) is shown below. Always make the SMALLEST change that does the job:
+- Changing weights, sets, reps, tempo, rest, or swapping/adding/removing exercises inside a workout → use **edit_workout_plan** (one call per workout type, by ID). This preserves history. Do NOT regenerate the whole schedule for this.
+- Only when the STRUCTURE itself changes — adding/removing a training day, adding/removing a slot, or adding/changing a rotation — use **create_workout_plan**, and output the COMPLETE intended schedule (every day, including unchanged ones, reproduced from the schedule below). On approval it reconciles by workout name: unchanged workouts keep their history, only differences apply, and any day you omit is removed. NEVER send just the changed day.
+Never call create_workout_plan just to tweak something inside an existing workout — that needlessly rebuilds the schedule.
+
 **A/B ROTATION**: Use a rotation slot when workouts should ALTERNATE across occurrences of the same days (e.g., MWF: Mon=A, Wed=B, Fri=A, next Mon=B, etc.). Set the same "rotationName" string on every day that shares the counter. Use 2 entries for A/B, 3 for A/B/C. Do NOT use rotation if they simply want different workouts on different days of the week — that is just normal fixed slots per day. Use rotation only when the same day slots alternate over multiple weeks.
 
 **MULTIPLE SLOTS PER DAY**: Only use multiple slots (e.g., slots: [{strength slot}, {cardio slot}]) when the user explicitly wants TWO separate workout sessions on the same day. Most plans use one slot per day.
 
-**edit_workout_plan**: Edit exercises within an existing workout type. Use this to add, update, or remove exercises. Provide exercise IDs for updates, omit IDs for new exercises, and use deleteExerciseIds for removals. When editing multiple days, make ONE edit_workout_plan call per day; do not stop after the first edit. After your LAST edit_workout_plan for the request, do not send a long follow-up message — use at most a brief confirmation or no text after the final edit.
+**edit_workout_plan**: The preferred tool for changing an existing schedule. Edits exercises within ONE existing workout type — add, update, or remove. Provide exercise IDs for updates, omit IDs for new exercises, and use deleteExerciseIds for removals. When editing multiple workouts, make ONE edit_workout_plan call per workout type; do not stop after the first edit. After your LAST edit_workout_plan for the request, do not send a long follow-up message — use at most a brief confirmation or no text after the final edit.
 
 **get_workout_history**: Fetch past workout performance for a workout type. ALWAYS call this before suggesting edits — you need to see what they've actually been doing.
+
+**remove_from_schedule**: Unschedule things — take a workout off a day (remove_day), remove a workout from the schedule everywhere (remove_workout, by workoutTypeId), or clear the whole schedule (clear_schedule). This NEVER deletes workout history; it only unschedules, so workout types and logged sessions are preserved. Use this instead of create_workout_plan when the user just wants to remove/drop something. Briefly confirm before clearing the whole schedule or removing a full day unless the user was explicit.
 
 **write_memory**: Store a memory when the user shares critical info (goals, injuries, preferences, equipment, experience) or when you give an answer worth remembering. Keep summaries concise and factual.
 
@@ -361,8 +392,6 @@ CONVERSATIONAL APPROACH:
 
 export interface PlanContext {
   currentPlan?: {
-    id: string;
-    name: string;
     dayAssignments: Array<{
       dayOfWeek: number;
       workoutType: {
@@ -392,7 +421,7 @@ export function buildSystemMessage(context?: PlanContext): ChatMessage {
   if (context?.currentPlan) {
     const plan = context.currentPlan;
     const dayNames = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    systemContent += `\n\nUSER'S CURRENT PLAN: "${plan.name}" (ID: ${plan.id})\n\nWEEKLY SCHEDULE:\n`;
+    systemContent += `\n\nUSER'S CURRENT SCHEDULE (what they have today — give any NEW or restructured schedule its own descriptive name, never "Current Schedule"):\n\nWEEKLY SCHEDULE:\n`;
     const sorted = [...plan.dayAssignments].sort((a, b) => a.dayOfWeek - b.dayOfWeek);
     for (const da of sorted) {
       const wt = da.workoutType;
@@ -541,7 +570,7 @@ export class OpenRouterClient {
 
             if (finishReason === 'length' && toolCallsBuffer.size > 0) {
               throw new Error(
-                'The plan was too large to generate in one response. Try requesting fewer workout days or simpler exercises.',
+                'The schedule was too large to generate in one response. Try requesting fewer workout days or simpler exercises.',
               );
             }
 

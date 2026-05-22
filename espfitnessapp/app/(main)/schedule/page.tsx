@@ -1,56 +1,44 @@
 import { validateSession } from '@/app/lib/auth';
 import { prisma } from '@/app/lib/db';
-import { notFound, redirect } from 'next/navigation';
-import { PlanViewerContent } from './PlanViewerContent';
+import { redirect } from 'next/navigation';
+import { ScheduleContent } from './ScheduleContent';
 
-export default async function PlanViewerPage({
-  params,
-}: {
-  params: Promise<{ planId: string }>;
-}) {
+export const dynamic = 'force-dynamic';
+
+export default async function SchedulePage() {
   const { session, error } = await validateSession();
   if (error || !session?.user?.id) {
     redirect('/login');
   }
 
-  const { planId } = await params;
-
-  const plan = await prisma.workoutPlan.findFirst({
-    where: { id: planId, userId: session.user.id },
+  const dayAssignments = await prisma.dayAssignment.findMany({
+    where: { userId: session.user.id },
     include: {
-      dayAssignments: {
+      workoutType: {
         include: {
-          workoutType: {
+          exercises: { orderBy: { order: 'asc' } },
+        },
+      },
+      rotation: {
+        include: {
+          entries: {
+            orderBy: { order: 'asc' },
             include: {
-              exercises: { orderBy: { order: 'asc' } },
-            },
-          },
-          rotation: {
-            include: {
-              entries: {
-                orderBy: { order: 'asc' },
+              workoutType: {
                 include: {
-                  workoutType: {
-                    include: {
-                      exercises: { orderBy: { order: 'asc' } },
-                    },
-                  },
+                  exercises: { orderBy: { order: 'asc' } },
                 },
               },
             },
           },
         },
-        orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
       },
     },
+    orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
   });
 
-  if (!plan) {
-    notFound();
-  }
-
   // Collect exercise IDs from both direct assignments and rotation entries
-  const allExerciseIds = plan.dayAssignments.flatMap((da) => {
+  const allExerciseIds = dayAssignments.flatMap((da) => {
     if (da.workoutType) return da.workoutType.exercises.map((ex) => ex.id);
     if (da.rotation) return da.rotation.entries.flatMap((e) => e.workoutType.exercises.map((ex) => ex.id));
     return [];
@@ -83,12 +71,7 @@ export default async function PlanViewerPage({
   const SLOT_LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
   const serialized = {
-    id: plan.id,
-    name: plan.name,
-    status: plan.status,
-    startDate: plan.startDate ? plan.startDate.toISOString() : null,
-    endDate: plan.endDate ? plan.endDate.toISOString() : null,
-    dayAssignments: plan.dayAssignments.map((da) => ({
+    dayAssignments: dayAssignments.map((da) => ({
       id: da.id,
       dayOfWeek: da.dayOfWeek,
       order: da.order,
@@ -138,5 +121,5 @@ export default async function PlanViewerPage({
     })),
   };
 
-  return <PlanViewerContent plan={serialized} lastLiftedWeights={lastLiftedWeights} />;
+  return <ScheduleContent schedule={serialized} lastLiftedWeights={lastLiftedWeights} />;
 }

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, Calendar, MessageSquare, FileText, Play } from 'lucide-react';
+import { Home, Calendar, MessageSquare, ListChecks, Play } from 'lucide-react';
 
 function getLocalDateString(): string {
   const d = new Date();
@@ -35,7 +35,7 @@ export function BottomNav() {
   const staticNavItems = [
     { href: '/home', label: 'Home', icon: Home },
     { href: '/calendar', label: 'Calendar', icon: Calendar },
-    { href: '/plans', label: 'Plans', icon: FileText },
+    { href: '/schedule', label: 'Schedule', icon: ListChecks },
     { href: '/chat', label: 'Chat', icon: MessageSquare },
   ];
 

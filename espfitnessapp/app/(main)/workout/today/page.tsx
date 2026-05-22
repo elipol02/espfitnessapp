@@ -37,27 +37,20 @@ export default async function TodayWorkoutPage({
   const localDate = new Date(y, m - 1, d);
   const todayDow = DAY_MAP[localDate.getDay()];
 
-  // If workoutTypeId not provided, try to resolve it from the plan/rotation
+  // If workoutTypeId not provided, try to resolve it from the schedule/rotation
   if (!workoutTypeId && !rotationId) {
-    const activePlan = await prisma.workoutPlan.findFirst({
-      where: { userId, status: 'active' },
+    const assignments = await prisma.dayAssignment.findMany({
+      where: { userId, dayOfWeek: todayDow },
+      orderBy: { order: 'asc' },
       include: {
-        dayAssignments: {
-          where: { dayOfWeek: todayDow },
-          orderBy: { order: 'asc' },
+        workoutType: { select: { id: true } },
+        rotation: {
           include: {
-            workoutType: { select: { id: true } },
-            rotation: {
-              include: {
-                entries: { orderBy: { order: 'asc' } },
-              },
-            },
+            entries: { orderBy: { order: 'asc' } },
           },
         },
       },
     });
-
-    const assignments = activePlan?.dayAssignments ?? [];
 
     if (assignments.length === 0) {
       return (
@@ -123,16 +116,10 @@ export default async function TodayWorkoutPage({
   if (existingSession) {
     workoutSessionId = existingSession.id;
   } else {
-    const activePlan = await prisma.workoutPlan.findFirst({
-      where: { userId, status: 'active' },
-      select: { id: true },
-    });
-
     const newSession = await prisma.workoutSession.create({
       data: {
         userId,
         workoutTypeId,
-        planId: activePlan?.id ?? null,
         rotationId: rotationId || null,
         workoutDate: startOfDay,
         status: 'in_progress',

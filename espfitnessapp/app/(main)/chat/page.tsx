@@ -51,10 +51,7 @@ async function getChatData(userId: string, sessionId?: string, forceNew?: boolea
     }
   }
 
-  const activePlan = await prisma.workoutPlan.findFirst({
-    where: { userId, status: 'active' },
-    select: { id: true, name: true },
-  });
+  const scheduleCount = await prisma.dayAssignment.count({ where: { userId } });
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -71,7 +68,7 @@ async function getChatData(userId: string, sessionId?: string, forceNew?: boolea
       approved: m.approved,
       createdAt: m.createdAt.toISOString(),
     })),
-    activePlan,
+    hasSchedule: scheduleCount > 0,
     user,
   };
 }

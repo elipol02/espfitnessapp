@@ -76,131 +76,191 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'No plan data in message' }, { status: 400 });
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      // Archive existing active plans
-      await tx.workoutPlan.updateMany({
-        where: { userId, status: 'active' },
-        data: { status: 'archived' },
-      });
-
-      // Create the WorkoutPlan shell first so we have its ID for rotation FK
-      const plan = await tx.workoutPlan.create({
-        data: {
-          userId,
-          name: planData.name,
-          status: 'active',
-          startDate: new Date(),
-          endDate: new Date(new Date().setMonth(new Date().getMonth() + 3)),
-        },
-      });
-
-      // Build rotation groups: rotationName → rotationId (shared across days)
-      // We create one WorkoutRotation per unique rotationName
-      const rotationMap = new Map<string, { rotationId: string; workoutTypeIds: string[] }>();
-
-      // First pass: collect all unique rotation names and create their records + workout types
-      for (const day of planData.schedule) {
-        for (const slot of day.slots) {
-          if (slot.type !== 'rotation') continue;
-          if (rotationMap.has(slot.rotationName)) continue; // already processed
-
-          // Create workout types for each rotation entry
-          const workoutTypeIds: string[] = [];
+    // Collect the unique workout-type definitions referenced anywhere in the plan
+    // (fixed slots + rotation entries), keyed by name. First definition wins.
+    type TypeDef = {
+      name: string;
+      color: string;
+      category?: string;
+      exercises: ExerciseInput[];
+    };
+    const incomingTypeDefs = new Map<string, TypeDef>();
+    const addTypeDef = (d: TypeDef) => {
+      const key = d.name.trim().toLowerCase();
+      if (!incomingTypeDefs.has(key)) incomingTypeDefs.set(key, d);
+    };
+    for (const day of planData.schedule) {
+      for (const slot of day.slots) {
+        if (slot.type === 'fixed') {
+          addTypeDef({ name: slot.workoutTypeName, color: slot.workoutTypeColor, category: slot.workoutTypeCategory, exercises: slot.exercises });
+        } else {
           for (const entry of slot.rotationEntries) {
-            const wt = await tx.workoutType.create({
-              data: {
-                userId,
-                name: entry.workoutTypeName,
-                color: entry.workoutTypeColor,
-                category: entry.workoutTypeCategory || null,
-                exercises: {
-                  create: entry.exercises.map((ex, idx) => ({
-                    name: ex.name,
-                    exerciseType: ex.exerciseType || 'strength',
-                    config: ex.config as Prisma.InputJsonValue,
-                    progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
-                    groupTag: ex.groupTag || null,
-                    order: ex.order ?? idx,
-                    notes: ex.notes || null,
-                  })),
-                },
-              },
-            });
-            workoutTypeIds.push(wt.id);
+            addTypeDef({ name: entry.workoutTypeName, color: entry.workoutTypeColor, category: entry.workoutTypeCategory, exercises: entry.exercises });
           }
+        }
+      }
+    }
 
-          // Create the rotation with its entries
-          const rotation = await tx.workoutRotation.create({
+    await prisma.$transaction(async (tx) => {
+      // Whether the user already has a schedule (vs. creating one from scratch).
+      const hadSchedule = (await tx.dayAssignment.count({ where: { userId } })) > 0;
+
+      // ── Smart merge: reuse existing workout types / rotations by NAME so unchanged
+      // workouts (and their session/progression history) are never recreated. Only
+      // the pieces that actually differ are updated; new ones are added; rotations
+      // dropped from the plan are removed. We never delete a WorkoutType — past
+      // WorkoutSessions reference it via a cascading FK and that would erase history.
+
+      // Index existing types by name (newest wins for any legacy duplicates).
+      const existingTypes = await tx.workoutType.findMany({
+        where: { userId },
+        include: { exercises: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      const typeByName = new Map<string, (typeof existingTypes)[number]>();
+      for (const t of existingTypes) typeByName.set(t.name.trim().toLowerCase(), t);
+
+      // Reconcile a workout type's exercises in place (match by name → keep ids/history).
+      const reconcileExercises = async (
+        workoutTypeId: string,
+        existing: { id: string; name: string }[],
+        incoming: ExerciseInput[],
+      ) => {
+        const existingByName = new Map(existing.map((e) => [e.name.trim().toLowerCase(), e]));
+        const keptIds = new Set<string>();
+        for (let idx = 0; idx < incoming.length; idx++) {
+          const ex = incoming[idx];
+          const data = {
+            name: ex.name,
+            exerciseType: ex.exerciseType || 'strength',
+            config: ex.config as Prisma.InputJsonValue,
+            progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
+            groupTag: ex.groupTag || null,
+            order: ex.order ?? idx,
+            notes: ex.notes || null,
+          };
+          const match = existingByName.get(ex.name.trim().toLowerCase());
+          if (match) {
+            await tx.exercise.update({ where: { id: match.id }, data });
+            keptIds.add(match.id);
+          } else {
+            await tx.exercise.create({ data: { workoutTypeId, ...data } });
+          }
+        }
+        // Remove exercises the plan no longer includes.
+        const toDelete = existing.filter((e) => !keptIds.has(e.id)).map((e) => e.id);
+        if (toDelete.length) await tx.exercise.deleteMany({ where: { id: { in: toDelete } } });
+      };
+
+      // Resolve every referenced type to an id (reuse or create), reconciling exercises.
+      const resolvedTypeId = new Map<string, string>();
+      for (const [key, def] of incomingTypeDefs) {
+        const existing = typeByName.get(key);
+        if (existing) {
+          await tx.workoutType.update({
+            where: { id: existing.id },
+            data: { color: def.color, category: def.category || null },
+          });
+          await reconcileExercises(existing.id, existing.exercises, def.exercises);
+          resolvedTypeId.set(key, existing.id);
+        } else {
+          const created = await tx.workoutType.create({
             data: {
-              planId: plan.id,
-              name: slot.rotationName,
-              currentIndex: 0,
-              entries: {
-                create: workoutTypeIds.map((wtId, idx) => ({
-                  workoutTypeId: wtId,
-                  order: idx,
+              userId,
+              name: def.name,
+              color: def.color,
+              category: def.category || null,
+              exercises: {
+                create: def.exercises.map((ex, idx) => ({
+                  name: ex.name,
+                  exerciseType: ex.exerciseType || 'strength',
+                  config: ex.config as Prisma.InputJsonValue,
+                  progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
+                  groupTag: ex.groupTag || null,
+                  order: ex.order ?? idx,
+                  notes: ex.notes || null,
                 })),
               },
             },
           });
-
-          rotationMap.set(slot.rotationName, { rotationId: rotation.id, workoutTypeIds });
+          resolvedTypeId.set(key, created.id);
         }
       }
 
-      // Second pass: create all day assignments
-      let slotOrder = 0;
+      // Reconcile rotations by name — reuse existing (keep id + currentIndex so the
+      // A/B position isn't reset), rebuilding their entries against the resolved types.
+      const existingRotations = await tx.workoutRotation.findMany({ where: { userId } });
+      const rotationByName = new Map(existingRotations.map((r) => [r.name.trim().toLowerCase(), r]));
+      const resolvedRotationId = new Map<string, string>();
+      const incomingRotationKeys = new Set<string>();
+
       for (const day of planData.schedule) {
-        slotOrder = 0;
         for (const slot of day.slots) {
-          if (slot.type === 'fixed') {
-            // Create the workout type
-            const wt = await tx.workoutType.create({
+          if (slot.type !== 'rotation') continue;
+          const key = slot.rotationName.trim().toLowerCase();
+          if (incomingRotationKeys.has(key)) continue;
+          incomingRotationKeys.add(key);
+
+          const entryTypeIds = slot.rotationEntries
+            .map((e) => resolvedTypeId.get(e.workoutTypeName.trim().toLowerCase()))
+            .filter((id): id is string => !!id);
+
+          const existing = rotationByName.get(key);
+          if (existing) {
+            await tx.rotationEntry.deleteMany({ where: { rotationId: existing.id } });
+            await tx.rotationEntry.createMany({
+              data: entryTypeIds.map((wtId, idx) => ({ rotationId: existing.id, workoutTypeId: wtId, order: idx })),
+            });
+            resolvedRotationId.set(key, existing.id);
+          } else {
+            const created = await tx.workoutRotation.create({
               data: {
                 userId,
-                name: slot.workoutTypeName,
-                color: slot.workoutTypeColor,
-                category: slot.workoutTypeCategory || null,
-                exercises: {
-                  create: slot.exercises.map((ex, idx) => ({
-                    name: ex.name,
-                    exerciseType: ex.exerciseType || 'strength',
-                    config: ex.config as Prisma.InputJsonValue,
-                    progression: (ex.progression ?? undefined) as Prisma.InputJsonValue | undefined,
-                    groupTag: ex.groupTag || null,
-                    order: ex.order ?? idx,
-                    notes: ex.notes || null,
-                  })),
-                },
+                name: slot.rotationName,
+                currentIndex: 0,
+                entries: { create: entryTypeIds.map((wtId, idx) => ({ workoutTypeId: wtId, order: idx })) },
               },
             });
-
-            await tx.planDayAssignment.create({
-              data: {
-                planId: plan.id,
-                dayOfWeek: day.dayOfWeek,
-                order: slotOrder,
-                workoutTypeId: wt.id,
-                rotationId: null,
-              },
-            });
-          } else if (slot.type === 'rotation') {
-            const rotEntry = rotationMap.get(slot.rotationName);
-            if (!rotEntry) continue;
-
-            await tx.planDayAssignment.create({
-              data: {
-                planId: plan.id,
-                dayOfWeek: day.dayOfWeek,
-                order: slotOrder,
-                workoutTypeId: null,
-                rotationId: rotEntry.rotationId,
-              },
-            });
+            resolvedRotationId.set(key, created.id);
           }
+        }
+      }
 
+      // Remove rotations no longer in the plan (cascades entries; session.rotationId SET NULL).
+      const staleRotationIds = existingRotations
+        .filter((r) => !incomingRotationKeys.has(r.name.trim().toLowerCase()))
+        .map((r) => r.id);
+      if (staleRotationIds.length) await tx.workoutRotation.deleteMany({ where: { id: { in: staleRotationIds } } });
+
+      // Rebuild the day → slot mapping (no history attached to assignments) using the
+      // resolved type/rotation ids. This is what adds/moves/removes days.
+      await tx.dayAssignment.deleteMany({ where: { userId } });
+      for (const day of planData.schedule) {
+        let slotOrder = 0;
+        for (const slot of day.slots) {
+          if (slot.type === 'fixed') {
+            const workoutTypeId = resolvedTypeId.get(slot.workoutTypeName.trim().toLowerCase());
+            if (workoutTypeId) {
+              await tx.dayAssignment.create({
+                data: { userId, dayOfWeek: day.dayOfWeek, order: slotOrder, workoutTypeId, rotationId: null },
+              });
+            }
+          } else {
+            const rotationId = resolvedRotationId.get(slot.rotationName.trim().toLowerCase());
+            if (rotationId) {
+              await tx.dayAssignment.create({
+                data: { userId, dayOfWeek: day.dayOfWeek, order: slotOrder, workoutTypeId: null, rotationId },
+              });
+            }
+          }
           slotOrder++;
         }
+      }
+
+      // On first creation, stamp the schedule start date as today so days before
+      // now don't show as scheduled/missed on home + calendar.
+      if (!hadSchedule) {
+        await tx.user.update({ where: { id: userId }, data: { scheduleStartedAt: new Date() } });
       }
 
       // Mark message as approved
@@ -208,11 +268,9 @@ export async function POST(request: NextRequest) {
         where: { id: messageId },
         data: { approved: true },
       });
-
-      return plan;
     });
 
-    return NextResponse.json({ success: true, data: { planId: result.id } });
+    return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error applying plan from message:', error);
     return NextResponse.json({ success: false, error: 'Failed to apply plan' }, { status: 500 });

@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ChevronDown, ChevronRight, ArrowLeft, Calendar, RefreshCw } from 'lucide-react';
+import Link from 'next/link';
+import { ChevronDown, ChevronRight, RefreshCw, MessageSquare, Trash2, X } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import type {
   ExerciseType,
@@ -53,26 +54,11 @@ interface DayAssignment {
   rotationEntries: RotationEntryRecord[];
 }
 
-interface Plan {
-  id: string;
-  name: string;
-  status: string;
-  startDate: string | null;
-  endDate: string | null;
+interface Schedule {
   dayAssignments: DayAssignment[];
 }
 
 const DAY_NAMES = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-
-function toDateInputValue(dateString: string): string {
-  return dateString.includes('T') ? dateString.split('T')[0] : dateString;
-}
-
-function formatLocalDate(dateString: string): string {
-  const datePart = dateString.includes('T') ? dateString.split('T')[0] : dateString;
-  const [year, month, day] = datePart.split('-').map(Number);
-  return new Date(year, month - 1, day).toLocaleDateString();
-}
 
 function formatExerciseConfig(
   type: ExerciseType,
@@ -218,34 +204,45 @@ function ExerciseList({
   );
 }
 
-export function PlanViewerContent({
-  plan,
+export function ScheduleContent({
+  schedule,
   lastLiftedWeights = {},
 }: {
-  plan: Plan;
+  schedule: Schedule;
   lastLiftedWeights?: Record<string, { weight: number; weightUnit: string }>;
 }) {
-  const router = useRouter();
-
   // Get unique days in order
-  const uniqueDays = [...new Set(plan.dayAssignments.map((da) => da.dayOfWeek))].sort((a, b) => a - b);
+  const uniqueDays = [...new Set(schedule.dayAssignments.map((da) => da.dayOfWeek))].sort((a, b) => a - b);
 
+  const router = useRouter();
   const [selectedDay, setSelectedDay] = useState(uniqueDays[0] ?? 1);
   const [expandedExercises, setExpandedExercises] = useState<Set<string>>(new Set());
-  const [editingStart, setEditingStart] = useState(false);
-  const [startDate, setStartDate] = useState(plan.startDate || '');
-  const [editingEnd, setEditingEnd] = useState(false);
-  const [endDate, setEndDate] = useState(plan.endDate || '');
-  const [savingDate, setSavingDate] = useState(false);
+  const [slotMenu, setSlotMenu] = useState<DayAssignment | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [actioning, setActioning] = useState(false);
+
+  const runDelete = async (url: string) => {
+    setActioning(true);
+    try {
+      const res = await fetch(url, { method: 'DELETE' });
+      if (res.ok) {
+        setSlotMenu(null);
+        setConfirmClear(false);
+        router.refresh();
+      }
+    } finally {
+      setActioning(false);
+    }
+  };
 
   // All slots for the selected day, sorted by order
-  const selectedSlots = plan.dayAssignments
+  const selectedSlots = schedule.dayAssignments
     .filter((da) => da.dayOfWeek === selectedDay)
     .sort((a, b) => a.order - b.order);
 
   // Primary color for the day tab (first slot's color)
   function getDayColor(day: number): string {
-    const firstSlot = plan.dayAssignments.find((da) => da.dayOfWeek === day);
+    const firstSlot = schedule.dayAssignments.find((da) => da.dayOfWeek === day);
     if (firstSlot?.workoutType) return firstSlot.workoutType.color;
     if (firstSlot?.rotationEntries?.[0]?.workoutType) return firstSlot.rotationEntries[0].workoutType.color;
     return '#404040';
@@ -260,125 +257,45 @@ export function PlanViewerContent({
     });
   };
 
-  const saveStartDate = async () => {
-    setSavingDate(true);
-    try {
-      await fetch(`/api/plan/${plan.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startDate: startDate || null }),
-      });
-      setEditingStart(false);
-      router.refresh();
-    } catch (error) {
-      console.error('Error saving start date:', error);
-    } finally {
-      setSavingDate(false);
-    }
-  };
-
-  const saveEndDate = async () => {
-    setSavingDate(true);
-    try {
-      await fetch(`/api/plan/${plan.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ endDate: endDate || null }),
-      });
-      setEditingEnd(false);
-      router.refresh();
-    } catch (error) {
-      console.error('Error saving end date:', error);
-    } finally {
-      setSavingDate(false);
-    }
-  };
+  if (schedule.dayAssignments.length === 0) {
+    return (
+      <div className="px-4 pt-8 pb-24">
+        <div className="max-w-lg mx-auto space-y-8">
+          <h1 className="text-2xl font-bold text-foreground">My Schedule</h1>
+          <div className="bg-surface rounded-2xl p-10 text-center space-y-6">
+            <div className="text-6xl">🗓️</div>
+            <div className="space-y-2">
+              <h2 className="text-xl font-bold text-foreground">No schedule yet</h2>
+              <p className="text-muted-foreground">Chat with the AI assistant to build your weekly workout schedule</p>
+            </div>
+            <Link href="/chat">
+              <Button size="lg">Create a Schedule</Button>
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="bg-background border-b border-border px-4 py-3">
         <div className="flex items-center justify-between">
-          <button onClick={() => router.push('/plans')} className="p-2 -ml-2">
-            <ArrowLeft size={20} className="text-foreground" />
-          </button>
-          <h1 className="text-lg font-bold text-foreground">{plan.name}</h1>
-          <div className="w-8" />
-        </div>
-      </div>
-
-      {/* Plan dates */}
-      <div className="px-4 py-3 border-b border-border space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Calendar size={16} className="text-muted-foreground" />
-            {!editingStart ? (
-              <span className="text-sm text-muted-foreground">
-                {plan.startDate
-                  ? `Start: ${formatLocalDate(plan.startDate)}`
-                  : 'No start date set'}
-              </span>
-            ) : (
-              <input
-                type="date"
-                value={startDate ? toDateInputValue(startDate) : ''}
-                onChange={(e) => setStartDate(e.target.value)}
-                className="text-sm bg-surface border border-border rounded px-2 py-1 text-foreground"
-              />
-            )}
-          </div>
-          {!editingStart ? (
-            <button onClick={() => setEditingStart(true)} className="text-sm text-primary">
-              Edit
+          <h1 className="text-lg font-bold text-foreground">My Schedule</h1>
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setConfirmClear(true)}
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-error transition-colors"
+            >
+              <Trash2 size={16} />
+              Clear
             </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <Button size="sm" onClick={saveStartDate} disabled={savingDate}>Save</Button>
-              <button
-                onClick={() => { setStartDate(plan.startDate || ''); setEditingStart(false); }}
-                className="text-sm text-muted-foreground"
-                disabled={savingDate}
-              >
-                Cancel
-              </button>
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Calendar size={16} className="text-muted-foreground" />
-            {!editingEnd ? (
-              <span className="text-sm text-muted-foreground">
-                {plan.endDate
-                  ? `End: ${formatLocalDate(plan.endDate)}`
-                  : 'No end date set'}
-              </span>
-            ) : (
-              <input
-                type="date"
-                value={endDate ? toDateInputValue(endDate) : ''}
-                onChange={(e) => setEndDate(e.target.value)}
-                className="text-sm bg-surface border border-border rounded px-2 py-1 text-foreground"
-              />
-            )}
-          </div>
-          {!editingEnd ? (
-            <button onClick={() => setEditingEnd(true)} className="text-sm text-primary">
+            <Link href="/chat" className="flex items-center gap-1.5 text-sm text-primary">
+              <MessageSquare size={16} />
               Edit
-            </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <Button size="sm" onClick={saveEndDate} disabled={savingDate}>Save</Button>
-              <button
-                onClick={() => { setEndDate(plan.endDate || ''); setEditingEnd(false); }}
-                className="text-sm text-muted-foreground"
-                disabled={savingDate}
-              >
-                Cancel
-              </button>
-            </div>
-          )}
+            </Link>
+          </div>
         </div>
       </div>
 
@@ -387,7 +304,7 @@ export function PlanViewerContent({
         <div className="flex gap-2 min-w-max">
           {uniqueDays.map((day) => {
             const color = getDayColor(day);
-            const slotsForDay = plan.dayAssignments.filter((da) => da.dayOfWeek === day);
+            const slotsForDay = schedule.dayAssignments.filter((da) => da.dayOfWeek === day);
             const hasMultiple = slotsForDay.length > 1;
             return (
               <button
@@ -432,6 +349,13 @@ export function PlanViewerContent({
                       ({slotIdx + 1}/{selectedSlots.length})
                     </span>
                   )}
+                  <button
+                    onClick={() => setSlotMenu(slot)}
+                    className="ml-auto p-1.5 text-muted-foreground hover:text-error transition-colors"
+                    aria-label="Remove workout"
+                  >
+                    <Trash2 size={16} />
+                  </button>
                 </div>
                 <ExerciseList
                   exercises={slot.workoutType.exercises}
@@ -458,6 +382,13 @@ export function PlanViewerContent({
                   {selectedSlots.length > 1 && (
                     <span className="text-xs text-muted-foreground">· {slotIdx + 1}/{selectedSlots.length}</span>
                   )}
+                  <button
+                    onClick={() => setSlotMenu(slot)}
+                    className="ml-auto p-1.5 text-muted-foreground hover:text-error transition-colors"
+                    aria-label="Remove rotation"
+                  >
+                    <Trash2 size={16} />
+                  </button>
                 </div>
 
                 <div className="space-y-4">
@@ -497,13 +428,85 @@ export function PlanViewerContent({
 
           return null;
         })}
-
-        {selectedSlots.length === 0 && (
-          <div className="py-8 text-center text-muted-foreground">
-            Select a day to view exercises
-          </div>
-        )}
       </div>
+
+      {/* Per-slot remove menu */}
+      {slotMenu && (() => {
+        const dayLabel = DAY_NAMES[slotMenu.dayOfWeek];
+        const isRotation = !slotMenu.workoutType && slotMenu.rotationEntries.length > 0;
+        const title = slotMenu.workoutType?.name ?? slotMenu.rotationName ?? 'Workout';
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+            onClick={() => !actioning && setSlotMenu(null)}
+          >
+            <div className="absolute inset-0 bg-black/50" />
+            <div
+              className="relative bg-surface rounded-2xl w-full max-w-sm m-4 p-5 space-y-4 animate-[fadeSlideIn_0.2s_ease-out]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-foreground">{title}</h3>
+                  <p className="text-sm text-muted-foreground">{dayLabel}</p>
+                </div>
+                <button onClick={() => setSlotMenu(null)} disabled={actioning} className="p-1 text-muted-foreground hover:text-foreground touch-target">
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="space-y-2">
+                <button
+                  onClick={() => runDelete(`/api/schedule/assignment/${slotMenu.id}`)}
+                  disabled={actioning}
+                  className="w-full text-left bg-surface-elevated rounded-xl p-3 border border-border hover:border-primary/50 transition-colors disabled:opacity-50"
+                >
+                  <p className="font-medium text-foreground">Remove from {dayLabel}</p>
+                  <p className="text-xs text-muted-foreground">Unschedule it from this day only.</p>
+                </button>
+                {!isRotation && slotMenu.workoutType && (
+                  <button
+                    onClick={() => runDelete(`/api/schedule/workout-type/${slotMenu.workoutType!.id}`)}
+                    disabled={actioning}
+                    className="w-full text-left bg-surface-elevated rounded-xl p-3 border border-border hover:border-error/50 transition-colors disabled:opacity-50"
+                  >
+                    <p className="font-medium text-error">Remove from entire schedule</p>
+                    <p className="text-xs text-muted-foreground">Take it off every day. Your logged history is kept.</p>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Clear-schedule confirm */}
+      {confirmClear && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={() => !actioning && setConfirmClear(false)}
+        >
+          <div className="absolute inset-0 bg-black/50" />
+          <div
+            className="relative bg-surface rounded-2xl w-full max-w-sm m-4 p-5 space-y-4 animate-[fadeSlideIn_0.2s_ease-out]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <h3 className="text-lg font-bold text-foreground">Clear entire schedule?</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                Removes all scheduled days and rotations. Your workouts and logged history are kept.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="secondary" fullWidth onClick={() => setConfirmClear(false)} disabled={actioning}>
+                Cancel
+              </Button>
+              <Button variant="danger" fullWidth onClick={() => runDelete('/api/schedule')} loading={actioning}>
+                Clear
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

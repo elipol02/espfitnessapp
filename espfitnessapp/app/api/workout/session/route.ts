@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = session.user.id;
-    const { workoutTypeId: rawWorkoutTypeId, date, planId, rotationId } = await request.json();
+    const { workoutTypeId: rawWorkoutTypeId, date, rotationId } = await request.json();
 
     if (!date) {
       return NextResponse.json(
@@ -81,7 +81,6 @@ export async function POST(request: NextRequest) {
       data: {
         userId,
         workoutTypeId,
-        planId: planId || null,
         rotationId: rotationId || null,
         workoutDate: startOfDay,
         status: 'in_progress',

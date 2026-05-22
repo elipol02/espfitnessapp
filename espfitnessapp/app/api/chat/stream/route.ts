@@ -267,6 +267,59 @@ async function executeTool(
     return { result: { success: true, sessions: formatted } };
   }
 
+  if (toolCall.name === 'remove_from_schedule') {
+    const args = toolCall.arguments as { action: string; dayOfWeek?: number; workoutTypeId?: string };
+
+    if (args.action === 'clear_schedule') {
+      await prisma.$transaction([
+        prisma.dayAssignment.deleteMany({ where: { userId } }),
+        prisma.workoutRotation.deleteMany({ where: { userId } }),
+      ]);
+      return { result: { success: true, removed: 'the entire schedule' } };
+    }
+
+    if (args.action === 'remove_day') {
+      const dow = args.dayOfWeek;
+      if (!dow) return { result: { success: false, error: 'dayOfWeek is required' } };
+      await prisma.$transaction(async (tx) => {
+        const assignments = await tx.dayAssignment.findMany({
+          where: { userId, dayOfWeek: dow },
+          select: { rotationId: true },
+        });
+        await tx.dayAssignment.deleteMany({ where: { userId, dayOfWeek: dow } });
+        const rotationIds = [...new Set(assignments.map((a) => a.rotationId).filter((r): r is string => !!r))];
+        for (const rotationId of rotationIds) {
+          const remaining = await tx.dayAssignment.count({ where: { rotationId } });
+          if (remaining === 0) await tx.workoutRotation.delete({ where: { id: rotationId } });
+        }
+      });
+      return { result: { success: true, removed: `all workouts on day ${dow}` } };
+    }
+
+    if (args.action === 'remove_workout') {
+      const workoutTypeId = args.workoutTypeId;
+      if (!workoutTypeId) return { result: { success: false, error: 'workoutTypeId is required' } };
+      const wt = await prisma.workoutType.findFirst({ where: { id: workoutTypeId, userId }, select: { name: true } });
+      if (!wt) return { result: { success: false, error: 'workout type not found' } };
+      await prisma.$transaction(async (tx) => {
+        await tx.dayAssignment.deleteMany({ where: { userId, workoutTypeId } });
+        const affected = await tx.rotationEntry.findMany({
+          where: { workoutTypeId, rotation: { userId } },
+          select: { rotationId: true },
+        });
+        await tx.rotationEntry.deleteMany({ where: { workoutTypeId, rotation: { userId } } });
+        const rotationIds = [...new Set(affected.map((e) => e.rotationId))];
+        for (const rotationId of rotationIds) {
+          const remaining = await tx.rotationEntry.count({ where: { rotationId } });
+          if (remaining === 0) await tx.workoutRotation.delete({ where: { id: rotationId } });
+        }
+      });
+      return { result: { success: true, removed: wt.name } };
+    }
+
+    return { result: { success: false, error: `Unknown action: ${args.action}` } };
+  }
+
   throw new Error(`Unknown tool: ${toolCall.name}`);
 }
 
@@ -338,7 +391,7 @@ export async function POST(request: NextRequest) {
 
       userId = session.user.id;
       const body = await request.json();
-      const { sessionId: sid, message, displayMessage, planId, context } = body;
+      const { sessionId: sid, message, displayMessage, context } = body;
       sessionId = sid;
 
       const chatSession = await prisma.chatSession.findUnique({
@@ -402,43 +455,34 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      let currentPlan = null;
-      if (planId) {
-        currentPlan = await prisma.workoutPlan.findUnique({
-          where: { id: planId },
-          include: {
-            dayAssignments: {
-              include: {
-                workoutType: {
-                  include: {
-                    exercises: { orderBy: { order: 'asc' } },
-                  },
-                },
-                rotation: {
-                  include: {
-                    entries: {
-                      orderBy: { order: 'asc' },
-                      include: {
-                        workoutType: {
-                          include: { exercises: { orderBy: { order: 'asc' } } },
-                        },
-                      },
-                    },
+      const scheduleAssignments = await prisma.dayAssignment.findMany({
+        where: { userId },
+        include: {
+          workoutType: {
+            include: {
+              exercises: { orderBy: { order: 'asc' } },
+            },
+          },
+          rotation: {
+            include: {
+              entries: {
+                orderBy: { order: 'asc' },
+                include: {
+                  workoutType: {
+                    include: { exercises: { orderBy: { order: 'asc' } } },
                   },
                 },
               },
-              orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
             },
           },
-        });
-      }
+        },
+        orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
+      });
 
       const systemMessage = buildSystemMessage({
-        currentPlan: currentPlan
+        currentPlan: scheduleAssignments.length > 0
           ? {
-              id: currentPlan.id,
-              name: currentPlan.name,
-              dayAssignments: currentPlan.dayAssignments.flatMap((da) => {
+              dayAssignments: scheduleAssignments.flatMap((da) => {
                 // For rotation-based slots, expand each rotation entry as a separate "virtual" assignment
                 if (!da.workoutType && da.rotation) {
                   return da.rotation.entries.map((entry) => ({

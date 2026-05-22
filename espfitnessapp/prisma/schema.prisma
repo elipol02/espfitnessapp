@@ -15,6 +15,7 @@ model User {
   password            String?
   bodyweight          Float?
   onboardingCompleted Boolean          @default(false)
+  scheduleStartedAt   DateTime?
   createdAt           DateTime         @default(now())
   updatedAt           DateTime         @updatedAt
   accounts            Account[]
@@ -22,9 +23,10 @@ model User {
   chatSessions        ChatSession[]
   chatMemories        ChatMemory[]
   sessions            Session[]
-  workoutPlans        WorkoutPlan[]
   workoutTypes        WorkoutType[]
   workoutSessions     WorkoutSession[]
+  dayAssignments      DayAssignment[]
+  rotations           WorkoutRotation[]
 }
 
 model Account {
@@ -74,7 +76,7 @@ model WorkoutType {
   updatedAt       DateTime           @updatedAt
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   exercises       Exercise[]
-  dayAssignments  PlanDayAssignment[]
+  dayAssignments  DayAssignment[]
   workoutSessions WorkoutSession[]
   rotationEntries RotationEntry[]
 
@@ -100,54 +102,36 @@ model Exercise {
   @@index([order])
 }
 
-// ─── Plan Models ────────────────────────────────────────────────────────────
+// ─── Schedule Models ────────────────────────────────────────────────────────
 
-model WorkoutPlan {
-  id              String             @id @default(cuid())
-  userId          String
-  name            String
-  status          String             @default("active")
-  startDate       DateTime?
-  endDate         DateTime?
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
-  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  dayAssignments  PlanDayAssignment[]
-  workoutSessions WorkoutSession[]
-  rotations       WorkoutRotation[]
-
-  @@index([userId])
-  @@index([status])
-}
-
-model PlanDayAssignment {
+model DayAssignment {
   id            String           @id @default(cuid())
-  planId        String
+  userId        String
   dayOfWeek     Int
   workoutTypeId String?
   rotationId    String?
   order         Int              @default(0)
-  plan          WorkoutPlan      @relation(fields: [planId], references: [id], onDelete: Cascade)
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   workoutType   WorkoutType?     @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
   rotation      WorkoutRotation? @relation(fields: [rotationId], references: [id], onDelete: Cascade)
 
-  @@unique([planId, dayOfWeek, order])
-  @@index([planId])
+  @@unique([userId, dayOfWeek, order])
+  @@index([userId])
   @@index([workoutTypeId])
   @@index([rotationId])
 }
 
 model WorkoutRotation {
-  id             String              @id @default(cuid())
-  planId         String
+  id             String           @id @default(cuid())
+  userId         String
   name           String
-  currentIndex   Int                 @default(0)
-  plan           WorkoutPlan         @relation(fields: [planId], references: [id], onDelete: Cascade)
+  currentIndex   Int              @default(0)
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   entries        RotationEntry[]
-  dayAssignments PlanDayAssignment[]
+  dayAssignments DayAssignment[]
   sessions       WorkoutSession[]
 
-  @@index([planId])
+  @@index([userId])
 }
 
 model RotationEntry {
@@ -168,7 +152,6 @@ model WorkoutSession {
   id            String           @id @default(cuid())
   userId        String
   workoutTypeId String
-  planId        String?
   rotationId    String?
   workoutDate   DateTime
   status        String           @default("in_progress")
@@ -179,13 +162,11 @@ model WorkoutSession {
   createdAt     DateTime         @default(now())
   user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   workoutType   WorkoutType      @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
-  plan          WorkoutPlan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
   rotation      WorkoutRotation? @relation(fields: [rotationId], references: [id], onDelete: SetNull)
   entries       ExerciseEntry[]
 
   @@index([userId])
   @@index([workoutTypeId])
-  @@index([planId])
   @@index([rotationId])
   @@index([workoutDate])
   @@index([userId, workoutTypeId, workoutDate])

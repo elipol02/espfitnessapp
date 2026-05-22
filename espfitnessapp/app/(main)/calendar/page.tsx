@@ -6,44 +6,49 @@ import { redirect } from 'next/navigation';
 export const dynamic = 'force-dynamic';
 
 async function getCalendarData(userId: string) {
-  const activePlan = await prisma.workoutPlan.findFirst({
-    where: { userId, status: 'active' },
+  const dayAssignments = await prisma.dayAssignment.findMany({
+    where: { userId },
     include: {
-      dayAssignments: {
+      workoutType: true,
+      rotation: {
         include: {
-          workoutType: true,
-          rotation: {
-            include: {
-              entries: {
-                orderBy: { order: 'asc' },
-                include: { workoutType: true },
-              },
-            },
+          entries: {
+            orderBy: { order: 'asc' },
+            include: { workoutType: true },
           },
         },
-        orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
       },
     },
+    orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
   });
 
-  // Get all workout sessions
-  const sessions = activePlan
-    ? await prisma.workoutSession.findMany({
-        where: { userId, planId: activePlan.id },
-        select: {
-          id: true,
-          workoutTypeId: true,
-          rotationId: true,
-          workoutDate: true,
-          status: true,
-        },
-        orderBy: { workoutDate: 'desc' },
-      })
-    : [];
+  // Get all workout sessions (ordered newest-first; last element is the earliest)
+  const sessions = await prisma.workoutSession.findMany({
+    where: { userId },
+    select: {
+      id: true,
+      workoutTypeId: true,
+      rotationId: true,
+      workoutDate: true,
+      status: true,
+    },
+    orderBy: { workoutDate: 'desc' },
+  });
+
+  // Anchor the visible range + rotation projection at the schedule's start date (set
+  // on creation), falling back to the first session or today. Nothing before this is
+  // shown as scheduled. The schedule is ongoing, so there is no end date.
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { scheduleStartedAt: true },
+  });
+  const startDate =
+    user?.scheduleStartedAt ??
+    (sessions.length > 0 ? sessions[sessions.length - 1].workoutDate : new Date());
 
   // Emit one entry per slot. Rotation slots carry their full ordered entry list so the
   // client can project the A/B/A… cycle across actual calendar dates.
-  const slots = (activePlan?.dayAssignments ?? [])
+  const slots = dayAssignments
     .map((da) => {
       if (da.rotation && da.rotation.entries.length > 0) {
         return {
@@ -76,9 +81,8 @@ async function getCalendarData(userId: string) {
     .filter((s): s is NonNullable<typeof s> => s !== null);
 
   return {
-    planId: activePlan?.id || null,
-    startDate: activePlan?.startDate?.toISOString() || null,
-    endDate: activePlan?.endDate?.toISOString() || null,
+    startDate: startDate.toISOString(),
+    endDate: null,
     slots,
     sessions: sessions.map((s) => ({
       id: s.id,

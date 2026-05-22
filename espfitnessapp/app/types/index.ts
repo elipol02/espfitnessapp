@@ -137,26 +137,11 @@ export interface Exercise {
   updatedAt: Date;
 }
 
-// ─── Plan Models ────────────────────────────────────────────────────────────
+// ─── Schedule Models ────────────────────────────────────────────────────────
 
-export type PlanStatus = 'active' | 'archived';
-
-export interface WorkoutPlan {
+export interface DayAssignment {
   id: string;
   userId: string;
-  name: string;
-  status: PlanStatus;
-  startDate: Date | null;
-  endDate: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
-  dayAssignments: PlanDayAssignment[];
-  rotations?: WorkoutRotation[];
-}
-
-export interface PlanDayAssignment {
-  id: string;
-  planId: string;
   dayOfWeek: number;
   order: number;
   workoutTypeId: string | null;
@@ -169,7 +154,7 @@ export interface PlanDayAssignment {
 
 export interface WorkoutRotation {
   id: string;
-  planId: string;
+  userId: string;
   name: string;
   currentIndex: number;
   entries: RotationEntry[];
@@ -263,7 +248,6 @@ export interface WorkoutSession {
   id: string;
   userId: string;
   workoutTypeId: string;
-  planId: string | null;
   rotationId: string | null;
   workoutDate: Date;
   status: SessionStatus;
@@ -479,7 +463,6 @@ export interface CalendarDay {
 export interface LiveWorkoutState {
   sessionId: string;
   workoutTypeId: string;
-  planId: string | null;
   currentExerciseIndex: number;
   exercises: LiveExercise[];
   startedAt: Date;

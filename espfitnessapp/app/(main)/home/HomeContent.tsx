@@ -40,20 +40,15 @@ interface HomeData {
     onboardingCompleted: boolean;
   } | null;
   currentStreak: number;
-  activePlan: {
-    id: string;
-    name: string;
-    status: string;
-    startDate: string | null;
-    endDate: string | null;
-    planCompletionPercentage: number | null;
+  schedule: {
     dayAssignments: DayAssignment[];
   } | null;
+  /** The user's first-ever workout date — floors the week preview / stats. */
+  scheduleStartDate: string | null;
   recentSessions: SessionData[];
   completedWorkouts: number;
   missedWorkouts: number;
   completionRateToDate: number;
-  motivationalMessage: string | null;
 }
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -64,7 +59,7 @@ const SLOT_LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 export function HomeContent({ data }: { data: HomeData }) {
   const router = useRouter();
-  const { user, currentStreak, activePlan, recentSessions, completedWorkouts, missedWorkouts, motivationalMessage } = data;
+  const { user, currentStreak, schedule, scheduleStartDate, recentSessions, completedWorkouts, missedWorkouts, completionRateToDate } = data;
 
   useEffect(() => {
     const offset = new Date().getTimezoneOffset();
@@ -83,12 +78,8 @@ export function HomeContent({ data }: { data: HomeData }) {
   const startOfWeek = new Date(clientToday);
   startOfWeek.setDate(clientToday.getDate() - clientToday.getDay());
 
-  const planStartDate = activePlan?.startDate
-    ? (() => { const d = new Date(activePlan.startDate); d.setHours(0, 0, 0, 0); return d; })()
-    : null;
-
-  const planEndDate = activePlan?.endDate
-    ? (() => { const d = new Date(activePlan.endDate); d.setHours(0, 0, 0, 0); return d; })()
+  const planStartDate = scheduleStartDate
+    ? (() => { const d = new Date(scheduleStartDate); d.setHours(0, 0, 0, 0); return d; })()
     : null;
 
   /** Find all sessions for a specific date and a specific workoutTypeId */
@@ -105,10 +96,10 @@ export function HomeContent({ data }: { data: HomeData }) {
     const dow = DAY_MAP[index];
 
     const beforePlanStart = planStartDate ? dayDate < planStartDate : false;
-    const afterPlanEnd = planEndDate ? dayDate > planEndDate : false;
+    const afterPlanEnd = false; // ongoing schedule has no end date
 
     // All slots for this day, sorted by order
-    const dayAssignments = activePlan?.dayAssignments
+    const dayAssignments = schedule?.dayAssignments
       .filter((a) => a.dayOfWeek === dow)
       .sort((a, b) => a.order - b.order) ?? [];
 
@@ -161,7 +152,7 @@ export function HomeContent({ data }: { data: HomeData }) {
     router.push(`/workout/today?${params.toString()}`);
   };
 
-  if (!activePlan) {
+  if (!schedule) {
     return (
       <div className="px-5 pt-10 pb-28">
         <div className="max-w-lg mx-auto space-y-8">
@@ -196,33 +187,21 @@ export function HomeContent({ data }: { data: HomeData }) {
           <h1 className="text-2xl font-bold text-foreground mt-1">
             {greeting}, {userName}!
           </h1>
-          {motivationalMessage && (
-            <p className="text-sm text-muted-foreground mt-1 italic">{motivationalMessage}</p>
-          )}
         </div>
 
-        {/* Progress */}
-        {activePlan.planCompletionPercentage !== null ? (
-          <div className="bg-surface rounded-xl p-4 space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">Plan Completion</span>
-              <div className="flex items-center gap-2">
-                <span className="font-medium text-foreground">{activePlan.planCompletionPercentage}%</span>
-                {activePlan.endDate && (
-                  <span className="text-xs text-muted-foreground">
-                    ends {new Date(activePlan.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="h-2 bg-background rounded-full overflow-hidden">
-              <div
-                className="h-full bg-primary rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, activePlan.planCompletionPercentage)}%` }}
-              />
-            </div>
+        {/* Progress — rolling 30-day completion */}
+        <div className="bg-surface rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">Completion (last 30 days)</span>
+            <span className="font-medium text-foreground">{completionRateToDate}%</span>
           </div>
-        ) : null}
+          <div className="h-2 bg-background rounded-full overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-all duration-500"
+              style={{ width: `${Math.min(100, completionRateToDate)}%` }}
+            />
+          </div>
+        </div>
 
         {/* Today's Workout(s) */}
         {todaySlots.length === 0 ? (
@@ -451,13 +430,13 @@ export function HomeContent({ data }: { data: HomeData }) {
           </div>
         </div>
 
-        {/* View Plan */}
-        <Link href={`/plan/${activePlan.id}`}>
+        {/* View Schedule */}
+        <Link href="/schedule">
           <div className="bg-surface rounded-xl p-4 flex items-center justify-between hover:bg-surface-elevated transition-colors">
             <div>
-              <p className="font-medium text-foreground">{activePlan.name}</p>
+              <p className="font-medium text-foreground">My Schedule</p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                {new Set(activePlan.dayAssignments.map((a) => a.dayOfWeek)).size} training days
+                {new Set(schedule.dayAssignments.map((a) => a.dayOfWeek)).size} training days
               </p>
             </div>
             <ChevronRight className="w-5 h-5 text-muted-foreground" />

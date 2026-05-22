@@ -23,7 +23,7 @@ export default async function TodayWorkoutPage({
   const params = await searchParams;
   let workoutTypeId = params.workoutTypeId;
   const dateStr = params.date;
-  const rotationId = params.rotationId;
+  let rotationId = params.rotationId;
 
   if (!dateStr) {
     return (
@@ -37,7 +37,14 @@ export default async function TodayWorkoutPage({
   const localDate = new Date(y, m - 1, d);
   const todayDow = DAY_MAP[localDate.getDay()];
 
-  // If workoutTypeId not provided, try to resolve it from the schedule/rotation
+  const workoutDate = new Date(dateStr);
+  const startOfDay = new Date(workoutDate);
+  startOfDay.setUTCHours(0, 0, 0, 0);
+  const endOfDay = new Date(workoutDate);
+  endOfDay.setUTCHours(23, 59, 59, 999);
+
+  // If workoutTypeId not provided, resolve it from the schedule/rotation.
+  // For days with multiple workouts, pick the one to start/resume rather than bailing to home.
   if (!workoutTypeId && !rotationId) {
     const assignments = await prisma.dayAssignment.findMany({
       where: { userId, dayOfWeek: todayDow },
@@ -64,20 +71,46 @@ export default async function TodayWorkoutPage({
       );
     }
 
-    if (assignments.length > 1) {
-      // Multiple slots — redirect back to home so the user picks one from the cards
+    // Resolve each slot to its concrete workout type (following the rotation's current index).
+    const slots = assignments
+      .map((a) => {
+        if (a.rotationId && a.rotation && a.rotation.entries.length > 0) {
+          const idx = a.rotation.currentIndex % a.rotation.entries.length;
+          return { workoutTypeId: a.rotation.entries[idx]?.workoutTypeId, rotationId: a.rotationId };
+        }
+        if (a.workoutType) {
+          return { workoutTypeId: a.workoutType.id, rotationId: null as string | null };
+        }
+        return null;
+      })
+      .filter((s): s is { workoutTypeId: string; rotationId: string | null } => !!s?.workoutTypeId);
+
+    if (slots.length === 0) {
       redirect('/home');
     }
 
-    const assignment = assignments[0];
-    if (assignment.rotationId && assignment.rotation) {
-      const rot = assignment.rotation;
-      const idx = rot.currentIndex % rot.entries.length;
-      workoutTypeId = rot.entries[idx]?.workoutTypeId;
-      // rotationId will be passed forward via session create
-    } else if (assignment.workoutType) {
-      workoutTypeId = assignment.workoutType.id;
+    let pick = slots[0];
+    if (slots.length > 1) {
+      // Choose which slot to open: resume an in-progress one, else the first not-yet-completed one.
+      const daySessions = await prisma.workoutSession.findMany({
+        where: {
+          userId,
+          workoutTypeId: { in: slots.map((s) => s.workoutTypeId) },
+          workoutDate: { gte: startOfDay, lte: endOfDay },
+        },
+        select: { workoutTypeId: true, status: true },
+      });
+      const inProgress = slots.find((s) =>
+        daySessions.some((d) => d.workoutTypeId === s.workoutTypeId && d.status === 'in_progress'),
+      );
+      const firstUncompleted = slots.find(
+        (s) => !daySessions.some((d) => d.workoutTypeId === s.workoutTypeId && d.status === 'completed'),
+      );
+      pick = inProgress ?? firstUncompleted ?? slots[0];
     }
+
+    workoutTypeId = pick.workoutTypeId;
+    rotationId = pick.rotationId ?? undefined;
   }
 
   // If we have a rotationId but no workoutTypeId, resolve it
@@ -95,12 +128,6 @@ export default async function TodayWorkoutPage({
   if (!workoutTypeId) {
     redirect('/home');
   }
-
-  const workoutDate = new Date(dateStr);
-  const startOfDay = new Date(workoutDate);
-  startOfDay.setUTCHours(0, 0, 0, 0);
-  const endOfDay = new Date(workoutDate);
-  endOfDay.setUTCHours(23, 59, 59, 999);
 
   let workoutSessionId: string;
 

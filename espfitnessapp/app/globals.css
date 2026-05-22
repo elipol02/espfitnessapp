@@ -151,12 +151,14 @@ input, textarea, select {
 }
 
 /* Button reset */
-button {
-  cursor: pointer;
-  border: none;
-  background: none;
-  font: inherit;
-  color: inherit;
+@layer base {
+  button {
+    cursor: pointer;
+    border: none;
+    background: none;
+    font: inherit;
+    color: inherit;
+  }
 }
 
 /* Touch target minimum size helper */

@@ -6,7 +6,17 @@ import { EmptyState } from '@/app/components/EmptyState';
 import { useRestTimer } from '@/app/components/RestTimerBadge';
 import type { HistoryData, LiftHistory, LiftSessionPoint, MetricKind } from '@/app/lib/history';
 
-type SortMode = 'recent' | 'name' | 'sessions';
+type SortMode = 'recent' | 'name' | 'sessions' | 'weight';
+type TimeRange = '2w' | '1m' | '3m' | '6m' | '1y' | 'all';
+
+const TIME_RANGES: ReadonlyArray<readonly [TimeRange, string]> = [
+  ['2w', '2W'],
+  ['1m', '1M'],
+  ['3m', '3M'],
+  ['6m', '6M'],
+  ['1y', '1Y'],
+  ['all', 'All'],
+];
 
 interface MetricDef {
   key: string;
@@ -89,6 +99,63 @@ function formatMetric(kind: MetricKind, unit: string, isBodyweight: boolean, v: 
     return `${fmtNum(v)} ${unit}`;
   }
   return fmtNum(v);
+}
+
+// ─── Time-range filtering ─────────────────────────────────────────────────────
+
+function ymd(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/** Earliest date (inclusive, YYYY-MM-DD) to keep for a range, or null for "all". */
+function cutoffFor(range: TimeRange): string | null {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  switch (range) {
+    case '2w': d.setDate(d.getDate() - 14); break;
+    case '1m': d.setMonth(d.getMonth() - 1); break;
+    case '3m': d.setMonth(d.getMonth() - 3); break;
+    case '6m': d.setMonth(d.getMonth() - 6); break;
+    case '1y': d.setFullYear(d.getFullYear() - 1); break;
+    default: return null;
+  }
+  return ymd(d);
+}
+
+/** Restrict a lift to sessions on/after the cutoff, recomputing its summary fields.
+ *  Returns null when nothing falls inside the window. */
+function liftWithin(lift: LiftHistory, cutoff: string | null): LiftHistory | null {
+  if (!cutoff) return lift;
+  const points = lift.points.filter((p) => p.date >= cutoff);
+  if (points.length === 0) return null;
+
+  const primary = metricsFor(lift)[0];
+  const values = primary
+    ? points.map(primary.pick).filter((v): v is number => v !== null)
+    : [];
+
+  return {
+    ...lift,
+    sessionCount: points.length,
+    lastDate: points[points.length - 1].date,
+    current: values.length ? values[values.length - 1] : null,
+    first: values.length ? values[0] : null,
+    best: values.length ? Math.max(...values) : null,
+    points,
+  };
+}
+
+/** Heaviest top set across a lift's sessions; non-weighted lifts sort to the bottom. */
+function weightKey(lift: LiftHistory): number {
+  if (lift.metricKind !== 'strength' || lift.isBodyweight) return -1;
+  let max = -1;
+  for (const p of lift.points) {
+    if (p.topWeight !== null && p.topWeight > max) max = p.topWeight;
+  }
+  return max;
 }
 
 // ─── Inline SVG chart (dependency-free) ──────────────────────────────────────
@@ -326,16 +393,39 @@ export function HistoryContent({ data }: { data: HistoryData }) {
   const restTimer = useRestTimer();
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<SortMode>('recent');
+  const [range, setRange] = useState<TimeRange>('all');
 
-  const lifts = useMemo(() => {
+  // Restrict every lift to the chosen window, then derive a summary that tracks
+  // the same window so the headline stats move with the filter.
+  const { lifts, summary } = useMemo(() => {
+    const cutoff = cutoffFor(range);
+    const ranged = data.lifts
+      .map((l) => liftWithin(l, cutoff))
+      .filter((l): l is LiftHistory => l !== null);
+
+    const dates = new Set<string>();
+    let volume = 0;
+    for (const l of ranged) {
+      for (const p of l.points) {
+        dates.add(p.date);
+        if (l.metricKind === 'strength' && !l.isBodyweight && p.volume) volume += p.volume;
+      }
+    }
+    const summary = {
+      liftsTracked: ranged.length,
+      totalWorkouts: dates.size,
+      totalVolume: Math.round(volume),
+    };
+
     const q = query.trim().toLowerCase();
-    const filtered = q ? data.lifts.filter((l) => l.name.toLowerCase().includes(q)) : data.lifts;
+    const filtered = q ? ranged.filter((l) => l.name.toLowerCase().includes(q)) : ranged;
     const sorted = [...filtered];
     if (sort === 'name') sorted.sort((a, b) => a.name.localeCompare(b.name));
     else if (sort === 'sessions') sorted.sort((a, b) => b.sessionCount - a.sessionCount);
+    else if (sort === 'weight') sorted.sort((a, b) => weightKey(b) - weightKey(a));
     else sorted.sort((a, b) => b.lastDate.localeCompare(a.lastDate));
-    return sorted;
-  }, [data.lifts, query, sort]);
+    return { lifts: sorted, summary };
+  }, [data.lifts, query, sort, range]);
 
   if (data.lifts.length === 0) {
     return (
@@ -358,24 +448,44 @@ export function HistoryContent({ data }: { data: HistoryData }) {
     <div>
       {/* Sticky header */}
       <div className="sticky top-0 z-10 bg-background border-b border-border">
-        <div className="px-5 py-3 max-w-lg mx-auto flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-foreground">Progress</h1>
-          <div className={`flex bg-surface rounded-lg p-1 transition-all duration-200 ${restTimer !== null ? 'mr-24' : ''}`}>
-            {([
-              ['recent', 'Recent'],
-              ['name', 'A–Z'],
-              ['sessions', 'Top'],
-            ] as const).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setSort(key)}
-                className={`px-2.5 py-1.5 text-xs rounded-md transition-colors ${
-                  sort === key ? 'bg-primary text-white' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+        <div className="max-w-lg mx-auto">
+          {/* Title + sort */}
+          <div className="px-5 pt-3 pb-2 flex items-center justify-between gap-3">
+            <h1 className="text-2xl font-bold text-foreground truncate min-w-0">Progress</h1>
+            <div className={`flex bg-surface rounded-lg p-0.5 shrink-0 transition-all duration-200 ${restTimer !== null ? 'mr-20' : ''}`}>
+              {([
+                ['recent', 'Recent'],
+                ['name', 'A–Z'],
+                ['sessions', 'Top'],
+                ['weight', 'Weight'],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setSort(key)}
+                  className={`px-2 py-1.5 text-[11px] font-medium rounded-md transition-colors ${
+                    sort === key ? 'bg-primary text-white' : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Time range */}
+          <div className="px-5 pb-3">
+            <div className="flex bg-surface rounded-lg p-0.5">
+              {TIME_RANGES.map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setRange(key)}
+                  className={`flex-1 px-1 py-1.5 text-[11px] font-medium rounded-md transition-colors ${
+                    range === key ? 'bg-primary text-white' : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -386,20 +496,20 @@ export function HistoryContent({ data }: { data: HistoryData }) {
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center text-center">
               <Dumbbell className="w-5 h-5 text-primary mb-2" />
-              <span className="text-2xl font-bold text-foreground">{data.summary.liftsTracked}</span>
+              <span className="text-2xl font-bold text-foreground">{summary.liftsTracked}</span>
               <span className="text-xs text-muted-foreground mt-1">Lifts</span>
             </div>
             <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center text-center">
               <Activity className="w-5 h-5 text-success mb-2" />
-              <span className="text-2xl font-bold text-foreground">{data.summary.totalWorkouts}</span>
+              <span className="text-2xl font-bold text-foreground">{summary.totalWorkouts}</span>
               <span className="text-xs text-muted-foreground mt-1">Workouts</span>
             </div>
             <div className="bg-surface rounded-xl p-4 flex flex-col items-center justify-center text-center">
               <TrendingUp className="w-5 h-5 text-warning mb-2" />
               <span className="text-2xl font-bold text-foreground">
-                {data.summary.totalVolume >= 1000
-                  ? `${(data.summary.totalVolume / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })}k`
-                  : data.summary.totalVolume}
+                {summary.totalVolume >= 1000
+                  ? `${(summary.totalVolume / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })}k`
+                  : summary.totalVolume}
               </span>
               <span className="text-xs text-muted-foreground mt-1">Volume (lbs)</span>
             </div>
@@ -419,7 +529,9 @@ export function HistoryContent({ data }: { data: HistoryData }) {
 
           {/* Lift list */}
           {lifts.length === 0 ? (
-            <p className="text-center text-muted-foreground py-8">No lifts match “{query}”.</p>
+            <p className="text-center text-muted-foreground py-8">
+              {query.trim() ? `No lifts match “${query}”.` : 'No workouts logged in this time range.'}
+            </p>
           ) : (
             <div className="space-y-2.5">
               {lifts.map((lift) => (

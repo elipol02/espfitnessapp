@@ -796,38 +796,99 @@ export function ChatContent({ data, userId: _userId }: { data: ChatData; userId:
                         {message.metadata?.type === 'plan_preview' && message.metadata?.planData && (
                           <div className="mt-4 pt-4 border-t border-border space-y-3">
                             <p className="font-semibold text-sm">{message.metadata.planData.name}</p>
-                            {message.metadata.planData.schedule.map((day, idx) => (
-                              <div key={idx} className="bg-background/30 rounded-lg p-3 animate-[fadeSlideIn_0.3s_ease-out]">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: day.workoutTypeColor }} />
-                                  <p className="font-semibold text-sm">
-                                    {day.dayName} &ndash; {day.workoutTypeName}
-                                  </p>
-                                </div>
-                                <div className="space-y-1 text-xs">
-                                  {day.exercises.map((ex, exIdx) => {
-                                    const progressionText = formatProgressionDisplay(ex.progression);
-                                    return (
-                                      <div key={exIdx} className="space-y-0.5">
-                                        <div>
-                                          <span className="font-medium">{ex.name}</span>
-                                          <span className="text-muted-foreground ml-2">
-                                            {formatExerciseDisplay({
-                                              name: ex.name,
-                                              exerciseType: ex.exerciseType,
-                                              config: ex.config as unknown as Record<string, unknown>,
-                                            })}
-                                          </span>
+                            {(() => {
+                              // Workout-centric view: list each workout type (or rotation) once,
+                              // with the days it runs on — instead of repeating it under every day.
+                              type Slot = PlanDayData['slots'][number];
+                              type FixedSlot = Extract<Slot, { type: 'fixed' }>;
+                              type RotationSlot = Extract<Slot, { type: 'rotation' }>;
+                              type DayRef = { dayOfWeek: number; dayName: string };
+                              type Group =
+                                | { kind: 'fixed'; key: string; name: string; color: string; exercises: FixedSlot['exercises']; days: DayRef[] }
+                                | { kind: 'rotation'; key: string; name: string; entries: RotationSlot['rotationEntries']; days: DayRef[] };
+
+                              const order: string[] = [];
+                              const groups = new Map<string, Group>();
+
+                              for (const day of message.metadata!.planData!.schedule) {
+                                const dayRef: DayRef = { dayOfWeek: day.dayOfWeek, dayName: day.dayName };
+                                for (const slot of day.slots) {
+                                  const key = slot.type === 'rotation' ? `rot:${slot.rotationName}` : `fix:${slot.workoutTypeName}`;
+                                  let group = groups.get(key);
+                                  if (!group) {
+                                    group = slot.type === 'rotation'
+                                      ? { kind: 'rotation', key, name: slot.rotationName, entries: slot.rotationEntries, days: [] }
+                                      : { kind: 'fixed', key, name: slot.workoutTypeName, color: slot.workoutTypeColor, exercises: slot.exercises, days: [] };
+                                    groups.set(key, group);
+                                    order.push(key);
+                                  }
+                                  if (!group.days.some((d) => d.dayOfWeek === dayRef.dayOfWeek)) {
+                                    group.days.push(dayRef);
+                                  }
+                                }
+                              }
+
+                              const formatDays = (days: DayRef[]) =>
+                                [...days].sort((a, b) => a.dayOfWeek - b.dayOfWeek).map((d) => d.dayName).join(', ');
+
+                              return order.map((key, idx) => {
+                                const group = groups.get(key)!;
+                                return (
+                                  <div key={idx} className="bg-background/30 rounded-lg p-3 animate-[fadeSlideIn_0.3s_ease-out] space-y-2">
+                                    {group.kind === 'rotation' ? (
+                                      <>
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className="text-xs text-muted-foreground">↻</span>
+                                          <p className="font-semibold text-sm">{group.name}</p>
+                                          <span className="text-xs text-muted-foreground">· {formatDays(group.days)} (alternating)</span>
                                         </div>
-                                        {progressionText && (
-                                          <p className="text-primary pl-0.5">{progressionText}</p>
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            ))}
+                                        {group.entries.map((entry, entryIdx) => (
+                                          <div key={entryIdx} className="ml-3 border-l-2 pl-2" style={{ borderColor: entry.workoutTypeColor }}>
+                                            <p className="text-xs font-medium">{String.fromCharCode(65 + entryIdx)} – {entry.workoutTypeName}</p>
+                                            <div className="space-y-0.5 text-xs">
+                                              {entry.exercises.map((ex, exIdx) => (
+                                                <div key={exIdx}>
+                                                  <span className="font-medium">{ex.name}</span>
+                                                  <span className="text-muted-foreground ml-1">
+                                                    {formatExerciseDisplay({ name: ex.name, exerciseType: ex.exerciseType as ExerciseType, config: ex.config as Record<string, unknown> })}
+                                                  </span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </>
+                                    ) : (
+                                      <>
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: group.color }} />
+                                          <p className="font-semibold text-sm">{group.name}</p>
+                                          <span className="text-xs text-muted-foreground">· {formatDays(group.days)}</span>
+                                        </div>
+                                        <div className="space-y-0.5 text-xs ml-4">
+                                          {group.exercises.map((ex, exIdx) => {
+                                            const progressionText = formatProgressionDisplay(ex.progression as ProgressionRule | undefined);
+                                            return (
+                                              <div key={exIdx} className="space-y-0.5">
+                                                <div>
+                                                  <span className="font-medium">{ex.name}</span>
+                                                  <span className="text-muted-foreground ml-2">
+                                                    {formatExerciseDisplay({ name: ex.name, exerciseType: ex.exerciseType as ExerciseType, config: ex.config as Record<string, unknown> })}
+                                                  </span>
+                                                </div>
+                                                {progressionText && (
+                                                  <p className="text-primary pl-0.5">{progressionText}</p>
+                                                )}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              });
+                            })()}
 
                             {!isApproved && (
                               <Button

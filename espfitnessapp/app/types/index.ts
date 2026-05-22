@@ -151,14 +151,108 @@ export interface WorkoutPlan {
   createdAt: Date;
   updatedAt: Date;
   dayAssignments: PlanDayAssignment[];
+  rotations?: WorkoutRotation[];
 }
 
 export interface PlanDayAssignment {
   id: string;
   planId: string;
   dayOfWeek: number;
+  order: number;
+  workoutTypeId: string | null;
+  workoutType: WorkoutType | null;
+  rotationId: string | null;
+  rotation?: WorkoutRotation | null;
+}
+
+// ─── Rotation Models ─────────────────────────────────────────────────────────
+
+export interface WorkoutRotation {
+  id: string;
+  planId: string;
+  name: string;
+  currentIndex: number;
+  entries: RotationEntry[];
+}
+
+export interface RotationEntry {
+  id: string;
+  rotationId: string;
   workoutTypeId: string;
+  order: number;
   workoutType: WorkoutType;
+}
+
+/** Lightweight workout type summary used on home/calendar views */
+export interface WorkoutTypeSummary {
+  id: string;
+  name: string;
+  color: string;
+  exerciseCount: number;
+  exercises: { id: string; name: string }[];
+}
+
+/** A day assignment slot with the effective workout resolved (rotation or direct) */
+export interface ResolvedDaySlot {
+  assignmentId: string;
+  dayOfWeek: number;
+  order: number;
+  rotationId: string | null;
+  rotationName: string | null;
+  rotationSize: number;
+  rotationSlotIndex: number; // which slot is currently active (0-based)
+  effectiveWorkoutType: WorkoutTypeSummary;
+}
+
+/**
+ * Minimal shape needed to resolve a slot's effective workout type. Kept structural
+ * (only the fields actually read) so it accepts Prisma query results directly,
+ * regardless of how their scalar fields (e.g. exerciseType) are typed.
+ */
+type ResolvableWorkoutType = {
+  id: string;
+  name: string;
+  color: string;
+  exercises?: { id: string; name: string }[];
+};
+
+type ResolvableAssignment = {
+  workoutType?: ResolvableWorkoutType | null;
+  rotationId?: string | null;
+  rotation?: {
+    currentIndex: number;
+    entries: { order: number; workoutType: ResolvableWorkoutType }[];
+  } | null;
+};
+
+/** Resolve the effective workout type for a day assignment slot */
+export function resolveEffectiveWorkoutType(
+  assignment: ResolvableAssignment,
+): WorkoutTypeSummary | null {
+  if (assignment.workoutType) {
+    const wt = assignment.workoutType;
+    return {
+      id: wt.id,
+      name: wt.name,
+      color: wt.color,
+      exerciseCount: wt.exercises?.length ?? 0,
+      exercises: wt.exercises?.map((e) => ({ id: e.id, name: e.name })) ?? [],
+    };
+  }
+  if (assignment.rotation && assignment.rotation.entries.length > 0) {
+    const rot = assignment.rotation;
+    const idx = rot.currentIndex % rot.entries.length;
+    const entry = rot.entries.find((e) => e.order === idx) ?? rot.entries[idx] ?? rot.entries[0];
+    const wt = entry.workoutType;
+    return {
+      id: wt.id,
+      name: wt.name,
+      color: wt.color,
+      exerciseCount: wt.exercises?.length ?? 0,
+      exercises: wt.exercises?.map((e) => ({ id: e.id, name: e.name })) ?? [],
+    };
+  }
+  return null;
 }
 
 // ─── Session / Completed Workout Models ─────────────────────────────────────
@@ -170,6 +264,7 @@ export interface WorkoutSession {
   userId: string;
   workoutTypeId: string;
   planId: string | null;
+  rotationId: string | null;
   workoutDate: Date;
   status: SessionStatus;
   startedAt: Date | null;
@@ -302,11 +397,28 @@ export interface PlanData {
 export interface PlanDayData {
   dayOfWeek: number;
   dayName: string;
-  workoutTypeName: string;
-  workoutTypeColor: string;
-  workoutTypeCategory?: string;
-  exercises: PlanExerciseData[];
+  slots: PlanDaySlot[];
 }
+
+/** A single workout slot within a plan day — either fixed or part of a rotation */
+export type PlanDaySlot =
+  | {
+      type: 'fixed';
+      workoutTypeName: string;
+      workoutTypeColor: string;
+      workoutTypeCategory?: string;
+      exercises: PlanExerciseData[];
+    }
+  | {
+      type: 'rotation';
+      rotationName: string;
+      rotationEntries: {
+        workoutTypeName: string;
+        workoutTypeColor: string;
+        workoutTypeCategory?: string;
+        exercises: PlanExerciseData[];
+      }[];
+    };
 
 export interface PlanExerciseData {
   name: string;

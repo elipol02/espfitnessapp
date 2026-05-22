@@ -61,13 +61,41 @@ export interface SSEEvent {
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
+const EXERCISE_ITEM_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    exerciseType: {
+      type: 'string',
+      enum: ['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata', 'simple'],
+    },
+    config: {
+      type: 'object',
+      description:
+        'Type-specific config. strength: {sets,repsMin,repsMax,weightType,baseWeight,weightUnit,restSeconds,tempo?}. distance: {sets,distanceTarget,distanceUnit,restSeconds}. time: {sets,durationSeconds,restSeconds}. amrap: {timeCap,movements:[{name,reps?,weight?,weightUnit?}]}. emom: {intervalSeconds,totalMinutes,movements:[...]}. round_block: {rounds,restBetweenRounds,movements:[...]}. tabata: {rounds,workSeconds,restSeconds,movements:[...]}. simple: {} (empty or {notes?})',
+    },
+    progression: {
+      type: 'object',
+      description:
+        'REQUIRED. double_progression: {type:"double_progression",repsMin,repsMax,weightIncrement,weightIncrementUnit}. linear: {type:"linear",incrementValue,incrementUnit}. none: {type:"none"}. NEVER omit.',
+    },
+    groupTag: {
+      type: 'string',
+      description: 'Optional. Exercises sharing the same groupTag are done as a superset/circuit.',
+    },
+    order: { type: 'number' },
+    notes: { type: 'string' },
+  },
+  required: ['name', 'exerciseType', 'config', 'progression', 'order'],
+} as const;
+
 export const WORKOUT_TOOLS = [
   {
     type: 'function' as const,
     function: {
       name: 'create_workout_plan',
       description:
-        'Create a new workout plan. Returns plan JSON that is stored in the chat message for user approval — no DB records are created yet. IMPORTANT: Ask for equipment, days per week, experience level, injuries, and session length BEFORE calling this tool.',
+        'Create a new workout plan. Returns plan JSON for user approval — no DB records created yet. ALWAYS use ask_user first for: days per week, session length, equipment, experience level, injuries, goals, and whether they want A/B rotation. A rotation cycles workout types across the same days (e.g., MWF alternates Upper-A and Upper-B each occurrence). Multiple slots on a day means TWO separate workouts (e.g., strength + cardio same day).',
       parameters: {
         type: 'object',
         properties: {
@@ -78,53 +106,72 @@ export const WORKOUT_TOOLS = [
           schedule: {
             type: 'array',
             description:
-              'Array of day assignments. dayOfWeek: 1=Mon, 7=Sun. Each day has a workout type with exercises.',
+              'Array of day entries. dayOfWeek: 1=Mon…7=Sun. Each day has one or more slots. A "fixed" slot is a single workout. A "rotation" slot alternates between multiple workouts across occurrences (A/B, A/B/C, etc.). Use rotation when the user wants alternating splits on shared days.',
             items: {
               type: 'object',
               properties: {
                 dayOfWeek: { type: 'number', description: '1=Monday through 7=Sunday' },
                 dayName: { type: 'string', description: 'e.g. "Monday"' },
-                workoutTypeName: { type: 'string', description: 'e.g. "Push Day"' },
-                workoutTypeColor: {
-                  type: 'string',
-                  description: 'Hex color. Options: #06b6d4, #ef4444, #10b981, #a855f7, #eab308, #ec4899, #14b8a6, #f97316, #8b5cf6',
-                },
-                workoutTypeCategory: {
-                  type: 'string',
-                  enum: ['strength', 'cardio', 'conditioning', 'mobility', 'mixed'],
-                },
-                exercises: {
+                slots: {
                   type: 'array',
+                  description:
+                    'One or more workout slots for this day. Usually 1. Use 2+ only when the user explicitly wants multiple workouts on the same day.',
                   items: {
-                    type: 'object',
-                    properties: {
-                      name: { type: 'string' },
-                      exerciseType: {
-                        type: 'string',
-                        enum: ['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata', 'simple'],
+                    oneOf: [
+                      {
+                        type: 'object',
+                        description: 'A fixed (non-rotating) workout slot.',
+                        properties: {
+                          type: { type: 'string', enum: ['fixed'] },
+                          workoutTypeName: { type: 'string', description: 'e.g. "Push Day"' },
+                          workoutTypeColor: {
+                            type: 'string',
+                            description: 'Hex color. Options: #06b6d4, #ef4444, #10b981, #a855f7, #eab308, #ec4899, #14b8a6, #f97316, #8b5cf6',
+                          },
+                          workoutTypeCategory: {
+                            type: 'string',
+                            enum: ['strength', 'cardio', 'conditioning', 'mobility', 'mixed'],
+                          },
+                          exercises: { type: 'array', items: EXERCISE_ITEM_SCHEMA },
+                        },
+                        required: ['type', 'workoutTypeName', 'workoutTypeColor', 'exercises'],
                       },
-                      config: {
+                      {
                         type: 'object',
                         description:
-                          'Type-specific config. strength: {sets,repsMin,repsMax,weightType,baseWeight,weightUnit,restSeconds,tempo?}. distance: {sets,distanceTarget,distanceUnit,restSeconds}. time: {sets,durationSeconds,restSeconds}. amrap: {timeCap,movements:[{name,reps?,weight?,weightUnit?}]}. emom: {intervalSeconds,totalMinutes,movements:[...]}. round_block: {rounds,restBetweenRounds,movements:[...]}. tabata: {rounds,workSeconds,restSeconds,movements:[...]}. simple: {} (empty object or {notes?})',
+                          'A rotating slot that cycles through multiple workouts (A/B, A/B/C, etc.) across each occurrence of this day. All days sharing the same rotationName share a single rotation counter.',
+                        properties: {
+                          type: { type: 'string', enum: ['rotation'] },
+                          rotationName: {
+                            type: 'string',
+                            description:
+                              'Unique name for this rotation group. Days sharing the same rotationName share the same A/B counter (e.g. "MWF Upper/Lower"). Must be the SAME string for every day that participates in the same rotation.',
+                          },
+                          rotationEntries: {
+                            type: 'array',
+                            description: 'Ordered list of workout types that cycle (A, B, C…). Minimum 2.',
+                            items: {
+                              type: 'object',
+                              properties: {
+                                workoutTypeName: { type: 'string' },
+                                workoutTypeColor: { type: 'string' },
+                                workoutTypeCategory: {
+                                  type: 'string',
+                                  enum: ['strength', 'cardio', 'conditioning', 'mobility', 'mixed'],
+                                },
+                                exercises: { type: 'array', items: EXERCISE_ITEM_SCHEMA },
+                              },
+                              required: ['workoutTypeName', 'workoutTypeColor', 'exercises'],
+                            },
+                          },
+                        },
+                        required: ['type', 'rotationName', 'rotationEntries'],
                       },
-                      progression: {
-                        type: 'object',
-                        description:
-                          'REQUIRED. Progression rule for this exercise. For strength exercises with a rep range and weight, use double_progression: {type:"double_progression",repsMin:6,repsMax:12,weightIncrement:5,weightIncrementUnit:"lbs"}. For exercises where you always add weight linearly each session, use linear: {type:"linear",incrementValue:5,incrementUnit:"lbs"}. For bodyweight exercises with no weight progression, use none: {type:"none"}. NEVER omit this field.',
-                      },
-                      groupTag: {
-                        type: 'string',
-                        description: 'Optional. Exercises sharing the same groupTag are done as a superset/circuit.',
-                      },
-                      order: { type: 'number' },
-                      notes: { type: 'string' },
-                    },
-                    required: ['name', 'exerciseType', 'config', 'progression', 'order'],
+                    ],
                   },
                 },
               },
-              required: ['dayOfWeek', 'dayName', 'workoutTypeName', 'workoutTypeColor', 'exercises'],
+              required: ['dayOfWeek', 'dayName', 'slots'],
             },
           },
         },
@@ -268,6 +315,11 @@ You have access to these tools:
 - Experience level (beginner, intermediate, advanced)
 - Any injuries or limitations
 - Specific goals
+- Whether they want A/B rotation (for undulating periodization or upper/lower splits that alternate across days)
+
+**A/B ROTATION**: Use a rotation slot when workouts should ALTERNATE across occurrences of the same days (e.g., MWF: Mon=A, Wed=B, Fri=A, next Mon=B, etc.). Set the same "rotationName" string on every day that shares the counter. Use 2 entries for A/B, 3 for A/B/C. Do NOT use rotation if they simply want different workouts on different days of the week — that is just normal fixed slots per day. Use rotation only when the same day slots alternate over multiple weeks.
+
+**MULTIPLE SLOTS PER DAY**: Only use multiple slots (e.g., slots: [{strength slot}, {cardio slot}]) when the user explicitly wants TWO separate workout sessions on the same day. Most plans use one slot per day.
 
 **edit_workout_plan**: Edit exercises within an existing workout type. Use this to add, update, or remove exercises. Provide exercise IDs for updates, omit IDs for new exercises, and use deleteExerciseIds for removals. When editing multiple days, make ONE edit_workout_plan call per day; do not stop after the first edit. After your LAST edit_workout_plan for the request, do not send a long follow-up message — use at most a brief confirmation or no text after the final edit.
 
@@ -545,26 +597,44 @@ export function getOpenRouterClient(): OpenRouterClient {
 
 // ─── Zod Schemas ────────────────────────────────────────────────────────────
 
+const exerciseItemSchema = z.object({
+  name: z.string(),
+  exerciseType: z.enum(['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata', 'simple']),
+  config: z.record(z.string(), z.unknown()),
+  progression: z.record(z.string(), z.unknown()).optional(),
+  groupTag: z.string().optional(),
+  order: z.number(),
+  notes: z.string().optional(),
+});
+
+const fixedSlotSchema = z.object({
+  type: z.literal('fixed'),
+  workoutTypeName: z.string(),
+  workoutTypeColor: z.string(),
+  workoutTypeCategory: z.string().optional(),
+  exercises: z.array(exerciseItemSchema),
+});
+
+const rotationSlotSchema = z.object({
+  type: z.literal('rotation'),
+  rotationName: z.string(),
+  rotationEntries: z.array(
+    z.object({
+      workoutTypeName: z.string(),
+      workoutTypeColor: z.string(),
+      workoutTypeCategory: z.string().optional(),
+      exercises: z.array(exerciseItemSchema),
+    })
+  ),
+});
+
 export const planDataSchema = z.object({
   name: z.string(),
   schedule: z.array(
     z.object({
       dayOfWeek: z.number().min(1).max(7),
       dayName: z.string(),
-      workoutTypeName: z.string(),
-      workoutTypeColor: z.string(),
-      workoutTypeCategory: z.string().optional(),
-      exercises: z.array(
-        z.object({
-          name: z.string(),
-          exerciseType: z.enum(['strength', 'distance', 'time', 'amrap', 'emom', 'round_block', 'tabata', 'simple']),
-          config: z.record(z.string(), z.unknown()),
-          progression: z.record(z.string(), z.unknown()).optional(),
-          groupTag: z.string().optional(),
-          order: z.number(),
-          notes: z.string().optional(),
-        })
-      ),
+      slots: z.array(z.union([fixedSlotSchema, rotationSlotSchema])),
     })
   ),
 });

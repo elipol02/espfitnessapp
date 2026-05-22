@@ -76,6 +76,7 @@ model WorkoutType {
   exercises       Exercise[]
   dayAssignments  PlanDayAssignment[]
   workoutSessions WorkoutSession[]
+  rotationEntries RotationEntry[]
 
   @@index([userId])
 }
@@ -113,46 +114,79 @@ model WorkoutPlan {
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   dayAssignments  PlanDayAssignment[]
   workoutSessions WorkoutSession[]
+  rotations       WorkoutRotation[]
 
   @@index([userId])
   @@index([status])
 }
 
 model PlanDayAssignment {
-  id            String      @id @default(cuid())
+  id            String           @id @default(cuid())
   planId        String
   dayOfWeek     Int
-  workoutTypeId String
-  plan          WorkoutPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
-  workoutType   WorkoutType @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
+  workoutTypeId String?
+  rotationId    String?
+  order         Int              @default(0)
+  plan          WorkoutPlan      @relation(fields: [planId], references: [id], onDelete: Cascade)
+  workoutType   WorkoutType?     @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
+  rotation      WorkoutRotation? @relation(fields: [rotationId], references: [id], onDelete: Cascade)
 
-  @@unique([planId, dayOfWeek])
+  @@unique([planId, dayOfWeek, order])
   @@index([planId])
+  @@index([workoutTypeId])
+  @@index([rotationId])
+}
+
+model WorkoutRotation {
+  id             String              @id @default(cuid())
+  planId         String
+  name           String
+  currentIndex   Int                 @default(0)
+  plan           WorkoutPlan         @relation(fields: [planId], references: [id], onDelete: Cascade)
+  entries        RotationEntry[]
+  dayAssignments PlanDayAssignment[]
+  sessions       WorkoutSession[]
+
+  @@index([planId])
+}
+
+model RotationEntry {
+  id            String          @id @default(cuid())
+  rotationId    String
+  workoutTypeId String
+  order         Int
+  rotation      WorkoutRotation @relation(fields: [rotationId], references: [id], onDelete: Cascade)
+  workoutType   WorkoutType     @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
+
+  @@index([rotationId])
   @@index([workoutTypeId])
 }
 
 // ─── Completed Workout Models ───────────────────────────────────────────────
 
 model WorkoutSession {
-  id            String          @id @default(cuid())
+  id            String           @id @default(cuid())
   userId        String
   workoutTypeId String
   planId        String?
+  rotationId    String?
   workoutDate   DateTime
-  status        String          @default("in_progress")
+  status        String           @default("in_progress")
   startedAt     DateTime?
   completedAt   DateTime?
   notes         String?
   rating        Int?
-  createdAt     DateTime        @default(now())
-  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workoutType   WorkoutType     @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
-  plan          WorkoutPlan?    @relation(fields: [planId], references: [id], onDelete: SetNull)
+  createdAt     DateTime         @default(now())
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workoutType   WorkoutType      @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
+  plan          WorkoutPlan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
+  rotation      WorkoutRotation? @relation(fields: [rotationId], references: [id], onDelete: SetNull)
   entries       ExerciseEntry[]
 
   @@index([userId])
   @@index([workoutTypeId])
   @@index([planId])
+  @@index([rotationId])
   @@index([workoutDate])
   @@index([userId, workoutTypeId, workoutDate])
 }

@@ -40,14 +40,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    await prisma.workoutSession.update({
-      where: { id: sessionId },
-      data: {
-        status: 'completed',
-        completedAt: new Date(),
-        notes: notes || null,
-        rating: rating || null,
-      },
+    // Use a transaction so session completion and rotation advancement are atomic
+    await prisma.$transaction(async (tx) => {
+      await tx.workoutSession.update({
+        where: { id: sessionId },
+        data: {
+          status: 'completed',
+          completedAt: new Date(),
+          notes: notes || null,
+          rating: rating || null,
+        },
+      });
+
+      // Advance the rotation to the next slot now that this session is done
+      if (workoutSession.rotationId) {
+        await tx.workoutRotation.update({
+          where: { id: workoutSession.rotationId },
+          data: { currentIndex: { increment: 1 } },
+        });
+      }
     });
 
     return NextResponse.json({ success: true });

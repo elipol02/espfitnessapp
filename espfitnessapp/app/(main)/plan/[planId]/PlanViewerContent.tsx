@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ChevronDown, ChevronRight, ArrowLeft, Calendar } from 'lucide-react';
+import { ChevronDown, ChevronRight, ArrowLeft, Calendar, RefreshCw } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import type {
   ExerciseType,
@@ -34,10 +34,23 @@ interface WorkoutTypeRecord {
   exercises: ExerciseRecord[];
 }
 
+interface RotationEntryRecord {
+  id: string;
+  label: string;
+  isNext: boolean;
+  workoutType: WorkoutTypeRecord;
+}
+
 interface DayAssignment {
   id: string;
   dayOfWeek: number;
-  workoutType: WorkoutTypeRecord;
+  order: number;
+  rotationId: string | null;
+  rotationName: string | null;
+  rotationCurrentIndex: number | null;
+  rotationSize: number;
+  workoutType: WorkoutTypeRecord | null;
+  rotationEntries: RotationEntryRecord[];
 }
 
 interface Plan {
@@ -124,6 +137,87 @@ function formatProgression(progression: Record<string, unknown> | null): string 
   return null;
 }
 
+function ExerciseList({
+  exercises,
+  lastLiftedWeights,
+  expandedExercises,
+  toggleExercise,
+}: {
+  exercises: ExerciseRecord[];
+  lastLiftedWeights: Record<string, { weight: number; weightUnit: string }>;
+  expandedExercises: Set<string>;
+  toggleExercise: (id: string) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {exercises
+        .slice()
+        .sort((a, b) => a.order - b.order)
+        .map((exercise) => {
+          const isExpanded = expandedExercises.has(exercise.id);
+          const type = exercise.exerciseType as ExerciseType;
+          const lastLifted = lastLiftedWeights[exercise.id];
+          const progression = formatProgression(exercise.progression);
+          const movements =
+            type === 'amrap' || type === 'emom' || type === 'round_block' || type === 'tabata'
+              ? ((exercise.config as Record<string, unknown>).movements as Array<{ name: string; reps?: number; weight?: number; weightUnit?: string }>) || []
+              : [];
+
+          return (
+            <div key={exercise.id} className="bg-surface rounded-lg overflow-hidden">
+              <button
+                onClick={() => toggleExercise(exercise.id)}
+                className="w-full flex items-center gap-3 p-3 text-left"
+              >
+                {isExpanded ? (
+                  <ChevronDown size={16} className="text-muted-foreground flex-shrink-0" />
+                ) : (
+                  <ChevronRight size={16} className="text-muted-foreground flex-shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-foreground truncate">{exercise.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatExerciseConfig(type, exercise.config, lastLifted)}
+                    {lastLifted && (
+                      <span className="ml-1 text-primary/70">(last lifted)</span>
+                    )}
+                  </p>
+                </div>
+              </button>
+
+              {isExpanded && (
+                <div className="px-3 pb-3 pt-0 space-y-2 ml-7">
+                  {progression && (
+                    <p className="text-xs text-primary">Progression: {progression}</p>
+                  )}
+                  {exercise.notes && (
+                    <p className="text-xs text-muted-foreground">{exercise.notes}</p>
+                  )}
+                  {exercise.groupTag && (
+                    <p className="text-xs text-muted-foreground">
+                      Superset: {exercise.groupTag}
+                    </p>
+                  )}
+                  {movements.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium text-muted-foreground">Movements:</p>
+                      {movements.map((m, idx) => (
+                        <p key={idx} className="text-xs text-foreground pl-2">
+                          {m.reps && `${m.reps}× `}{m.name}
+                          {m.weight ? ` @ ${m.weight} ${m.weightUnit || 'lbs'}` : ''}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+    </div>
+  );
+}
+
 export function PlanViewerContent({
   plan,
   lastLiftedWeights = {},
@@ -132,9 +226,11 @@ export function PlanViewerContent({
   lastLiftedWeights?: Record<string, { weight: number; weightUnit: string }>;
 }) {
   const router = useRouter();
-  const [selectedDay, setSelectedDay] = useState(
-    plan.dayAssignments.length > 0 ? plan.dayAssignments[0].dayOfWeek : 1
-  );
+
+  // Get unique days in order
+  const uniqueDays = [...new Set(plan.dayAssignments.map((da) => da.dayOfWeek))].sort((a, b) => a - b);
+
+  const [selectedDay, setSelectedDay] = useState(uniqueDays[0] ?? 1);
   const [expandedExercises, setExpandedExercises] = useState<Set<string>>(new Set());
   const [editingStart, setEditingStart] = useState(false);
   const [startDate, setStartDate] = useState(plan.startDate || '');
@@ -142,8 +238,18 @@ export function PlanViewerContent({
   const [endDate, setEndDate] = useState(plan.endDate || '');
   const [savingDate, setSavingDate] = useState(false);
 
-  const sortedAssignments = [...plan.dayAssignments].sort((a, b) => a.dayOfWeek - b.dayOfWeek);
-  const selectedAssignment = sortedAssignments.find((a) => a.dayOfWeek === selectedDay);
+  // All slots for the selected day, sorted by order
+  const selectedSlots = plan.dayAssignments
+    .filter((da) => da.dayOfWeek === selectedDay)
+    .sort((a, b) => a.order - b.order);
+
+  // Primary color for the day tab (first slot's color)
+  function getDayColor(day: number): string {
+    const firstSlot = plan.dayAssignments.find((da) => da.dayOfWeek === day);
+    if (firstSlot?.workoutType) return firstSlot.workoutType.color;
+    if (firstSlot?.rotationEntries?.[0]?.workoutType) return firstSlot.rotationEntries[0].workoutType.color;
+    return '#404040';
+  }
 
   const toggleExercise = (id: string) => {
     setExpandedExercises((prev) => {
@@ -203,7 +309,6 @@ export function PlanViewerContent({
 
       {/* Plan dates */}
       <div className="px-4 py-3 border-b border-border space-y-3">
-        {/* Start date */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Calendar size={16} className="text-muted-foreground" />
@@ -223,17 +328,12 @@ export function PlanViewerContent({
             )}
           </div>
           {!editingStart ? (
-            <button
-              onClick={() => setEditingStart(true)}
-              className="text-sm text-primary"
-            >
+            <button onClick={() => setEditingStart(true)} className="text-sm text-primary">
               Edit
             </button>
           ) : (
             <div className="flex items-center gap-2">
-              <Button size="sm" onClick={saveStartDate} disabled={savingDate}>
-                Save
-              </Button>
+              <Button size="sm" onClick={saveStartDate} disabled={savingDate}>Save</Button>
               <button
                 onClick={() => { setStartDate(plan.startDate || ''); setEditingStart(false); }}
                 className="text-sm text-muted-foreground"
@@ -245,7 +345,6 @@ export function PlanViewerContent({
           )}
         </div>
 
-        {/* End date */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Calendar size={16} className="text-muted-foreground" />
@@ -265,17 +364,12 @@ export function PlanViewerContent({
             )}
           </div>
           {!editingEnd ? (
-            <button
-              onClick={() => setEditingEnd(true)}
-              className="text-sm text-primary"
-            >
+            <button onClick={() => setEditingEnd(true)} className="text-sm text-primary">
               Edit
             </button>
           ) : (
             <div className="flex items-center gap-2">
-              <Button size="sm" onClick={saveEndDate} disabled={savingDate}>
-                Save
-              </Button>
+              <Button size="sm" onClick={saveEndDate} disabled={savingDate}>Save</Button>
               <button
                 onClick={() => { setEndDate(plan.endDate || ''); setEditingEnd(false); }}
                 className="text-sm text-muted-foreground"
@@ -288,116 +382,128 @@ export function PlanViewerContent({
         </div>
       </div>
 
-      {/* Day tabs */}
+      {/* Day tabs — one tab per unique day */}
       <div className="px-4 pt-4 overflow-x-auto">
         <div className="flex gap-2 min-w-max">
-          {sortedAssignments.map((da) => (
-            <button
-              key={da.dayOfWeek}
-              onClick={() => setSelectedDay(da.dayOfWeek)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                selectedDay === da.dayOfWeek
-                  ? 'text-white'
-                  : 'bg-surface text-muted-foreground hover:text-foreground'
-              }`}
-              style={
-                selectedDay === da.dayOfWeek
-                  ? { backgroundColor: da.workoutType.color }
-                  : undefined
-              }
-            >
-              {DAY_NAMES[da.dayOfWeek]?.slice(0, 3)}
-            </button>
-          ))}
+          {uniqueDays.map((day) => {
+            const color = getDayColor(day);
+            const slotsForDay = plan.dayAssignments.filter((da) => da.dayOfWeek === day);
+            const hasMultiple = slotsForDay.length > 1;
+            return (
+              <button
+                key={day}
+                onClick={() => setSelectedDay(day)}
+                className={`relative px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  selectedDay === day
+                    ? 'text-white'
+                    : 'bg-surface text-muted-foreground hover:text-foreground'
+                }`}
+                style={selectedDay === day ? { backgroundColor: color } : undefined}
+              >
+                {DAY_NAMES[day]?.slice(0, 3)}
+                {hasMultiple && (
+                  <span
+                    className="absolute -top-1 -right-1 bg-primary text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center"
+                  >
+                    {slotsForDay.length}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {/* Selected day exercises */}
-      {selectedAssignment && (
-        <div className="px-4 py-4">
-          <div className="flex items-center gap-2 mb-4">
-            <div
-              className="w-3 h-3 rounded-full"
-              style={{ backgroundColor: selectedAssignment.workoutType.color }}
-            />
-            <h2 className="text-lg font-bold text-foreground">
-              {selectedAssignment.workoutType.name}
-            </h2>
-          </div>
+      {/* Selected day content */}
+      <div className="px-4 py-4 space-y-6">
+        {selectedSlots.map((slot, slotIdx) => {
+          // Fixed slot
+          if (slot.workoutType) {
+            return (
+              <div key={slot.id}>
+                <div className="flex items-center gap-2 mb-3">
+                  <div
+                    className="w-3 h-3 rounded-full"
+                    style={{ backgroundColor: slot.workoutType.color }}
+                  />
+                  <h2 className="text-lg font-bold text-foreground">{slot.workoutType.name}</h2>
+                  {selectedSlots.length > 1 && (
+                    <span className="text-xs text-muted-foreground">
+                      ({slotIdx + 1}/{selectedSlots.length})
+                    </span>
+                  )}
+                </div>
+                <ExerciseList
+                  exercises={slot.workoutType.exercises}
+                  lastLiftedWeights={lastLiftedWeights}
+                  expandedExercises={expandedExercises}
+                  toggleExercise={toggleExercise}
+                />
+              </div>
+            );
+          }
 
-          <div className="space-y-2">
-            {selectedAssignment.workoutType.exercises
-              .sort((a, b) => a.order - b.order)
-              .map((exercise) => {
-                const isExpanded = expandedExercises.has(exercise.id);
-                const type = exercise.exerciseType as ExerciseType;
-                const lastLifted = lastLiftedWeights[exercise.id];
-                const progression = formatProgression(exercise.progression);
-                const movements =
-                  type === 'amrap' || type === 'emom' || type === 'round_block' || type === 'tabata'
-                    ? ((exercise.config as Record<string, unknown>).movements as Array<{ name: string; reps?: number; weight?: number; weightUnit?: string }>) || []
-                    : [];
+          // Rotation slot
+          if (slot.rotationEntries.length > 0) {
+            return (
+              <div key={slot.id}>
+                <div className="flex items-center gap-2 mb-3">
+                  <RefreshCw size={16} className="text-muted-foreground" />
+                  <h2 className="text-lg font-bold text-foreground">
+                    {slot.rotationName ?? 'A/B Rotation'}
+                  </h2>
+                  <span className="text-xs text-muted-foreground">
+                    ({slot.rotationEntries.length} slots)
+                  </span>
+                  {selectedSlots.length > 1 && (
+                    <span className="text-xs text-muted-foreground">· {slotIdx + 1}/{selectedSlots.length}</span>
+                  )}
+                </div>
 
-                return (
-                  <div key={exercise.id} className="bg-surface rounded-lg overflow-hidden">
-                    <button
-                      onClick={() => toggleExercise(exercise.id)}
-                      className="w-full flex items-center gap-3 p-3 text-left"
-                    >
-                      {isExpanded ? (
-                        <ChevronDown size={16} className="text-muted-foreground flex-shrink-0" />
-                      ) : (
-                        <ChevronRight size={16} className="text-muted-foreground flex-shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-foreground truncate">{exercise.name}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {formatExerciseConfig(type, exercise.config, lastLifted)}
-                          {lastLifted && (
-                            <span className="ml-1 text-primary/70">(last lifted)</span>
-                          )}
-                        </p>
-                      </div>
-                    </button>
-
-                    {isExpanded && (
-                      <div className="px-3 pb-3 pt-0 space-y-2 ml-7">
-                        {progression && (
-                          <p className="text-xs text-primary">Progression: {progression}</p>
-                        )}
-                        {exercise.notes && (
-                          <p className="text-xs text-muted-foreground">{exercise.notes}</p>
-                        )}
-                        {exercise.groupTag && (
-                          <p className="text-xs text-muted-foreground">
-                            Superset: {exercise.groupTag}
-                          </p>
-                        )}
-                        {movements.length > 0 && (
-                          <div className="space-y-1">
-                            <p className="text-xs font-medium text-muted-foreground">Movements:</p>
-                            {movements.map((m, idx) => (
-                              <p key={idx} className="text-xs text-foreground pl-2">
-                                {m.reps && `${m.reps}× `}{m.name}
-                                {m.weight ? ` @ ${m.weight} ${m.weightUnit || 'lbs'}` : ''}
-                              </p>
-                            ))}
-                          </div>
+                <div className="space-y-4">
+                  {slot.rotationEntries.map((entry) => (
+                    <div key={entry.id} className="rounded-xl border border-border overflow-hidden">
+                      <div
+                        className="flex items-center gap-2 px-3 py-2"
+                        style={{ backgroundColor: entry.workoutType.color + '20', borderBottom: `1px solid ${entry.workoutType.color}40` }}
+                      >
+                        <div
+                          className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
+                          style={{ backgroundColor: entry.workoutType.color }}
+                        >
+                          {entry.label}
+                        </div>
+                        <span className="text-sm font-semibold text-foreground">{entry.workoutType.name}</span>
+                        {entry.isNext && (
+                          <span className="ml-auto text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full">
+                            Next up
+                          </span>
                         )}
                       </div>
-                    )}
-                  </div>
-                );
-              })}
-          </div>
-        </div>
-      )}
+                      <div className="p-2">
+                        <ExerciseList
+                          exercises={entry.workoutType.exercises}
+                          lastLiftedWeights={lastLiftedWeights}
+                          expandedExercises={expandedExercises}
+                          toggleExercise={toggleExercise}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          }
 
-      {!selectedAssignment && (
-        <div className="px-4 py-8 text-center text-muted-foreground">
-          Select a day to view exercises
-        </div>
-      )}
+          return null;
+        })}
+
+        {selectedSlots.length === 0 && (
+          <div className="py-8 text-center text-muted-foreground">
+            Select a day to view exercises
+          </div>
+        )}
+      </div>
     </div>
   );
 }

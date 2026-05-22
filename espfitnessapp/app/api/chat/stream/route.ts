@@ -61,18 +61,41 @@ async function executeTool(
       schedule: Array<{
         dayOfWeek: number;
         dayName: string;
-        workoutTypeName: string;
-        workoutTypeColor: string;
-        workoutTypeCategory?: string;
-        exercises: Array<{
-          name: string;
-          exerciseType: string;
-          config: Record<string, unknown>;
-          progression?: Record<string, unknown>;
-          groupTag?: string;
-          order: number;
-          notes?: string;
-        }>;
+        slots: Array<
+          | {
+              type: 'fixed';
+              workoutTypeName: string;
+              workoutTypeColor: string;
+              workoutTypeCategory?: string;
+              exercises: Array<{
+                name: string;
+                exerciseType: string;
+                config: Record<string, unknown>;
+                progression?: Record<string, unknown>;
+                groupTag?: string;
+                order: number;
+                notes?: string;
+              }>;
+            }
+          | {
+              type: 'rotation';
+              rotationName: string;
+              rotationEntries: Array<{
+                workoutTypeName: string;
+                workoutTypeColor: string;
+                workoutTypeCategory?: string;
+                exercises: Array<{
+                  name: string;
+                  exerciseType: string;
+                  config: Record<string, unknown>;
+                  progression?: Record<string, unknown>;
+                  groupTag?: string;
+                  order: number;
+                  notes?: string;
+                }>;
+              }>;
+            }
+        >;
       }>;
     };
 
@@ -391,8 +414,20 @@ export async function POST(request: NextRequest) {
                     exercises: { orderBy: { order: 'asc' } },
                   },
                 },
+                rotation: {
+                  include: {
+                    entries: {
+                      orderBy: { order: 'asc' },
+                      include: {
+                        workoutType: {
+                          include: { exercises: { orderBy: { order: 'asc' } } },
+                        },
+                      },
+                    },
+                  },
+                },
               },
-              orderBy: { dayOfWeek: 'asc' },
+              orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
             },
           },
         });
@@ -403,22 +438,44 @@ export async function POST(request: NextRequest) {
           ? {
               id: currentPlan.id,
               name: currentPlan.name,
-              dayAssignments: currentPlan.dayAssignments.map((da) => ({
-                dayOfWeek: da.dayOfWeek,
-                workoutType: {
-                  id: da.workoutType.id,
-                  name: da.workoutType.name,
-                  color: da.workoutType.color,
-                  exercises: da.workoutType.exercises.map((ex) => ({
-                    id: ex.id,
-                    name: ex.name,
-                    exerciseType: ex.exerciseType,
-                    config: ex.config as Record<string, unknown>,
-                    progression: ex.progression as Record<string, unknown> | null,
-                    order: ex.order,
-                  })),
-                },
-              })),
+              dayAssignments: currentPlan.dayAssignments.flatMap((da) => {
+                // For rotation-based slots, expand each rotation entry as a separate "virtual" assignment
+                if (!da.workoutType && da.rotation) {
+                  return da.rotation.entries.map((entry) => ({
+                    dayOfWeek: da.dayOfWeek,
+                    workoutType: {
+                      id: entry.workoutType.id,
+                      name: `${entry.workoutType.name} (rotation: ${da.rotation!.name})`,
+                      color: entry.workoutType.color,
+                      exercises: entry.workoutType.exercises.map((ex) => ({
+                        id: ex.id,
+                        name: ex.name,
+                        exerciseType: ex.exerciseType,
+                        config: ex.config as Record<string, unknown>,
+                        progression: ex.progression as Record<string, unknown> | null,
+                        order: ex.order,
+                      })),
+                    },
+                  }));
+                }
+                if (!da.workoutType) return [];
+                return [{
+                  dayOfWeek: da.dayOfWeek,
+                  workoutType: {
+                    id: da.workoutType.id,
+                    name: da.workoutType.name,
+                    color: da.workoutType.color,
+                    exercises: da.workoutType.exercises.map((ex) => ({
+                      id: ex.id,
+                      name: ex.name,
+                      exerciseType: ex.exerciseType,
+                      config: ex.config as Record<string, unknown>,
+                      progression: ex.progression as Record<string, unknown> | null,
+                      order: ex.order,
+                    })),
+                  },
+                }];
+              }),
             }
           : null,
         userName: context?.userName,

@@ -10,11 +10,37 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = session.user.id;
-    const { workoutTypeId, date, planId } = await request.json();
+    const { workoutTypeId: rawWorkoutTypeId, date, planId, rotationId } = await request.json();
 
-    if (!workoutTypeId || !date) {
+    if (!date) {
       return NextResponse.json(
-        { success: false, error: 'workoutTypeId and date are required' },
+        { success: false, error: 'date is required' },
+        { status: 400 }
+      );
+    }
+
+    let workoutTypeId: string = rawWorkoutTypeId;
+
+    // If a rotationId is provided, resolve the effective workoutTypeId from the rotation's current slot
+    if (rotationId) {
+      const rotation = await prisma.workoutRotation.findFirst({
+        where: { id: rotationId },
+        include: {
+          entries: { orderBy: { order: 'asc' } },
+        },
+      });
+
+      if (!rotation || rotation.entries.length === 0) {
+        return NextResponse.json({ success: false, error: 'Rotation not found or empty' }, { status: 404 });
+      }
+
+      const idx = rotation.currentIndex % rotation.entries.length;
+      workoutTypeId = rotation.entries[idx].workoutTypeId;
+    }
+
+    if (!workoutTypeId) {
+      return NextResponse.json(
+        { success: false, error: 'workoutTypeId or rotationId is required' },
         { status: 400 }
       );
     }
@@ -50,12 +76,13 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Create new session
+    // Create new session, storing rotationId so finish API can advance the rotation
     const newSession = await prisma.workoutSession.create({
       data: {
         userId,
         workoutTypeId,
         planId: planId || null,
+        rotationId: rotationId || null,
         workoutDate: startOfDay,
         status: 'in_progress',
         startedAt: new Date(),

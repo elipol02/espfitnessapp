@@ -25,8 +25,22 @@ export default async function PlanViewerPage({
               exercises: { orderBy: { order: 'asc' } },
             },
           },
+          rotation: {
+            include: {
+              entries: {
+                orderBy: { order: 'asc' },
+                include: {
+                  workoutType: {
+                    include: {
+                      exercises: { orderBy: { order: 'asc' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
-        orderBy: { dayOfWeek: 'asc' },
+        orderBy: [{ dayOfWeek: 'asc' }, { order: 'asc' }],
       },
     },
   });
@@ -35,9 +49,12 @@ export default async function PlanViewerPage({
     notFound();
   }
 
-  const allExerciseIds = plan.dayAssignments.flatMap((da) =>
-    da.workoutType.exercises.map((ex) => ex.id)
-  );
+  // Collect exercise IDs from both direct assignments and rotation entries
+  const allExerciseIds = plan.dayAssignments.flatMap((da) => {
+    if (da.workoutType) return da.workoutType.exercises.map((ex) => ex.id);
+    if (da.rotation) return da.rotation.entries.flatMap((e) => e.workoutType.exercises.map((ex) => ex.id));
+    return [];
+  });
 
   const recentEntries = await prisma.exerciseEntry.findMany({
     where: { exerciseId: { in: allExerciseIds } },
@@ -63,6 +80,8 @@ export default async function PlanViewerPage({
     }
   }
 
+  const SLOT_LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
   const serialized = {
     id: plan.id,
     name: plan.name,
@@ -72,22 +91,50 @@ export default async function PlanViewerPage({
     dayAssignments: plan.dayAssignments.map((da) => ({
       id: da.id,
       dayOfWeek: da.dayOfWeek,
-      workoutType: {
-        id: da.workoutType.id,
-        name: da.workoutType.name,
-        color: da.workoutType.color,
-        category: da.workoutType.category,
-        exercises: da.workoutType.exercises.map((ex) => ({
-          id: ex.id,
-          name: ex.name,
-          exerciseType: ex.exerciseType,
-          config: ex.config as Record<string, unknown>,
-          progression: ex.progression as Record<string, unknown> | null,
-          groupTag: ex.groupTag,
-          order: ex.order,
-          notes: ex.notes,
-        })),
-      },
+      order: da.order,
+      rotationId: da.rotationId,
+      rotationName: da.rotation?.name ?? null,
+      rotationCurrentIndex: da.rotation?.currentIndex ?? null,
+      rotationSize: da.rotation?.entries.length ?? 0,
+      workoutType: da.workoutType
+        ? {
+            id: da.workoutType.id,
+            name: da.workoutType.name,
+            color: da.workoutType.color,
+            category: da.workoutType.category,
+            exercises: da.workoutType.exercises.map((ex) => ({
+              id: ex.id,
+              name: ex.name,
+              exerciseType: ex.exerciseType,
+              config: ex.config as Record<string, unknown>,
+              progression: ex.progression as Record<string, unknown> | null,
+              groupTag: ex.groupTag,
+              order: ex.order,
+              notes: ex.notes,
+            })),
+          }
+        : null,
+      rotationEntries: da.rotation?.entries.map((re, idx) => ({
+        id: re.id,
+        label: SLOT_LABELS[idx] ?? String(idx + 1),
+        isNext: da.rotation ? idx === da.rotation.currentIndex % da.rotation.entries.length : false,
+        workoutType: {
+          id: re.workoutType.id,
+          name: re.workoutType.name,
+          color: re.workoutType.color,
+          category: re.workoutType.category,
+          exercises: re.workoutType.exercises.map((ex) => ({
+            id: ex.id,
+            name: ex.name,
+            exerciseType: ex.exerciseType,
+            config: ex.config as Record<string, unknown>,
+            progression: ex.progression as Record<string, unknown> | null,
+            groupTag: ex.groupTag,
+            order: ex.order,
+            notes: ex.notes,
+          })),
+        },
+      })) ?? [],
     })),
   };
 

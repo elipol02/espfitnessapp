@@ -1,23 +1,29 @@
 'use client';
 
-import { useState } from 'react';
-import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { ChevronLeft, ChevronRight, Check, X } from 'lucide-react';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
 import { useRestTimer } from '@/app/components/RestTimerBadge';
 
-interface DayAssignment {
+interface WorkoutRef {
+  id: string;
+  name: string;
+  color: string;
+}
+
+interface Slot {
   dayOfWeek: number;
-  workoutType: {
-    id: string;
-    name: string;
-    color: string;
-  };
+  order: number;
+  rotationId: string | null;
+  workoutType: WorkoutRef | null;
+  rotation: { id: string; currentIndex: number; entries: WorkoutRef[] } | null;
 }
 
 interface SessionData {
   id: string;
   workoutTypeId: string;
+  rotationId: string | null;
   workoutDate: string;
   status: string;
 }
@@ -26,8 +32,18 @@ interface CalendarData {
   planId: string | null;
   startDate: string | null;
   endDate: string | null;
-  dayAssignments: DayAssignment[];
+  slots: Slot[];
   sessions: SessionData[];
+}
+
+/** A slot resolved to a concrete workout for a specific calendar date. */
+interface ResolvedSlot {
+  order: number;
+  rotationId: string | null;
+  workout: WorkoutRef;
+  label: string | null; // 'A', 'B', … for rotation slots
+  session: SessionData | undefined;
+  isCompleted: boolean;
 }
 
 type ViewMode = 'month' | 'week';
@@ -38,11 +54,114 @@ export function CalendarContent({ data }: { data: CalendarData }) {
   const restTimer = useRestTimer();
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>('month');
+  const [pickerDate, setPickerDate] = useState<Date | null>(null);
 
-  const { startDate, endDate, dayAssignments, sessions } = data;
+  const { startDate, endDate, slots, sessions } = data;
 
   const planStartDate = startDate ? (() => { const d = new Date(startDate); d.setHours(0, 0, 0, 0); return d; })() : null;
   const planEndDate = endDate ? (() => { const d = new Date(endDate); d.setHours(0, 0, 0, 0); return d; })() : null;
+
+  // ── Rotation projection ──────────────────────────────────────────────────
+  // For each rotation, walk the plan day-by-day building the chronological list
+  // of its scheduled occurrences. The first occurrence on/after today maps to the
+  // rotation's currentIndex; every other occurrence steps the index forward or
+  // backward, producing the A/B/A… cycle across real dates.
+  const rotationProjections = useMemo(() => {
+    const map = new Map<string, {
+      entries: WorkoutRef[];
+      currentIndex: number;
+      indexByDate: Map<string, number>;
+      anchorIndex: number;
+    }>();
+    if (!planStartDate) return map;
+
+    const dowsByRot = new Map<string, Set<number>>();
+    const rotById = new Map<string, { currentIndex: number; entries: WorkoutRef[] }>();
+    for (const s of slots) {
+      if (!s.rotationId || !s.rotation) continue;
+      if (!dowsByRot.has(s.rotationId)) dowsByRot.set(s.rotationId, new Set());
+      dowsByRot.get(s.rotationId)!.add(s.dayOfWeek);
+      rotById.set(s.rotationId, { currentIndex: s.rotation.currentIndex, entries: s.rotation.entries });
+    }
+
+    const cap = planEndDate ?? (() => { const d = new Date(planStartDate); d.setDate(d.getDate() + 365); return d; })();
+    const todayStart = (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; })();
+
+    for (const [rotId, dows] of dowsByRot) {
+      const rot = rotById.get(rotId)!;
+      const indexByDate = new Map<string, number>();
+      let occ = 0;
+      let anchorIndex = -1;
+      const d = new Date(planStartDate);
+      while (d.getTime() <= cap.getTime()) {
+        if (dows.has(DAY_MAP[d.getDay()])) {
+          indexByDate.set(d.toLocaleDateString('en-CA'), occ);
+          if (anchorIndex === -1 && d.getTime() >= todayStart.getTime()) anchorIndex = occ;
+          occ++;
+        }
+        d.setDate(d.getDate() + 1);
+      }
+      if (anchorIndex === -1) anchorIndex = occ; // entire rotation is in the past
+      map.set(rotId, { entries: rot.entries, currentIndex: rot.currentIndex, indexByDate, anchorIndex });
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slots, startDate, endDate]);
+
+  const resolveRotationEntry = (rotationId: string, dateStr: string): { workout: WorkoutRef; label: string } | null => {
+    const proj = rotationProjections.get(rotationId);
+    if (!proj || proj.entries.length === 0) return null;
+    const len = proj.entries.length;
+    const p = proj.indexByDate.get(dateStr);
+    const raw = p === undefined ? proj.currentIndex : proj.currentIndex + (p - proj.anchorIndex);
+    const idx = ((raw % len) + len) % len;
+    return { workout: proj.entries[idx], label: String.fromCharCode(65 + idx) };
+  };
+
+  const getResolvedSlots = (date: Date): ResolvedSlot[] => {
+    const dow = DAY_MAP[date.getDay()];
+    const dateStr = date.toLocaleDateString('en-CA');
+    const daySlots = slots.filter((s) => s.dayOfWeek === dow).sort((a, b) => a.order - b.order);
+    const resolved: ResolvedSlot[] = [];
+
+    for (const s of daySlots) {
+      let workout: WorkoutRef | null = null;
+      let label: string | null = null;
+
+      if (s.rotation && s.rotationId) {
+        const r = resolveRotationEntry(s.rotationId, dateStr);
+        if (r) { workout = r.workout; label = r.label; }
+      } else if (s.workoutType) {
+        workout = s.workoutType;
+      }
+      if (!workout) continue;
+
+      // Sessions are stored as UTC midnight of the local date string, so compare the raw slice.
+      const session = s.rotationId
+        ? sessions.find((se) => se.workoutDate.slice(0, 10) === dateStr &&
+            (se.rotationId === s.rotationId || (s.rotation?.entries.some((e) => e.id === se.workoutTypeId) ?? false)))
+        : sessions.find((se) => se.workoutDate.slice(0, 10) === dateStr && se.workoutTypeId === workout!.id);
+
+      // If a real session exists for a rotation day, show what was actually recorded.
+      if (session && s.rotation) {
+        const actualIdx = s.rotation.entries.findIndex((e) => e.id === session.workoutTypeId);
+        if (actualIdx >= 0) {
+          workout = s.rotation.entries[actualIdx];
+          label = String.fromCharCode(65 + actualIdx);
+        }
+      }
+
+      resolved.push({
+        order: s.order,
+        rotationId: s.rotationId,
+        workout,
+        label,
+        session,
+        isCompleted: session?.status === 'completed',
+      });
+    }
+    return resolved;
+  };
 
   const isBeforePlanStart = (date: Date): boolean => {
     if (!planStartDate) return false;
@@ -58,27 +177,26 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     return check > planEndDate;
   };
 
-  const getAssignmentForDate = (date: Date): DayAssignment | undefined => {
-    const dow = DAY_MAP[date.getDay()];
-    return dayAssignments.find((a) => a.dayOfWeek === dow);
-  };
-
-  const getSessionForDate = (date: Date, workoutTypeId?: string): SessionData | undefined => {
-    const dateStr = date.toLocaleDateString('en-CA');
-    return sessions.find((s) => {
-      // Use UTC date slice directly — sessions are stored as UTC midnight of the local date string,
-      // so reading via toLocaleDateString would shift the date in non-UTC timezones.
-      const sDate = s.workoutDate.slice(0, 10);
-      return sDate === dateStr && (!workoutTypeId || s.workoutTypeId === workoutTypeId);
-    });
-  };
-
   const isFutureDate = (date: Date) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const check = new Date(date);
     check.setHours(0, 0, 0, 0);
     return check > today;
+  };
+
+  // Slots to display for a date, honoring plan range (completed sessions always show).
+  const getVisibleSlots = (date: Date): ResolvedSlot[] => {
+    const inRange = !isBeforePlanStart(date) && !isAfterPlanEnd(date);
+    return getResolvedSlots(date).filter((rs) => rs.isCompleted || inRange);
+  };
+
+  const slotHref = (date: Date, rs: ResolvedSlot): string => {
+    const dateStr = date.toLocaleDateString('en-CA');
+    if (rs.session) return `/workout/live?sessionId=${rs.session.id}`;
+    if (isFutureDate(date)) return `/workout/preview?workoutTypeId=${rs.workout.id}&date=${dateStr}`;
+    if (rs.rotationId) return `/workout/today?rotationId=${rs.rotationId}&date=${dateStr}`;
+    return `/workout/today?workoutTypeId=${rs.workout.id}&date=${dateStr}`;
   };
 
   const goToPrevious = () => {
@@ -128,7 +246,17 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     date.getMonth() === today.getMonth() &&
     date.getDate() === today.getDate();
 
-  if (dayAssignments.length === 0) {
+  // Legend: every distinct workout type, including each rotation entry.
+  const legendItems = useMemo(() => {
+    const map = new Map<string, WorkoutRef>();
+    for (const s of slots) {
+      if (s.rotation) for (const e of s.rotation.entries) map.set(e.id, e);
+      else if (s.workoutType) map.set(s.workoutType.id, s.workoutType);
+    }
+    return [...map.values()];
+  }, [slots]);
+
+  if (slots.length === 0) {
     return (
       <div className="px-4 pt-8 pb-24">
         <div className="max-w-lg mx-auto space-y-8">
@@ -206,24 +334,10 @@ export function CalendarContent({ data }: { data: CalendarData }) {
               {generateMonthDays().map((date, i) => {
                 if (!date) return <div key={i} className="aspect-square" />;
 
-                const assignment = getAssignmentForDate(date);
-                const session = getSessionForDate(date, assignment?.workoutType.id);
                 const isTodayDate = isToday(date);
-                const isCompleted = session?.status === 'completed';
-                const future = isFutureDate(date);
-                const beforePlanStart = isBeforePlanStart(date);
-                const afterPlanEnd = isAfterPlanEnd(date);
-                // Always show completed sessions; only show uncompleted indicators within plan date range
-                const hasWorkout = !!assignment && (isCompleted || (!beforePlanStart && !afterPlanEnd));
-                const dateStr = date.toLocaleDateString('en-CA');
-
-                const workoutHref = hasWorkout
-                  ? session
-                    ? `/workout/live?sessionId=${session.id}`
-                    : future
-                      ? `/workout/preview?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`
-                      : `/workout/today?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`
-                  : null;
+                const visibleSlots = getVisibleSlots(date);
+                const hasWorkout = visibleSlots.length > 0;
+                const single = visibleSlots.length === 1 ? visibleSlots[0] : null;
 
                 const cellClass = `
                   aspect-square flex flex-col items-center justify-center rounded-lg
@@ -237,25 +351,60 @@ export function CalendarContent({ data }: { data: CalendarData }) {
                     <span className={`text-sm leading-none ${isTodayDate ? 'font-bold text-primary' : 'text-foreground'}`}>
                       {date.getDate()}
                     </span>
-                    {hasWorkout && (
+                    {single ? (
                       <div
-                        className={`w-6 h-6 rounded-full flex items-center justify-center mb-0.5 ${isCompleted ? '' : 'border-2'}`}
+                        className={`w-6 h-6 rounded-full flex items-center justify-center mb-0.5 ${single.isCompleted ? '' : 'border-2'}`}
                         style={{
-                          backgroundColor: isCompleted ? assignment!.workoutType.color : 'transparent',
-                          borderColor: assignment!.workoutType.color,
+                          backgroundColor: single.isCompleted ? single.workout.color : 'transparent',
+                          borderColor: single.workout.color,
                         }}
                       >
-                        {isCompleted && <Check size={14} className="text-white" />}
+                        {single.isCompleted && <Check size={14} className="text-white" />}
                       </div>
-                    )}
+                    ) : hasWorkout ? (
+                      <div className="flex items-center justify-center gap-0.5 flex-wrap max-w-full mb-0.5">
+                        {visibleSlots.map((rs, idx) => (
+                          <div
+                            key={idx}
+                            className={`w-2.5 h-2.5 rounded-full ${rs.isCompleted ? '' : 'border-2'}`}
+                            style={{
+                              backgroundColor: rs.isCompleted ? rs.workout.color : 'transparent',
+                              borderColor: rs.workout.color,
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
                   </>
                 );
 
-                return workoutHref ? (
-                  <Link key={i} href={workoutHref} className={cellClass}>
-                    {cellContent}
-                  </Link>
-                ) : (
+                if (single) {
+                  return (
+                    <Link key={i} href={slotHref(date, single)} className={cellClass}>
+                      {cellContent}
+                    </Link>
+                  );
+                }
+                if (hasWorkout) {
+                  return (
+                    <div
+                      key={i}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setPickerDate(date)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setPickerDate(date);
+                        }
+                      }}
+                      className={cellClass}
+                    >
+                      {cellContent}
+                    </div>
+                  );
+                }
+                return (
                   <div key={i} className={cellClass}>
                     {cellContent}
                   </div>
@@ -266,65 +415,57 @@ export function CalendarContent({ data }: { data: CalendarData }) {
         ) : (
           <div className="space-y-3">
             {generateWeekDays().map((date) => {
-              const assignment = getAssignmentForDate(date);
-              const beforePlanStart = isBeforePlanStart(date);
-              const afterPlanEnd = isAfterPlanEnd(date);
-              const session = getSessionForDate(date, assignment?.workoutType.id);
               const isTodayDate = isToday(date);
-              const isCompleted = session?.status === 'completed';
               const future = isFutureDate(date);
-              const dateStr = date.toLocaleDateString('en-CA');
-              // Show workout row if completed session exists, or date is within plan date range
-              const showWorkout = !!assignment && (isCompleted || (!beforePlanStart && !afterPlanEnd));
+              const visibleSlots = getVisibleSlots(date);
 
               return (
                 <div
                   key={date.toISOString()}
                   className={`bg-surface rounded-xl p-4 ${isTodayDate ? 'ring-2 ring-primary' : ''}`}
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="text-center">
-                        <p className="text-xs text-muted-foreground uppercase">
-                          {date.toLocaleDateString('en-US', { weekday: 'short' })}
-                        </p>
-                        <p className={`text-lg font-bold ${isTodayDate ? 'text-primary' : 'text-foreground'}`}>
-                          {date.getDate()}
-                        </p>
-                      </div>
-                      {showWorkout ? (
-                        <div className="flex items-center gap-2">
-                          <div className="w-3 h-3 rounded-full" style={{ backgroundColor: assignment!.workoutType.color }} />
-                          <span className="font-medium text-foreground">{assignment!.workoutType.name}</span>
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground">Rest Day</span>
-                      )}
+                  <div className="flex items-center gap-3">
+                    <div className="text-center w-9 shrink-0">
+                      <p className="text-xs text-muted-foreground uppercase">
+                        {date.toLocaleDateString('en-US', { weekday: 'short' })}
+                      </p>
+                      <p className={`text-lg font-bold ${isTodayDate ? 'text-primary' : 'text-foreground'}`}>
+                        {date.getDate()}
+                      </p>
                     </div>
 
-                    {showWorkout && (
-                      future ? (
-                        <Link
-                          href={`/workout/preview?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`}
-                          className="inline-flex items-center justify-center font-medium rounded-lg transition-colors duration-150 touch-target px-3 py-1.5 text-sm min-h-[36px] bg-surface hover:bg-surface-elevated text-foreground border border-border"
-                        >
-                          Preview
-                        </Link>
-                      ) : session ? (
-                        <Link
-                          href={`/workout/live?sessionId=${session.id}`}
-                          className="inline-flex items-center justify-center font-medium rounded-lg transition-colors duration-150 touch-target px-3 py-1.5 text-sm min-h-[36px] bg-surface hover:bg-surface-elevated text-foreground border border-border"
-                        >
-                          {isCompleted ? 'View' : 'Resume'}
-                        </Link>
-                      ) : (
-                        <Link
-                          href={`/workout/today?workoutTypeId=${assignment!.workoutType.id}&date=${dateStr}`}
-                          className={`inline-flex items-center justify-center font-medium rounded-lg transition-colors duration-150 touch-target px-3 py-1.5 text-sm min-h-[36px] ${isTodayDate ? 'bg-primary hover:bg-primary-hover text-white' : 'bg-surface hover:bg-surface-elevated text-foreground border border-border'}`}
-                        >
-                          Start
-                        </Link>
-                      )
+                    {visibleSlots.length === 0 ? (
+                      <span className="text-muted-foreground">Rest Day</span>
+                    ) : (
+                      <div className="flex-1 space-y-2">
+                        {visibleSlots.map((rs, idx) => (
+                          <div key={idx} className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div
+                                className={`w-3 h-3 rounded-full shrink-0 flex items-center justify-center ${rs.isCompleted ? '' : 'border-2'}`}
+                                style={{
+                                  backgroundColor: rs.isCompleted ? rs.workout.color : 'transparent',
+                                  borderColor: rs.workout.color,
+                                }}
+                              />
+                              <span className="font-medium text-foreground truncate">
+                                {rs.workout.name}
+                                {rs.label && <span className="text-muted-foreground ml-1">({rs.label})</span>}
+                              </span>
+                            </div>
+                            <Link
+                              href={slotHref(date, rs)}
+                              className={`inline-flex items-center justify-center font-medium rounded-lg transition-colors duration-150 touch-target px-3 py-1.5 text-sm min-h-[36px] shrink-0 ${
+                                !rs.session && !future && isTodayDate
+                                  ? 'bg-primary hover:bg-primary-hover text-white'
+                                  : 'bg-surface-elevated hover:bg-surface text-foreground border border-border'
+                              }`}
+                            >
+                              {future ? 'Preview' : rs.session ? (rs.isCompleted ? 'View' : 'Resume') : 'Start'}
+                            </Link>
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -335,15 +476,73 @@ export function CalendarContent({ data }: { data: CalendarData }) {
 
         {/* Legend */}
         <div className="flex flex-wrap gap-4 justify-center text-sm">
-          {dayAssignments.map((da) => (
-            <div key={da.dayOfWeek} className="flex items-center gap-2">
-              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: da.workoutType.color }} />
-              <span className="text-muted-foreground">{da.workoutType.name}</span>
+          {legendItems.map((w) => (
+            <div key={w.id} className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: w.color }} />
+              <span className="text-muted-foreground">{w.name}</span>
             </div>
           ))}
         </div>
       </div>
     </div>
+
+    {/* Multi-workout day picker */}
+    {pickerDate && (() => {
+      const daySlots = getVisibleSlots(pickerDate);
+      const future = isFutureDate(pickerDate);
+      return (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={() => setPickerDate(null)}
+        >
+          <div className="absolute inset-0 bg-black/50" />
+          <div
+            className="relative bg-surface rounded-2xl w-full max-w-sm m-4 p-5 space-y-4 animate-[fadeSlideIn_0.2s_ease-out]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-foreground">
+                  {pickerDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+                </h3>
+                <p className="text-sm text-muted-foreground">{daySlots.length} workouts scheduled</p>
+              </div>
+              <button onClick={() => setPickerDate(null)} className="p-1 text-muted-foreground hover:text-foreground touch-target">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="space-y-2">
+              {daySlots.map((rs, idx) => (
+                <Link
+                  key={idx}
+                  href={slotHref(pickerDate, rs)}
+                  className="flex items-center justify-between gap-2 bg-surface-elevated hover:bg-surface rounded-xl p-3 border border-border transition-colors"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div
+                      className={`w-3.5 h-3.5 rounded-full shrink-0 flex items-center justify-center ${rs.isCompleted ? '' : 'border-2'}`}
+                      style={{
+                        backgroundColor: rs.isCompleted ? rs.workout.color : 'transparent',
+                        borderColor: rs.workout.color,
+                      }}
+                    >
+                      {rs.isCompleted && <Check size={10} className="text-white" />}
+                    </div>
+                    <span className="font-medium text-foreground truncate">
+                      {rs.workout.name}
+                      {rs.label && <span className="text-muted-foreground ml-1">({rs.label})</span>}
+                    </span>
+                  </div>
+                  <span className="text-sm font-medium text-primary shrink-0">
+                    {future ? 'Preview' : rs.session ? (rs.isCompleted ? 'View' : 'Resume') : 'Start'}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    })()}
     </div>
   );
 }

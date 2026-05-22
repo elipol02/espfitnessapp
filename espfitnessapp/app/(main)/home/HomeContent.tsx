@@ -4,22 +4,31 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
-import { ChevronRight, CheckCircle2, X, Calendar, Check } from 'lucide-react';
+import { ChevronRight, CheckCircle2, X, Calendar, Check, RefreshCw } from 'lucide-react';
+
+interface WorkoutTypeSummary {
+  id: string;
+  name: string;
+  color: string;
+  exerciseCount: number;
+  exercises: { id: string; name: string }[];
+}
 
 interface DayAssignment {
+  id: string;
   dayOfWeek: number;
-  workoutType: {
-    id: string;
-    name: string;
-    color: string;
-    exerciseCount: number;
-    exercises: { id: string; name: string }[];
-  };
+  order: number;
+  rotationId: string | null;
+  rotationName: string | null;
+  rotationSize: number;
+  rotationSlotIndex: number;
+  workoutType: WorkoutTypeSummary | null;
 }
 
 interface SessionData {
   id: string;
   workoutTypeId: string;
+  rotationId: string | null;
   workoutDate: string;
   status: string;
 }
@@ -50,12 +59,14 @@ interface HomeData {
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6 };
 
+// Slot labels for rotation display: A, B, C, ...
+const SLOT_LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
 export function HomeContent({ data }: { data: HomeData }) {
   const router = useRouter();
   const { user, currentStreak, activePlan, recentSessions, completedWorkouts, missedWorkouts, motivationalMessage } = data;
 
   useEffect(() => {
-    // Persist timezone offset so the server can compute "local yesterday" correctly.
     const offset = new Date().getTimezoneOffset();
     document.cookie = `tz-offset=${offset}; path=/; max-age=86400; SameSite=Lax`;
   }, []);
@@ -67,7 +78,6 @@ export function HomeContent({ data }: { data: HomeData }) {
     day: 'numeric',
   });
 
-  // Build week preview
   const clientToday = new Date();
   clientToday.setHours(0, 0, 0, 0);
   const startOfWeek = new Date(clientToday);
@@ -81,28 +91,42 @@ export function HomeContent({ data }: { data: HomeData }) {
     ? (() => { const d = new Date(activePlan.endDate); d.setHours(0, 0, 0, 0); return d; })()
     : null;
 
+  /** Find all sessions for a specific date and a specific workoutTypeId */
+  function sessionsForSlot(dateStr: string, workoutTypeId: string): SessionData[] {
+    return recentSessions.filter(
+      (s) => s.workoutDate.slice(0, 10) === dateStr && s.workoutTypeId === workoutTypeId,
+    );
+  }
+
   const weekPreview = DAY_NAMES.map((dayName, index) => {
     const dayDate = new Date(startOfWeek);
     dayDate.setDate(startOfWeek.getDate() + index);
-    const dateStr = dayDate.toLocaleDateString('en-CA'); // YYYY-MM-DD
-
-    // Map JS day-of-week (0=Sun) to our 1=Mon..7=Sun
+    const dateStr = dayDate.toLocaleDateString('en-CA');
     const dow = DAY_MAP[index];
 
     const beforePlanStart = planStartDate ? dayDate < planStartDate : false;
     const afterPlanEnd = planEndDate ? dayDate > planEndDate : false;
 
-    const rawAssignment = activePlan?.dayAssignments.find((a) => a.dayOfWeek === dow);
-    const assignment = rawAssignment;
+    // All slots for this day, sorted by order
+    const dayAssignments = activePlan?.dayAssignments
+      .filter((a) => a.dayOfWeek === dow)
+      .sort((a, b) => a.order - b.order) ?? [];
 
-    const rawSession = recentSessions.find((s) => {
-      // Use UTC date slice directly — sessions are stored as UTC midnight of the local date string
-      const sDate = s.workoutDate.slice(0, 10);
-      const matchedAssignment = activePlan?.dayAssignments.find((a) => a.dayOfWeek === dow);
-      return sDate === dateStr && matchedAssignment && s.workoutTypeId === matchedAssignment.workoutType.id;
-    });
+    // Collect all sessions for this day
+    const daySessions = recentSessions.filter((s) => s.workoutDate.slice(0, 10) === dateStr);
 
-    const session = rawSession;
+    // A day is "completed" only if every slot has a completed session
+    const isFullyCompleted =
+      dayAssignments.length > 0 &&
+      dayAssignments.every((da) => {
+        if (!da.workoutType) return false;
+        return daySessions.some(
+          (s) => s.workoutTypeId === da.workoutType!.id && s.status === 'completed',
+        );
+      });
+
+    // Primary slot for display (first one)
+    const primaryAssignment = dayAssignments[0] ?? null;
 
     return {
       dayName,
@@ -113,22 +137,28 @@ export function HomeContent({ data }: { data: HomeData }) {
       isFuture: dayDate > clientToday,
       beforePlanStart,
       afterPlanEnd,
-      assignment,
-      session,
+      dayAssignments,
+      daySessions,
+      isFullyCompleted,
+      primaryAssignment,
+      extraSlotCount: Math.max(0, dayAssignments.length - 1),
     };
   });
 
   const greeting = getGreeting();
   const userName = user?.name?.split(' ')[0] || 'there';
 
-
-  // Today's workout
   const todayPreview = weekPreview.find((d) => d.isToday);
-  const todayAssignment = todayPreview?.assignment;
-  const todaySession = todayPreview?.session;
+  const todaySlots = todayPreview?.dayAssignments ?? [];
 
-  const startOrResumeWorkout = (workoutTypeId: string, dateStr: string) => {
-    router.push(`/workout/today?workoutTypeId=${workoutTypeId}&date=${dateStr}`);
+  const startWorkout = (assignment: DayAssignment, dateStr: string) => {
+    if (!assignment.workoutType) return;
+    const params = new URLSearchParams({
+      workoutTypeId: assignment.workoutType.id,
+      date: dateStr,
+    });
+    if (assignment.rotationId) params.set('rotationId', assignment.rotationId);
+    router.push(`/workout/today?${params.toString()}`);
   };
 
   if (!activePlan) {
@@ -194,67 +224,103 @@ export function HomeContent({ data }: { data: HomeData }) {
           </div>
         ) : null}
 
-        {/* Today's Workout Card */}
-        {todayAssignment ? (
-          <div className="bg-surface rounded-2xl p-7 space-y-5">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm text-muted-foreground uppercase tracking-wide">Today&apos;s Workout</p>
-                <h2 className="text-xl font-bold text-foreground mt-1">{todayAssignment.workoutType.name}</h2>
-              </div>
-              {todaySession?.status === 'completed' && (
-                <div className="flex items-center gap-2 text-success">
-                  <span className="text-sm font-medium">Completed</span>
-                  <div className="w-6 h-6 rounded-full bg-success flex items-center justify-center">
-                    <Check className="w-4 h-4 text-white" />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="space-y-1.5">
-              {todayAssignment.workoutType.exercises.map((exercise) => (
-                <div key={exercise.id} className="text-sm text-muted-foreground">
-                  {exercise.name}
-                </div>
-              ))}
-            </div>
-
-            {todaySession?.status === 'in_progress' ? (
-              <Button
-                fullWidth
-                size="lg"
-                variant="secondary"
-                onClick={() => router.push(`/workout/live?sessionId=${todaySession.id}`)}
-              >
-                Resume Workout
-              </Button>
-            ) : todaySession?.status === 'completed' ? (
-              <Button
-                fullWidth
-                size="lg"
-                variant="secondary"
-                onClick={() => router.push(`/workout/live?sessionId=${todaySession.id}`)}
-              >
-                View Workout
-              </Button>
-            ) : (
-              <Button
-                fullWidth
-                size="lg"
-                onClick={() => startOrResumeWorkout(todayAssignment.workoutType.id, todayPreview!.dateStr)}
-              >
-                Start Workout
-              </Button>
-            )}
-          </div>
-        ) : (
+        {/* Today's Workout(s) */}
+        {todaySlots.length === 0 ? (
           <div className="bg-surface rounded-2xl p-6 text-center space-y-3">
             <div className="text-4xl">😴</div>
             <div>
               <h2 className="text-xl font-bold text-foreground">Rest Day</h2>
               <p className="text-muted-foreground mt-1">Recovery is part of the process!</p>
             </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground uppercase tracking-wide">
+              {todaySlots.length === 1 ? "Today's Workout" : `Today's Workouts (${todaySlots.length})`}
+            </p>
+            {todaySlots.map((slot, slotIdx) => {
+              if (!slot.workoutType) return null;
+              const slotSessions = sessionsForSlot(todayPreview!.dateStr, slot.workoutType.id);
+              const activeSession = slotSessions.find((s) => s.status === 'in_progress') ?? slotSessions.find((s) => s.status === 'completed');
+              const isCompleted = activeSession?.status === 'completed';
+              const isInProgress = activeSession?.status === 'in_progress';
+
+              return (
+                <div key={slot.id} className="bg-surface rounded-2xl p-5 space-y-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-2">
+                      <div
+                        className="w-3 h-3 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: slot.workoutType.color }}
+                      />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-lg font-bold text-foreground">{slot.workoutType.name}</h2>
+                          {slot.rotationId && (
+                            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground bg-background px-2 py-0.5 rounded-full">
+                              <RefreshCw className="w-3 h-3" />
+                              {SLOT_LABELS[slot.rotationSlotIndex] ?? slot.rotationSlotIndex + 1}
+                              {slot.rotationName ? ` · ${slot.rotationName}` : ''}
+                            </span>
+                          )}
+                          {todaySlots.length > 1 && (
+                            <span className="text-xs text-muted-foreground">
+                              {slotIdx + 1}/{todaySlots.length}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    {isCompleted && (
+                      <div className="flex items-center gap-1.5 text-success flex-shrink-0">
+                        <span className="text-sm font-medium">Done</span>
+                        <div className="w-5 h-5 rounded-full bg-success flex items-center justify-center">
+                          <Check className="w-3 h-3 text-white" />
+                        </div>
+                      </div>
+                    )}
+                    {isInProgress && (
+                      <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full flex-shrink-0">
+                        In Progress
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="space-y-1">
+                    {slot.workoutType.exercises.map((exercise) => (
+                      <div key={exercise.id} className="text-sm text-muted-foreground">
+                        {exercise.name}
+                      </div>
+                    ))}
+                  </div>
+
+                  {isInProgress ? (
+                    <Button
+                      fullWidth
+                      variant="secondary"
+                      onClick={() => router.push(`/workout/live?sessionId=${activeSession!.id}`)}
+                    >
+                      Resume
+                    </Button>
+                  ) : isCompleted ? (
+                    <Button
+                      fullWidth
+                      variant="secondary"
+                      onClick={() => router.push(`/workout/live?sessionId=${activeSession!.id}`)}
+                    >
+                      View
+                    </Button>
+                  ) : (
+                    <Button
+                      fullWidth
+                      onClick={() => startWorkout(slot, todayPreview!.dateStr)}
+                    >
+                      Start
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -273,10 +339,14 @@ export function HomeContent({ data }: { data: HomeData }) {
 
           <div className="flex gap-2 overflow-x-auto pb-2 pt-1">
             {weekPreview.map((day) => {
-              const isCompleted = day.session?.status === 'completed';
-              // Show workout indicator if: completed session exists, OR assigned day within plan date range
-              const hasWorkout = !!day.assignment && (isCompleted || (!day.beforePlanStart && !day.afterPlanEnd));
-              const color = day.assignment?.workoutType.color || '#404040';
+              const hasWorkout = day.dayAssignments.length > 0 && (!day.beforePlanStart && !day.afterPlanEnd);
+              const primaryAssignment = day.primaryAssignment;
+              const color = primaryAssignment?.workoutType?.color || '#404040';
+              const primaryName = primaryAssignment?.workoutType?.name ?? '';
+              const isRotation = !!primaryAssignment?.rotationId;
+
+              // Find the first active session for click navigation
+              const firstSession = day.daySessions[0];
 
               const content = (
                 <div
@@ -288,34 +358,48 @@ export function HomeContent({ data }: { data: HomeData }) {
                   `}
                 >
                   <span className="text-xs text-muted-foreground">{day.dayName.slice(0, 3)}</span>
-                  <div
-                    className="rounded-full flex items-center justify-center flex-shrink-0"
-                    style={{
-                      width: '28px',
-                      height: '28px',
-                      backgroundColor: !hasWorkout ? 'transparent' : isCompleted ? color : color + '30',
-                      border: !hasWorkout ? '2px solid var(--border)' : isCompleted ? 'none' : `2px solid ${color}`,
-                    }}
-                  >
-                    {isCompleted ? (
-                      <Check size={14} className="text-white" />
-                    ) : hasWorkout ? (
-                      <span className="text-xs font-medium" style={{ color }}>
-                        {day.assignment!.workoutType.name.charAt(0).toUpperCase()}
+                  <div className="relative">
+                    <div
+                      className="rounded-full flex items-center justify-center flex-shrink-0"
+                      style={{
+                        width: '28px',
+                        height: '28px',
+                        backgroundColor: !hasWorkout ? 'transparent' : day.isFullyCompleted ? color : color + '30',
+                        border: !hasWorkout ? '2px solid var(--border)' : day.isFullyCompleted ? 'none' : `2px solid ${color}`,
+                      }}
+                    >
+                      {day.isFullyCompleted ? (
+                        <Check size={14} className="text-white" />
+                      ) : hasWorkout ? (
+                        <span className="text-xs font-medium" style={{ color }}>
+                          {isRotation ? '↻' : primaryName.charAt(0).toUpperCase()}
+                        </span>
+                      ) : null}
+                    </div>
+                    {hasWorkout && day.extraSlotCount > 0 && (
+                      <span className="absolute -top-1 -right-1 bg-primary text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
+                        +{day.extraSlotCount}
                       </span>
-                    ) : null}
+                    )}
                   </div>
-                  <span className="text-xs capitalize text-muted-foreground text-center leading-tight w-full px-1">
-                    {hasWorkout ? day.assignment!.workoutType.name : 'Rest'}
+                  <span className="text-xs capitalize text-muted-foreground text-center leading-tight w-full px-1 truncate">
+                    {hasWorkout ? primaryName : 'Rest'}
                   </span>
                 </div>
               );
 
-              if (day.session) {
+              if (firstSession && day.daySessions.length > 0) {
+                // If day has exactly one session, go directly to it; otherwise go to home/today to pick
                 return (
                   <div
                     key={day.dow}
-                    onClick={() => router.push(`/workout/live?sessionId=${day.session!.id}`)}
+                    onClick={() => {
+                      if (day.daySessions.length === 1) {
+                        router.push(`/workout/live?sessionId=${firstSession.id}`);
+                      } else {
+                        router.push(`/workout/today?date=${day.dateStr}`);
+                      }
+                    }}
                     className="cursor-pointer"
                   >
                     {content}
@@ -329,9 +413,11 @@ export function HomeContent({ data }: { data: HomeData }) {
                     key={day.dow}
                     onClick={() => {
                       if (day.isFuture) {
-                        router.push(`/workout/preview?workoutTypeId=${day.assignment!.workoutType.id}&date=${day.dateStr}`);
+                        if (primaryAssignment?.workoutType) {
+                          router.push(`/workout/preview?workoutTypeId=${primaryAssignment.workoutType.id}&date=${day.dateStr}`);
+                        }
                       } else {
-                        startOrResumeWorkout(day.assignment!.workoutType.id, day.dateStr);
+                        router.push(`/workout/today?date=${day.dateStr}`);
                       }
                     }}
                     className="cursor-pointer"
@@ -370,7 +456,9 @@ export function HomeContent({ data }: { data: HomeData }) {
           <div className="bg-surface rounded-xl p-4 flex items-center justify-between hover:bg-surface-elevated transition-colors">
             <div>
               <p className="font-medium text-foreground">{activePlan.name}</p>
-              <p className="text-xs text-muted-foreground mt-0.5">{activePlan.dayAssignments.length} training days</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {new Set(activePlan.dayAssignments.map((a) => a.dayOfWeek)).size} training days
+              </p>
             </div>
             <ChevronRight className="w-5 h-5 text-muted-foreground" />
           </div>

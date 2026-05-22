@@ -5,7 +5,7 @@ import { prisma } from '@/app/lib/db';
 import { hashPassword } from '@/app/lib/auth';
 
 const registerSchema = z.object({
-  email: z.string().email('Invalid email address'),
+  email: z.string().trim().toLowerCase().email('Invalid email address'),
   password: z.string().min(6, 'Password must be at least 6 characters'),
   name: z.string().min(1, 'Name is required').optional(),
   systemPassword: z.string().optional(),

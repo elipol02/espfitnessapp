@@ -148,7 +148,10 @@ export default function RegisterPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 autoComplete="email"
-                className="w-full px-4 py-3 rounded-lg bg-surface border border-border 
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className="w-full px-4 py-3 rounded-lg bg-surface border border-border
                          text-foreground placeholder-muted
                          focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent
                          transition-colors"

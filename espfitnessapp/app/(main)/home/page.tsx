@@ -207,10 +207,16 @@ async function getHomeData(userId: string, tzOffsetMinutes: number) {
               id: da.id,
               dayOfWeek: da.dayOfWeek,
               order: da.order,
+              startDate: da.startDate.toISOString(),
               rotationId: da.rotationId,
               rotationName: da.rotation?.name ?? null,
               rotationSize: da.rotation?.entries.length ?? 0,
               rotationSlotIndex: da.rotation ? da.rotation.currentIndex % da.rotation.entries.length : 0,
+              rotationEntries: da.rotation?.entries.map((e) => ({
+                id: e.workoutType.id,
+                name: e.workoutType.name,
+                color: e.workoutType.color,
+              })) ?? [],
               workoutType: effective
                 ? {
                     id: effective.id,

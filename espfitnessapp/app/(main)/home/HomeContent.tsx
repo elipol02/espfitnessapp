@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/app/components/Button';
@@ -14,14 +14,22 @@ interface WorkoutTypeSummary {
   exercises: { id: string; name: string }[];
 }
 
+interface RotationEntry {
+  id: string;
+  name: string;
+  color: string;
+}
+
 interface DayAssignment {
   id: string;
   dayOfWeek: number;
   order: number;
+  startDate: string;
   rotationId: string | null;
   rotationName: string | null;
   rotationSize: number;
   rotationSlotIndex: number;
+  rotationEntries: RotationEntry[];
   workoutType: WorkoutTypeSummary | null;
 }
 
@@ -43,7 +51,6 @@ interface HomeData {
   schedule: {
     dayAssignments: DayAssignment[];
   } | null;
-  /** The user's first-ever workout date — floors the week preview / stats. */
   scheduleStartDate: string | null;
   recentSessions: SessionData[];
   completedWorkouts: number;
@@ -53,13 +60,11 @@ interface HomeData {
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAY_MAP: Record<number, number> = { 0: 7, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6 };
-
-// Slot labels for rotation display: A, B, C, ...
 const SLOT_LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 export function HomeContent({ data }: { data: HomeData }) {
   const router = useRouter();
-  const { user, currentStreak, schedule, scheduleStartDate, recentSessions, completedWorkouts, missedWorkouts, completionRateToDate } = data;
+  const { user, currentStreak, schedule, recentSessions, completedWorkouts, missedWorkouts, completionRateToDate } = data;
 
   useEffect(() => {
     const offset = new Date().getTimezoneOffset();
@@ -78,11 +83,66 @@ export function HomeContent({ data }: { data: HomeData }) {
   const startOfWeek = new Date(clientToday);
   startOfWeek.setDate(clientToday.getDate() - clientToday.getDay());
 
-  const planStartDate = scheduleStartDate
-    ? (() => { const d = new Date(scheduleStartDate); d.setHours(0, 0, 0, 0); return d; })()
-    : null;
+  // Build per-rotation projection for the week — same algorithm as calendar.
+  // Each rotation walks from its startDate (earliest across its slots).
+  const rotationProjections = useMemo(() => {
+    if (!schedule) return new Map<string, { entries: RotationEntry[]; currentIndex: number; indexByDate: Map<string, number>; anchorIndex: number }>();
 
-  /** Find all sessions for a specific date and a specific workoutTypeId */
+    const map = new Map<string, { entries: RotationEntry[]; currentIndex: number; indexByDate: Map<string, number>; anchorIndex: number }>();
+    const dowsByRot = new Map<string, Set<number>>();
+    const rotById = new Map<string, { currentIndex: number; entries: RotationEntry[] }>();
+    const startDateByRot = new Map<string, Date>();
+
+    for (const da of schedule.dayAssignments) {
+      if (!da.rotationId || !da.rotationEntries.length) continue;
+      if (!dowsByRot.has(da.rotationId)) dowsByRot.set(da.rotationId, new Set());
+      dowsByRot.get(da.rotationId)!.add(da.dayOfWeek);
+      rotById.set(da.rotationId, { currentIndex: da.rotationSlotIndex, entries: da.rotationEntries });
+
+      const slotStart = new Date(da.startDate);
+      slotStart.setHours(0, 0, 0, 0);
+      const existing = startDateByRot.get(da.rotationId);
+      if (!existing || slotStart < existing) startDateByRot.set(da.rotationId, slotStart);
+    }
+
+    const todayStart = new Date(clientToday);
+    // Only project 60 days — enough for home week view + a bit of buffer
+    const cap = new Date(clientToday);
+    cap.setDate(cap.getDate() + 60);
+
+    for (const [rotId, dows] of dowsByRot) {
+      const rot = rotById.get(rotId)!;
+      const rotStart = startDateByRot.get(rotId)!;
+      const indexByDate = new Map<string, number>();
+      let occ = 0;
+      let anchorIndex = -1;
+      const d = new Date(rotStart);
+      while (d.getTime() <= cap.getTime()) {
+        if (dows.has(DAY_MAP[d.getDay()])) {
+          indexByDate.set(d.toLocaleDateString('en-CA'), occ);
+          if (anchorIndex === -1 && d.getTime() >= todayStart.getTime()) anchorIndex = occ;
+          occ++;
+        }
+        d.setDate(d.getDate() + 1);
+      }
+      if (anchorIndex === -1) anchorIndex = occ;
+      map.set(rotId, { entries: rot.entries, currentIndex: rot.currentIndex, indexByDate, anchorIndex });
+    }
+    return map;
+  }, [schedule]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resolveRotationForDate = (da: DayAssignment, dateStr: string): { workout: RotationEntry; label: string } | null => {
+    if (!da.rotationId) return null;
+    const proj = rotationProjections.get(da.rotationId);
+    if (!proj || proj.entries.length === 0) return null;
+    const len = proj.entries.length;
+    const p = proj.indexByDate.get(dateStr);
+    const raw = p === undefined ? proj.currentIndex : proj.currentIndex + (p - proj.anchorIndex);
+    const idx = ((raw % len) + len) % len;
+    return { workout: proj.entries[idx], label: SLOT_LABELS[idx] ?? String(idx + 1) };
+  };
+
+  /** Find all sessions for a specific date and workoutTypeId */
   function sessionsForSlot(dateStr: string, workoutTypeId: string): SessionData[] {
     return recentSessions.filter(
       (s) => s.workoutDate.slice(0, 10) === dateStr && s.workoutTypeId === workoutTypeId,
@@ -95,29 +155,42 @@ export function HomeContent({ data }: { data: HomeData }) {
     const dateStr = dayDate.toLocaleDateString('en-CA');
     const dow = DAY_MAP[index];
 
-    const beforePlanStart = planStartDate ? dayDate < planStartDate : false;
-    const afterPlanEnd = false; // ongoing schedule has no end date
-
-    // All slots for this day, sorted by order
+    // Only include assignments that have started by this date (per-assignment startDate)
     const dayAssignments = schedule?.dayAssignments
-      .filter((a) => a.dayOfWeek === dow)
+      .filter((a) => a.dayOfWeek === dow && dateStr >= a.startDate.slice(0, 10))
       .sort((a, b) => a.order - b.order) ?? [];
 
-    // Collect all sessions for this day
     const daySessions = recentSessions.filter((s) => s.workoutDate.slice(0, 10) === dateStr);
 
-    // A day is "completed" only if every slot has a completed session
+    // Completed = every slot has a matching completed session
     const isFullyCompleted =
       dayAssignments.length > 0 &&
       dayAssignments.every((da) => {
+        if (da.rotationId) {
+          return daySessions.some((s) => s.rotationId === da.rotationId && s.status === 'completed');
+        }
         if (!da.workoutType) return false;
-        return daySessions.some(
-          (s) => s.workoutTypeId === da.workoutType!.id && s.status === 'completed',
-        );
+        return daySessions.some((s) => s.workoutTypeId === da.workoutType!.id && s.status === 'completed');
       });
 
-    // Primary slot for display (first one)
+    // Resolve the primary slot's workout — project rotation for this specific date
     const primaryAssignment = dayAssignments[0] ?? null;
+    let primaryWorkout: { id: string; name: string; color: string } | null = null;
+    let primaryLabel: string | null = null;
+    let isRotation = false;
+
+    if (primaryAssignment) {
+      if (primaryAssignment.rotationId) {
+        isRotation = true;
+        const resolved = resolveRotationForDate(primaryAssignment, dateStr);
+        if (resolved) {
+          primaryWorkout = resolved.workout;
+          primaryLabel = resolved.label;
+        }
+      } else if (primaryAssignment.workoutType) {
+        primaryWorkout = primaryAssignment.workoutType;
+      }
+    }
 
     return {
       dayName,
@@ -126,12 +199,13 @@ export function HomeContent({ data }: { data: HomeData }) {
       dayDate,
       isToday: index === clientToday.getDay(),
       isFuture: dayDate > clientToday,
-      beforePlanStart,
-      afterPlanEnd,
       dayAssignments,
       daySessions,
       isFullyCompleted,
       primaryAssignment,
+      primaryWorkout,
+      primaryLabel,
+      isRotation,
       extraSlotCount: Math.max(0, dayAssignments.length - 1),
     };
   });
@@ -218,8 +292,17 @@ export function HomeContent({ data }: { data: HomeData }) {
               {todaySlots.length === 1 ? "Today's Workout" : `Today's Workouts (${todaySlots.length})`}
             </p>
             {todaySlots.map((slot, slotIdx) => {
-              if (!slot.workoutType) return null;
-              const slotSessions = sessionsForSlot(todayPreview!.dateStr, slot.workoutType.id);
+              const displayName = slot.rotationId
+                ? (resolveRotationForDate(slot, todayPreview!.dateStr)?.workout.name ?? slot.workoutType?.name ?? '')
+                : (slot.workoutType?.name ?? '');
+              const displayColor = slot.rotationId
+                ? (resolveRotationForDate(slot, todayPreview!.dateStr)?.workout.color ?? slot.workoutType?.color ?? '#404040')
+                : (slot.workoutType?.color ?? '#404040');
+
+              const slotSessions = slot.rotationId
+                ? recentSessions.filter((s) => s.workoutDate.slice(0, 10) === todayPreview!.dateStr && s.rotationId === slot.rotationId)
+                : sessionsForSlot(todayPreview!.dateStr, slot.workoutType?.id ?? '');
+
               const activeSession = slotSessions.find((s) => s.status === 'in_progress') ?? slotSessions.find((s) => s.status === 'completed');
               const isCompleted = activeSession?.status === 'completed';
               const isInProgress = activeSession?.status === 'in_progress';
@@ -230,15 +313,15 @@ export function HomeContent({ data }: { data: HomeData }) {
                     <div className="flex items-center gap-2">
                       <div
                         className="w-3 h-3 rounded-full flex-shrink-0"
-                        style={{ backgroundColor: slot.workoutType.color }}
+                        style={{ backgroundColor: displayColor }}
                       />
                       <div>
                         <div className="flex items-center gap-2">
-                          <h2 className="text-lg font-bold text-foreground">{slot.workoutType.name}</h2>
-                          {slot.rotationId && (
+                          <h2 className="text-lg font-bold text-foreground">{displayName}</h2>
+                          {slot.rotationId && resolveRotationForDate(slot, todayPreview!.dateStr)?.label && (
                             <span className="inline-flex items-center gap-1 text-xs text-muted-foreground bg-background px-2 py-0.5 rounded-full">
                               <RefreshCw className="w-3 h-3" />
-                              {SLOT_LABELS[slot.rotationSlotIndex] ?? slot.rotationSlotIndex + 1}
+                              {resolveRotationForDate(slot, todayPreview!.dateStr)!.label}
                               {slot.rotationName ? ` · ${slot.rotationName}` : ''}
                             </span>
                           )}
@@ -266,7 +349,7 @@ export function HomeContent({ data }: { data: HomeData }) {
                   </div>
 
                   <div className="space-y-1">
-                    {slot.workoutType.exercises.map((exercise) => (
+                    {slot.workoutType?.exercises.map((exercise) => (
                       <div key={exercise.id} className="text-sm text-muted-foreground">
                         {exercise.name}
                       </div>
@@ -318,13 +401,9 @@ export function HomeContent({ data }: { data: HomeData }) {
 
           <div className="flex gap-2 overflow-x-auto pb-2 pt-1">
             {weekPreview.map((day) => {
-              const hasWorkout = day.dayAssignments.length > 0 && (!day.beforePlanStart && !day.afterPlanEnd);
-              const primaryAssignment = day.primaryAssignment;
-              const color = primaryAssignment?.workoutType?.color || '#404040';
-              const primaryName = primaryAssignment?.workoutType?.name ?? '';
-              const isRotation = !!primaryAssignment?.rotationId;
-
-              // Find the first active session for click navigation
+              const hasWorkout = day.dayAssignments.length > 0;
+              const color = day.primaryWorkout?.color || '#404040';
+              const primaryName = day.primaryWorkout?.name ?? '';
               const firstSession = day.daySessions[0];
 
               const content = (
@@ -351,7 +430,9 @@ export function HomeContent({ data }: { data: HomeData }) {
                         <Check size={14} className="text-white" />
                       ) : hasWorkout ? (
                         <span className="text-xs font-medium" style={{ color }}>
-                          {isRotation ? '↻' : primaryName.charAt(0).toUpperCase()}
+                          {day.isRotation
+                            ? (day.primaryLabel ?? '↻')
+                            : primaryName.charAt(0).toUpperCase()}
                         </span>
                       ) : null}
                     </div>
@@ -368,7 +449,6 @@ export function HomeContent({ data }: { data: HomeData }) {
               );
 
               if (firstSession && day.daySessions.length > 0) {
-                // If day has exactly one session, go directly to it; otherwise go to home/today to pick
                 return (
                   <div
                     key={day.dow}
@@ -392,8 +472,8 @@ export function HomeContent({ data }: { data: HomeData }) {
                     key={day.dow}
                     onClick={() => {
                       if (day.isFuture) {
-                        if (primaryAssignment?.workoutType) {
-                          router.push(`/workout/preview?workoutTypeId=${primaryAssignment.workoutType.id}&date=${day.dateStr}`);
+                        if (day.primaryWorkout) {
+                          router.push(`/workout/preview?workoutTypeId=${day.primaryWorkout.id}&date=${day.dateStr}`);
                         }
                       } else {
                         router.push(`/workout/today?date=${day.dateStr}`);

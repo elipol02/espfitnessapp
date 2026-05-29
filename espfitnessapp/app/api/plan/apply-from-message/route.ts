@@ -232,6 +232,16 @@ export async function POST(request: NextRequest) {
         .map((r) => r.id);
       if (staleRotationIds.length) await tx.workoutRotation.deleteMany({ where: { id: { in: staleRotationIds } } });
 
+      // Snapshot existing startDates before deleting so we can preserve them for
+      // days that already exist in the schedule (newly added days get today).
+      const existingAssignments = await tx.dayAssignment.findMany({
+        where: { userId },
+        select: { dayOfWeek: true, order: true, startDate: true },
+      });
+      const startDateBySlot = new Map<string, Date>(
+        existingAssignments.map((a) => [`${a.dayOfWeek}:${a.order}`, a.startDate])
+      );
+
       // Rebuild the day → slot mapping (no history attached to assignments) using the
       // resolved type/rotation ids. This is what adds/moves/removes days.
       await tx.dayAssignment.deleteMany({ where: { userId } });
@@ -242,14 +252,20 @@ export async function POST(request: NextRequest) {
             const workoutTypeId = resolvedTypeId.get(slot.workoutTypeName.trim().toLowerCase());
             if (workoutTypeId) {
               await tx.dayAssignment.create({
-                data: { userId, dayOfWeek: day.dayOfWeek, order: slotOrder, workoutTypeId, rotationId: null },
+                data: {
+                  userId, dayOfWeek: day.dayOfWeek, order: slotOrder, workoutTypeId, rotationId: null,
+                  startDate: startDateBySlot.get(`${day.dayOfWeek}:${slotOrder}`) ?? new Date(),
+                },
               });
             }
           } else {
             const rotationId = resolvedRotationId.get(slot.rotationName.trim().toLowerCase());
             if (rotationId) {
               await tx.dayAssignment.create({
-                data: { userId, dayOfWeek: day.dayOfWeek, order: slotOrder, workoutTypeId: null, rotationId },
+                data: {
+                  userId, dayOfWeek: day.dayOfWeek, order: slotOrder, workoutTypeId: null, rotationId,
+                  startDate: startDateBySlot.get(`${day.dayOfWeek}:${slotOrder}`) ?? new Date(),
+                },
               });
             }
           }

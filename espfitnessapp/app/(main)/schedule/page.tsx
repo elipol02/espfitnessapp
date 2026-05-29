@@ -75,6 +75,7 @@ export default async function SchedulePage() {
       id: da.id,
       dayOfWeek: da.dayOfWeek,
       order: da.order,
+      startDate: da.startDate.toISOString(),
       rotationId: da.rotationId,
       rotationName: da.rotation?.name ?? null,
       rotationCurrentIndex: da.rotation?.currentIndex ?? null,

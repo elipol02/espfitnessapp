@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ChevronDown, ChevronRight, RefreshCw, MessageSquare, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, RefreshCw, MessageSquare, Trash2, X, Pencil, Check } from 'lucide-react';
 import { Button } from '@/app/components/Button';
 import type {
   ExerciseType,
@@ -46,6 +46,7 @@ interface DayAssignment {
   id: string;
   dayOfWeek: number;
   order: number;
+  startDate: string;
   rotationId: string | null;
   rotationName: string | null;
   rotationCurrentIndex: number | null;
@@ -211,7 +212,6 @@ export function ScheduleContent({
   schedule: Schedule;
   lastLiftedWeights?: Record<string, { weight: number; weightUnit: string }>;
 }) {
-  // Get unique days in order
   const uniqueDays = [...new Set(schedule.dayAssignments.map((da) => da.dayOfWeek))].sort((a, b) => a - b);
 
   const router = useRouter();
@@ -220,6 +220,56 @@ export function ScheduleContent({
   const [slotMenu, setSlotMenu] = useState<DayAssignment | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [actioning, setActioning] = useState(false);
+
+  // Per-day start date editing
+  const toDateInputValue = (iso: string | null) => iso ? iso.slice(0, 10) : '';
+  const [editingStartDate, setEditingStartDate] = useState(false);
+  const [startDateInput, setStartDateInput] = useState('');
+  const [savingStartDate, setSavingStartDate] = useState(false);
+
+  // Slots for the currently selected day — used to derive the displayed start date
+  const selectedSlots = schedule.dayAssignments
+    .filter((da) => da.dayOfWeek === selectedDay)
+    .sort((a, b) => a.order - b.order);
+
+  // Earliest startDate among the selected day's slots
+  const currentDayStartDate = selectedSlots.length > 0
+    ? selectedSlots.reduce((earliest, da) =>
+        da.startDate < earliest ? da.startDate : earliest,
+        selectedSlots[0].startDate
+      )
+    : null;
+
+  // Reset the date input whenever the selected day changes
+  useEffect(() => {
+    setStartDateInput(toDateInputValue(currentDayStartDate));
+    setEditingStartDate(false);
+  }, [selectedDay]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveStartDate = async () => {
+    if (!startDateInput) return;
+    setSavingStartDate(true);
+    try {
+      await Promise.all(
+        selectedSlots.map((da) =>
+          fetch(`/api/schedule/assignment/${da.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ startDate: startDateInput }),
+          })
+        )
+      );
+      setEditingStartDate(false);
+      router.refresh();
+    } finally {
+      setSavingStartDate(false);
+    }
+  };
+
+  const cancelStartDate = () => {
+    setStartDateInput(toDateInputValue(currentDayStartDate));
+    setEditingStartDate(false);
+  };
 
   const runDelete = async (url: string) => {
     setActioning(true);
@@ -235,12 +285,6 @@ export function ScheduleContent({
     }
   };
 
-  // All slots for the selected day, sorted by order
-  const selectedSlots = schedule.dayAssignments
-    .filter((da) => da.dayOfWeek === selectedDay)
-    .sort((a, b) => a.order - b.order);
-
-  // Primary color for the day tab (first slot's color)
   function getDayColor(day: number): string {
     const firstSlot = schedule.dayAssignments.find((da) => da.dayOfWeek === day);
     if (firstSlot?.workoutType) return firstSlot.workoutType.color;
@@ -299,7 +343,7 @@ export function ScheduleContent({
         </div>
       </div>
 
-      {/* Day tabs — one tab per unique day */}
+      {/* Day tabs */}
       <div className="px-4 pt-4 overflow-x-auto">
         <div className="flex gap-2 min-w-max">
           {uniqueDays.map((day) => {
@@ -329,6 +373,56 @@ export function ScheduleContent({
             );
           })}
         </div>
+      </div>
+
+      {/* Per-day start date */}
+      <div className="px-4 pt-2 pb-1 flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">Started:</span>
+        {editingStartDate ? (
+          <>
+            <input
+              type="date"
+              value={startDateInput}
+              onChange={(e) => setStartDateInput(e.target.value)}
+              disabled={savingStartDate}
+              className="text-xs bg-surface border border-border rounded px-1.5 py-0.5 text-foreground focus:outline-none focus:border-primary"
+            />
+            <button
+              onClick={saveStartDate}
+              disabled={savingStartDate || !startDateInput}
+              className="p-0.5 text-primary hover:text-primary/80 transition-colors disabled:opacity-50"
+              aria-label="Save start date"
+            >
+              <Check size={14} />
+            </button>
+            <button
+              onClick={cancelStartDate}
+              disabled={savingStartDate}
+              className="p-0.5 text-muted-foreground hover:text-foreground transition-colors"
+              aria-label="Cancel"
+            >
+              <X size={14} />
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="text-xs text-foreground">
+              {currentDayStartDate
+                ? new Date(currentDayStartDate).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' })
+                : 'Not set'}
+            </span>
+            <button
+              onClick={() => {
+                setStartDateInput(toDateInputValue(currentDayStartDate));
+                setEditingStartDate(true);
+              }}
+              className="p-0.5 text-muted-foreground hover:text-foreground transition-colors"
+              aria-label="Edit start date"
+            >
+              <Pencil size={12} />
+            </button>
+          </>
+        )}
       </div>
 
       {/* Selected day content */}

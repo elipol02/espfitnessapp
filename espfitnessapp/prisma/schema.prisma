@@ -111,6 +111,7 @@ model DayAssignment {
   workoutTypeId String?
   rotationId    String?
   order         Int              @default(0)
+  startDate     DateTime
   user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   workoutType   WorkoutType?     @relation(fields: [workoutTypeId], references: [id], onDelete: Cascade)
   rotation      WorkoutRotation? @relation(fields: [rotationId], references: [id], onDelete: Cascade)
@@ -119,6 +120,7 @@ model DayAssignment {
   @@index([userId])
   @@index([workoutTypeId])
   @@index([rotationId])
+  @@index([startDate])
 }
 
 model WorkoutRotation {

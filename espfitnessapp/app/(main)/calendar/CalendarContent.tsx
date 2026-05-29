@@ -16,6 +16,7 @@ interface Slot {
   dayOfWeek: number;
   order: number;
   rotationId: string | null;
+  startDate: string;
   workoutType: WorkoutRef | null;
   rotation: { id: string; currentIndex: number; entries: WorkoutRef[] } | null;
 }
@@ -29,7 +30,6 @@ interface SessionData {
 }
 
 interface CalendarData {
-  startDate: string | null;
   endDate: string | null;
   slots: Slot[];
   sessions: SessionData[];
@@ -43,6 +43,7 @@ interface ResolvedSlot {
   label: string | null; // 'A', 'B', … for rotation slots
   session: SessionData | undefined;
   isCompleted: boolean;
+  slotStartDate: Date;
 }
 
 type ViewMode = 'month' | 'week';
@@ -55,16 +56,13 @@ export function CalendarContent({ data }: { data: CalendarData }) {
   const [viewMode, setViewMode] = useState<ViewMode>('month');
   const [pickerDate, setPickerDate] = useState<Date | null>(null);
 
-  const { startDate, endDate, slots, sessions } = data;
+  const { endDate, slots, sessions } = data;
 
-  const planStartDate = startDate ? (() => { const d = new Date(startDate); d.setHours(0, 0, 0, 0); return d; })() : null;
   const planEndDate = endDate ? (() => { const d = new Date(endDate); d.setHours(0, 0, 0, 0); return d; })() : null;
 
   // ── Rotation projection ──────────────────────────────────────────────────
-  // For each rotation, walk the plan day-by-day building the chronological list
-  // of its scheduled occurrences. The first occurrence on/after today maps to the
-  // rotation's currentIndex; every other occurrence steps the index forward or
-  // backward, producing the A/B/A… cycle across real dates.
+  // For each rotation, walk its scheduled days from that rotation's own startDate.
+  // The first occurrence on/after today maps to currentIndex; every other steps the cycle.
   const rotationProjections = useMemo(() => {
     const map = new Map<string, {
       entries: WorkoutRef[];
@@ -72,26 +70,40 @@ export function CalendarContent({ data }: { data: CalendarData }) {
       indexByDate: Map<string, number>;
       anchorIndex: number;
     }>();
-    if (!planStartDate) return map;
 
     const dowsByRot = new Map<string, Set<number>>();
     const rotById = new Map<string, { currentIndex: number; entries: WorkoutRef[] }>();
+    const startDateByRot = new Map<string, Date>();
+
     for (const s of slots) {
       if (!s.rotationId || !s.rotation) continue;
       if (!dowsByRot.has(s.rotationId)) dowsByRot.set(s.rotationId, new Set());
       dowsByRot.get(s.rotationId)!.add(s.dayOfWeek);
       rotById.set(s.rotationId, { currentIndex: s.rotation.currentIndex, entries: s.rotation.entries });
+
+      // Use the earliest startDate across slots sharing this rotation
+      const slotStart = new Date(s.startDate);
+      slotStart.setHours(0, 0, 0, 0);
+      const existing = startDateByRot.get(s.rotationId);
+      if (!existing || slotStart < existing) startDateByRot.set(s.rotationId, slotStart);
     }
 
-    const cap = planEndDate ?? (() => { const d = new Date(planStartDate); d.setDate(d.getDate() + 365); return d; })();
+    if (dowsByRot.size === 0) return map;
+
+    const cap = planEndDate ?? (() => {
+      // Use the latest rotation start + 365 days as the default cap
+      const latest = [...startDateByRot.values()].reduce((a, b) => (a > b ? a : b), new Date(0));
+      const d = new Date(latest); d.setDate(d.getDate() + 365); return d;
+    })();
     const todayStart = (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; })();
 
     for (const [rotId, dows] of dowsByRot) {
       const rot = rotById.get(rotId)!;
+      const rotStart = startDateByRot.get(rotId)!;
       const indexByDate = new Map<string, number>();
       let occ = 0;
       let anchorIndex = -1;
-      const d = new Date(planStartDate);
+      const d = new Date(rotStart);
       while (d.getTime() <= cap.getTime()) {
         if (dows.has(DAY_MAP[d.getDay()])) {
           indexByDate.set(d.toLocaleDateString('en-CA'), occ);
@@ -100,12 +112,12 @@ export function CalendarContent({ data }: { data: CalendarData }) {
         }
         d.setDate(d.getDate() + 1);
       }
-      if (anchorIndex === -1) anchorIndex = occ; // entire rotation is in the past
+      if (anchorIndex === -1) anchorIndex = occ;
       map.set(rotId, { entries: rot.entries, currentIndex: rot.currentIndex, indexByDate, anchorIndex });
     }
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slots, startDate, endDate]);
+  }, [slots, endDate]);
 
   const resolveRotationEntry = (rotationId: string, dateStr: string): { workout: WorkoutRef; label: string } | null => {
     const proj = rotationProjections.get(rotationId);
@@ -135,13 +147,11 @@ export function CalendarContent({ data }: { data: CalendarData }) {
       }
       if (!workout) continue;
 
-      // Sessions are stored as UTC midnight of the local date string, so compare the raw slice.
       const session = s.rotationId
         ? sessions.find((se) => se.workoutDate.slice(0, 10) === dateStr &&
             (se.rotationId === s.rotationId || (s.rotation?.entries.some((e) => e.id === se.workoutTypeId) ?? false)))
         : sessions.find((se) => se.workoutDate.slice(0, 10) === dateStr && se.workoutTypeId === workout!.id);
 
-      // If a real session exists for a rotation day, show what was actually recorded.
       if (session && s.rotation) {
         const actualIdx = s.rotation.entries.findIndex((e) => e.id === session.workoutTypeId);
         if (actualIdx >= 0) {
@@ -150,6 +160,8 @@ export function CalendarContent({ data }: { data: CalendarData }) {
         }
       }
 
+      const slotStartDate = (() => { const d = new Date(s.startDate); d.setHours(0, 0, 0, 0); return d; })();
+
       resolved.push({
         order: s.order,
         rotationId: s.rotationId,
@@ -157,16 +169,10 @@ export function CalendarContent({ data }: { data: CalendarData }) {
         label,
         session,
         isCompleted: session?.status === 'completed',
+        slotStartDate,
       });
     }
     return resolved;
-  };
-
-  const isBeforePlanStart = (date: Date): boolean => {
-    if (!planStartDate) return false;
-    const check = new Date(date);
-    check.setHours(0, 0, 0, 0);
-    return check < planStartDate;
   };
 
   const isAfterPlanEnd = (date: Date): boolean => {
@@ -184,10 +190,13 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     return check > today;
   };
 
-  // Slots to display for a date, honoring plan range (completed sessions always show).
+  // Slots to display for a date. Each resolved slot is individually filtered by its
+  // own startDate — completed sessions always show regardless of startDate.
   const getVisibleSlots = (date: Date): ResolvedSlot[] => {
-    const inRange = !isBeforePlanStart(date) && !isAfterPlanEnd(date);
-    return getResolvedSlots(date).filter((rs) => rs.isCompleted || inRange);
+    if (isAfterPlanEnd(date)) return getResolvedSlots(date).filter((rs) => rs.isCompleted);
+    const check = new Date(date);
+    check.setHours(0, 0, 0, 0);
+    return getResolvedSlots(date).filter((rs) => rs.isCompleted || check >= rs.slotStartDate);
   };
 
   const slotHref = (date: Date, rs: ResolvedSlot): string => {
@@ -245,7 +254,6 @@ export function CalendarContent({ data }: { data: CalendarData }) {
     date.getMonth() === today.getMonth() &&
     date.getDate() === today.getDate();
 
-  // Legend: every distinct workout type, including each rotation entry.
   const legendItems = useMemo(() => {
     const map = new Map<string, WorkoutRef>();
     for (const s of slots) {

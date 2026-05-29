@@ -35,19 +35,9 @@ async function getCalendarData(userId: string) {
     orderBy: { workoutDate: 'desc' },
   });
 
-  // Anchor the visible range + rotation projection at the schedule's start date (set
-  // on creation), falling back to the first session or today. Nothing before this is
-  // shown as scheduled. The schedule is ongoing, so there is no end date.
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { scheduleStartedAt: true },
-  });
-  const startDate =
-    user?.scheduleStartedAt ??
-    (sessions.length > 0 ? sessions[sessions.length - 1].workoutDate : new Date());
-
   // Emit one entry per slot. Rotation slots carry their full ordered entry list so the
   // client can project the A/B/A… cycle across actual calendar dates.
+  // Each slot carries its own startDate so the calendar knows when it became active.
   const slots = dayAssignments
     .map((da) => {
       if (da.rotation && da.rotation.entries.length > 0) {
@@ -55,6 +45,7 @@ async function getCalendarData(userId: string) {
           dayOfWeek: da.dayOfWeek,
           order: da.order,
           rotationId: da.rotationId,
+          startDate: da.startDate.toISOString(),
           workoutType: null,
           rotation: {
             id: da.rotation.id,
@@ -72,6 +63,7 @@ async function getCalendarData(userId: string) {
           dayOfWeek: da.dayOfWeek,
           order: da.order,
           rotationId: null,
+          startDate: da.startDate.toISOString(),
           workoutType: { id: da.workoutType.id, name: da.workoutType.name, color: da.workoutType.color },
           rotation: null,
         };
@@ -81,7 +73,6 @@ async function getCalendarData(userId: string) {
     .filter((s): s is NonNullable<typeof s> => s !== null);
 
   return {
-    startDate: startDate.toISOString(),
     endDate: null,
     slots,
     sessions: sessions.map((s) => ({
